@@ -26,6 +26,8 @@ typedef struct {
     dx_fs_t *fs;                  /* document root handle; NULL serves no files */
     dx_mime_t *mime;              /* extension mapping; NULL means octet-stream */
     dx_static_opts_t static_opts; /* sendfile, etag, cache-control, ... */
+    /* Connection lifecycle. */
+    dx_lifecycle_opts_t life; /* keep-alive budget and timeouts */
 } dx_server_config_t;
 
 /*

@@ -76,7 +76,7 @@ EX_SRC := $(wildcard $(EXAMPLES)/*.c)
 EX_BINS := $(patsubst $(EXAMPLES)/%.c,$(BUILD)/%,$(EX_SRC))
 
 .PHONY: all release debug profile asan tsan examples \
-        test test-unit test-asan test-tsan \
+        test test-unit test-asan test-tsan test-c10k \
         lint format format-check coverage bench stress fuzz valgrind \
         install uninstall docker clean distclean help
 
@@ -230,6 +230,13 @@ bench:
 
 stress:
 	@echo "stress harness lands in v0.7; nothing to run yet"
+
+# C10K check: hold N idle connections open at once. N defaults to 10000 and
+# can be overridden: make test-c10k N=2000
+N ?= 10000
+
+test-c10k: release
+	@python3 tests/c10k_test.py $(N) $(BIN)/dantrix
 
 # Fuzzers. Without clang/libFuzzer the standalone deterministic drivers run
 # the same invariant checks with plain gcc.

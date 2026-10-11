@@ -52,6 +52,9 @@ typedef struct {
     int minor_version; /* 0 for HTTP/1.0, 1 for HTTP/1.1 */
     dx_http_header_t headers[DX_MAX_HEADERS_LIMIT];
     size_t num_headers;
+    /* Parsed Content-Length of the request body, for the drain path. */
+    uint64_t content_length;
+    bool has_content_length;
 } dx_http_request_t;
 
 typedef enum { DX_PS_REQUEST_LINE = 0, DX_PS_HEADERS, DX_PS_DONE } dx_parse_state_t;

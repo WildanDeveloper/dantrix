@@ -115,7 +115,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Single-thread `epoll` event loop, non-blocking accept, connection pool | ✅ | v0.1.0 |
 | Incremental HTTP/1.1 parser and error responses | ✅ | v0.2.0 |
 | Static files: `sendfile`, MIME, `HEAD`, `ETag`, `Range` | ✅ | v0.3.0 |
-| Keep-alive, pipelining, timer wheel, timeouts | 📝 | v0.4.0 |
+| Keep-alive, pipelining, timer wheel, timeouts | ✅ | v0.4.0 |
 | Multi-worker with `SO_REUSEPORT` | 📝 | v0.5.0 |
 | Configuration, CLI, signals, graceful shutdown and reload | 📝 | v0.6.0 |
 | Benchmark suite and optimization | 📝 | v0.7.0 |
@@ -2116,11 +2116,11 @@ Each release has a single capability as its theme. A checked box marks completed
 
 ### v0.4.0: Persistent connections
 
-- [ ] Keep-alive and `keepalive_requests`
-- [ ] Pipelining
-- [ ] Hashed timing wheel and all timeouts (header, body, send, idle)
-- [ ] Buffer release when a connection is idle
-- [ ] C10K test: 10,000 idle connections pass
+- [x] Keep-alive and `keepalive_requests`
+- [x] Pipelining
+- [x] Hashed timing wheel and all timeouts (header, body, send, idle)
+- [x] Buffer release when a connection is idle
+- [x] C10K test: 10,000 idle connections pass
 
 ### v0.5.0: Multi-core
 

@@ -60,6 +60,8 @@ jobs:
         run: python3 tests/smoke_test.py build/dantrix-asan
       - name: Parser fuzz harness (deterministic standalone driver)
         run: make fuzz
+      - name: C10K check (2000 held connections)
+        run: make test-c10k N=2000
 
   lint:
     name: lint

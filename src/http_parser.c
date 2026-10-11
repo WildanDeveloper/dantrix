@@ -305,6 +305,8 @@ dx_parse_result_t dx_http_parser_feed(dx_http_parser_t *p, const unsigned char *
                     if (p->req.minor_version == 1 && !p->host_seen) {
                         return parser_fail(p, 400);
                     }
+                    p->req.has_content_length = p->content_length_seen;
+                    p->req.content_length = (uint64_t)p->content_length;
                     p->state = DX_PS_DONE;
                     if (consumed != NULL) {
                         *consumed = i + 1u;

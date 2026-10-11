@@ -110,7 +110,7 @@ const char *dx_http_status_reason(int status)
  */
 static size_t response_assemble(char *out, size_t cap, int status, const char *extra_headers,
                                 const char *content_type, const char *body, size_t content_length,
-                                bool omit_body, bool body_present)
+                                bool omit_body, bool body_present, const char *connection)
 {
     strbuf_t sb;
     char date[40];
@@ -153,7 +153,11 @@ static size_t response_assemble(char *out, size_t cap, int status, const char *e
     sb_append_num(&sb, (unsigned long long)content_length);
     sb_append_str(&sb, "\r\n");
 
-    sb_append_str(&sb, "Connection: close\r\n");
+    if (connection != NULL && connection[0] != '\0') {
+        sb_append_str(&sb, "Connection: ");
+        sb_append_str(&sb, connection);
+        sb_append_str(&sb, "\r\n");
+    }
     sb_append_str(&sb, "X-Content-Type-Options: nosniff\r\n");
 
     if (extra_headers != NULL) {
@@ -176,18 +180,33 @@ size_t dx_http_response_build(char *out, size_t cap, int status, const char *ext
                               bool omit_body)
 {
     return response_assemble(out, cap, status, extra_headers, content_type, body, body_len,
-                             omit_body, true);
+                             omit_body, true, "close");
+}
+
+size_t dx_http_response_build_ex(char *out, size_t cap, int status, const char *extra_headers,
+                                 const char *content_type, const char *body, size_t body_len,
+                                 bool omit_body, const char *connection)
+{
+    return response_assemble(out, cap, status, extra_headers, content_type, body, body_len,
+                             omit_body, true, connection);
 }
 
 size_t dx_http_response_headers(char *out, size_t cap, int status, const char *extra_headers,
-                                const char *content_type, size_t content_length, bool omit_body)
+                                const char *content_type, size_t content_length, bool omit_body,
+                                const char *connection)
 {
     /* No body bytes follow: Content-Length describes the streamed file. */
     return response_assemble(out, cap, status, extra_headers, content_type, NULL, content_length,
-                             omit_body, false);
+                             omit_body, false, connection);
 }
 
 size_t dx_http_response_error(char *out, size_t cap, int status, const char *extra_headers)
+{
+    return dx_http_response_error_ex(out, cap, status, extra_headers, "close");
+}
+
+size_t dx_http_response_error_ex(char *out, size_t cap, int status, const char *extra_headers,
+                                 const char *connection)
 {
     /*
      * Fixed body: the status and reason are server controlled, so no client
@@ -211,8 +230,8 @@ size_t dx_http_response_error(char *out, size_t cap, int status, const char *ext
         return 0;
     }
 
-    return dx_http_response_build(out, cap, status, extra_headers, "text/html; charset=utf-8", body,
-                                  b.len, false);
+    return dx_http_response_build_ex(out, cap, status, extra_headers, "text/html; charset=utf-8",
+                                     body, b.len, false, connection);
 }
 
 dx_dispatch_t dx_http_dispatch_method(const dx_http_request_t *req, const unsigned char *base,

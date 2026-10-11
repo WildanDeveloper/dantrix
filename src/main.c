@@ -8,6 +8,7 @@
  */
 #include <errno.h>
 #include <getopt.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,45 @@
 #define DX_EXIT_FATAL 1
 #define DX_EXIT_USAGE 2
 
+/*
+ * Parse a duration into milliseconds: plain seconds ("30"), seconds with a
+ * suffix ("30s", "2m") or milliseconds ("250ms"). Returns 0 when unknown.
+ */
+static int parse_duration_ms(const char *value, uint64_t *out_ms)
+{
+    unsigned long long v = 0;
+    size_t len = strlen(value);
+    size_t i = 0;
+    unsigned long long mult;
+
+    if (len == 0) {
+        return 0;
+    }
+    while (i < len && value[i] >= '0' && value[i] <= '9') {
+        if (v > (ULLONG_MAX - 9ULL) / 10ULL) {
+            return 0; /* overflow: the suffix can only make it worse */
+        }
+        v = v * 10ULL + (unsigned long long)(value[i] - '0');
+        i++;
+    }
+    if (i == 0) {
+        return 0; /* no digits */
+    }
+    if (strcmp(value + i, "") == 0 || strcmp(value + i, "s") == 0) {
+        mult = 1000ULL;
+    } else if (strcmp(value + i, "ms") == 0) {
+        mult = 1ULL;
+    } else if (strcmp(value + i, "m") == 0) {
+        mult = 60000ULL;
+    } else {
+        return 0;
+    }
+    if (v > UINT64_MAX / mult) {
+        return 0;
+    }
+    *out_ms = (uint64_t)v * mult;
+    return 1;
+}
 /* Parse an on/off flag. Returns 1 when parsed, 0 when the word is unknown. */
 static int parse_on_off(const char *value, bool *out)
 {
@@ -81,6 +121,15 @@ static void print_usage(FILE *out)
             "      --max-header-size N  Whole-request limit in bytes (k/m/g"
             " suffixes allowed)      [%d]\n"
             "      --max-headers N      Maximum header count per request   [%d]\n"
+            "      --max-body-size N    Request body read and discarded     [1m]\n"
+            "\n"
+            "Connections and timeouts:\n"
+            "      --keepalive-requests N  Requests before closing       [1000]\n"
+            "      --header-timeout T   Request header limit (s/ms/m)   [10s]\n"
+            "      --body-timeout T     Request body limit              [30s]\n"
+            "      --send-timeout T     Response write limit            [30s]\n"
+            "      --keepalive-timeout T Idle connection limit          [30s]\n"
+            "      --shutdown-timeout T Graceful shutdown budget        [10s]\n"
             "\n"
             "Logging:\n"
             "      --error-log DEST     stderr, stdout, or a file path     [stderr]\n"
@@ -136,10 +185,18 @@ int main(int argc, char **argv)
     bool hidden_files = false;
     bool server_tokens = true;
     size_t sendfile_chunk = 1024u * 1024u;
+    size_t keepalive_requests = 1000u;
+    uint64_t header_timeout_ms = 10000u;
+    uint64_t body_timeout_ms = 30000u;
+    uint64_t send_timeout_ms = 30000u;
+    uint64_t keepalive_timeout_ms = 30000u;
+    uint64_t shutdown_timeout_ms = 10000u;
+    uint64_t max_body_size = 1024u * 1024u;
     int port = DX_DEFAULT_PORT;
     int backlog = DX_DEFAULT_BACKLOG;
     int max_conns_arg = DX_DEFAULT_MAX_CONNS;
     int max_headers_arg = 100;
+    int keepalive_requests_int = 1000;
     size_t max_request_line = 8u * 1024u;
     size_t max_header_size = 16u * 1024u;
     int workers = 1;
@@ -174,6 +231,13 @@ int main(int argc, char **argv)
                                               {"default-type", required_argument, NULL, 'O'},
                                               {"cache-control", required_argument, NULL, 'C'},
                                               {"server-tokens", required_argument, NULL, 'Q'},
+                                              {"keepalive-requests", required_argument, NULL, 'k'},
+                                              {"header-timeout", required_argument, NULL, 't'},
+                                              {"body-timeout", required_argument, NULL, 'y'},
+                                              {"send-timeout", required_argument, NULL, 'j'},
+                                              {"keepalive-timeout", required_argument, NULL, 'v'},
+                                              {"shutdown-timeout", required_argument, NULL, 'd'},
+                                              {"max-body-size", required_argument, NULL, 'Z'},
                                               {"max-request-line", required_argument, NULL, 'R'},
                                               {"max-header-size", required_argument, NULL, 'H'},
                                               {"max-headers", required_argument, NULL, 'N'},
@@ -307,6 +371,49 @@ int main(int argc, char **argv)
                 return DX_EXIT_USAGE;
             }
             break;
+        case 'k':
+            if (!dx_parse_int(optarg, 1, 10000000, &keepalive_requests_int)) {
+                fprintf(stderr, "dantrix: invalid --keepalive-requests '%s'\n", optarg);
+                return DX_EXIT_USAGE;
+            }
+            keepalive_requests = (size_t)keepalive_requests_int;
+            break;
+        case 't':
+            if (!parse_duration_ms(optarg, &header_timeout_ms) || header_timeout_ms == 0) {
+                fprintf(stderr, "dantrix: invalid --header-timeout '%s'\n", optarg);
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 'y':
+            if (!parse_duration_ms(optarg, &body_timeout_ms) || body_timeout_ms == 0) {
+                fprintf(stderr, "dantrix: invalid --body-timeout '%s'\n", optarg);
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 'j':
+            if (!parse_duration_ms(optarg, &send_timeout_ms) || send_timeout_ms == 0) {
+                fprintf(stderr, "dantrix: invalid --send-timeout '%s'\n", optarg);
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 'v':
+            if (!parse_duration_ms(optarg, &keepalive_timeout_ms) || keepalive_timeout_ms == 0) {
+                fprintf(stderr, "dantrix: invalid --keepalive-timeout '%s'\n", optarg);
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 'd':
+            if (!parse_duration_ms(optarg, &shutdown_timeout_ms)) {
+                fprintf(stderr, "dantrix: invalid --shutdown-timeout '%s'\n", optarg);
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 'Z':
+            if (!dx_parse_size(optarg, &max_body_size)) {
+                fprintf(stderr, "dantrix: invalid --max-body-size '%s'\n", optarg);
+                return DX_EXIT_USAGE;
+            }
+            break;
         case 'A':
             if (strcmp(optarg, "off") == 0) {
                 access_dest = NULL;
@@ -410,6 +517,13 @@ int main(int argc, char **argv)
     cfg.static_opts.server_tokens = server_tokens;
     cfg.static_opts.hidden_files = hidden_files;
     cfg.static_opts.cache_control = cache_control;
+    cfg.life.keepalive_requests = keepalive_requests;
+    cfg.life.header_timeout_ms = header_timeout_ms;
+    cfg.life.body_timeout_ms = body_timeout_ms;
+    cfg.life.send_timeout_ms = send_timeout_ms;
+    cfg.life.keepalive_timeout_ms = keepalive_timeout_ms;
+    cfg.life.shutdown_timeout_ms = shutdown_timeout_ms;
+    cfg.life.max_body_size = max_body_size;
 
     if (dx_server_run(&cfg) != 0) {
         rc = DX_EXIT_FATAL;

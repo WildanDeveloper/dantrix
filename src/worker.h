@@ -29,6 +29,17 @@ typedef struct {
     const char *cache_control; /* Cache-Control value, "" to omit */
 } dx_static_opts_t;
 
+/* Connection lifecycle options (v0.4), durations in milliseconds. */
+typedef struct {
+    size_t keepalive_requests;     /* requests before the connection closes */
+    uint64_t header_timeout_ms;    /* limit for a complete request header block */
+    uint64_t body_timeout_ms;      /* limit between body chunks */
+    uint64_t send_timeout_ms;      /* limit between write progress steps */
+    uint64_t keepalive_timeout_ms; /* idle time before the socket is closed */
+    uint64_t shutdown_timeout_ms;  /* graceful shutdown budget */
+    uint64_t max_body_size;        /* request body bytes read and discarded */
+} dx_lifecycle_opts_t;
+
 typedef struct dx_worker {
     int epfd;                               /* epoll instance, -1 when not running */
     int listen_fd;                          /* listening socket, -1 when not running */
@@ -41,22 +52,27 @@ typedef struct dx_worker {
     dx_fs_t *fs;                            /* document root, borrowed */
     dx_mime_t *mime;                        /* MIME mapping, borrowed */
     dx_static_opts_t static_opts;           /* static serving options */
+    dx_lifecycle_opts_t life;               /* keep-alive and timeout settings */
+    dx_timer_wheel_t *timers;               /* one timer node per connection */
+    bool draining;                          /* shutdown: listener is detached */
+    uint64_t shutdown_deadline_ms;          /* when draining started */
     size_t max_conns;                       /* mirrors the pool cap for quick checks */
     const volatile sig_atomic_t *stop_flag; /* borrowed; NULL means never stop */
     uint64_t accepted_total;
     uint64_t rejected_total;
     uint64_t closed_total;
+    uint64_t requests_total;
 } dx_worker_t;
 
 /*
  * Initialize a worker around an already listening descriptor. fs, mime and
- * the static options are borrowed for the lifetime of the worker; a NULL fs
+ * the option structs are borrowed for the lifetime of the worker; a NULL fs
  * disables file serving (every path answers 404). Returns 0 or -1.
  */
 int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *log,
                    const volatile sig_atomic_t *stop_flag, const dx_http_limits_t *limits,
                    dx_log_t *access_log, dx_log_format_t log_format, dx_fs_t *fs, dx_mime_t *mime,
-                   const dx_static_opts_t *static_opts);
+                   const dx_static_opts_t *static_opts, const dx_lifecycle_opts_t *life);
 
 /* Release every resource the worker owns. Safe to call after a failed init. */
 void dx_worker_destroy(dx_worker_t *w);

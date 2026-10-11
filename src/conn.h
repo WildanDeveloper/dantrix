@@ -15,11 +15,13 @@
 
 #include "buffer.h"
 #include "http_parser.h"
+#include "timer.h"
 
 typedef enum {
     DX_CONN_FREE = 0, /* slot is in the free list, owns nothing */
-    DX_CONN_READING,  /* waiting for request bytes */
+    DX_CONN_READING,  /* reading request headers (or discarding a body) */
     DX_CONN_WRITING,  /* response pending, EPOLLOUT registered */
+    DX_CONN_IDLE,     /* keep-alive: waiting for the next request, buffer free */
     DX_CONN_CLOSING   /* being torn down */
 } dx_conn_state_t;
 
@@ -45,13 +47,20 @@ typedef struct {
     uint32_t generation; /* bumped on every acquire */
     uint64_t id;         /* stable ordinal for logging, never reused */
     dx_conn_state_t state;
-    bool eof;                  /* peer sent FIN: finish the reply, then close */
-    bool close_after_response; /* v0.2 always closes; keep-alive lands in v0.4 */
-    dx_buffer_t buf;           /* request bytes, then the pending response */
-    unsigned char *buf_mem;    /* pool slot to hand back, NULL when malloc'd */
-    int file_fd;               /* file being streamed, -1 when none */
-    uint64_t file_offset;      /* next byte to read from file_fd */
-    uint64_t file_left;        /* body bytes still to send */
+    bool eof;               /* peer sent FIN: finish the reply, then close */
+    bool close_conn;        /* close once the current response has been fully sent */
+    bool response_pending;  /* response bytes sit in buf and are not all sent */
+    dx_buffer_t buf;        /* request bytes, then the response headers */
+    unsigned char *buf_mem; /* pool slot to hand back, NULL when malloc'd */
+    unsigned char *hold;    /* pipelined bytes parked while a response is staged */
+    size_t hold_len;
+    int file_fd;           /* file being streamed, -1 when none */
+    uint64_t file_offset;  /* next byte to read from file_fd */
+    uint64_t file_left;    /* response body bytes still to send */
+    uint64_t body_left;    /* request body bytes still to be discarded */
+    size_t body_offset;    /* where the body starts inside the read buffer */
+    uint64_t requests;     /* requests already answered on this connection */
+    dx_timer_node_t timer; /* the single timer this connection owns */
     dx_http_parser_t parser;
     dx_access_t acc;
     char peer[64]; /* formatted client address, "-" when unknown */
@@ -114,6 +123,15 @@ void dx_conn_release_buffer(dx_conn_t *conn, dx_bufpool_t *pool);
 /* Close a streamed file, if any. Safe to call at any time. */
 void dx_conn_release_file(dx_conn_t *conn);
 
+/* Release pipelined bytes parked while a response was staged. */
+void dx_conn_release_hold(dx_conn_t *conn);
+
+/*
+ * Record a status code for the access log without going through a normal
+ * response (used by the 408 written on a header timeout).
+ */
+void dx_conn_record_status(dx_conn_t *conn, int status);
+
 /* Reset pointers and state without changing the generation. */
 void dx_conn_reset(dx_conn_t *conn);
 
@@ -131,5 +149,22 @@ int dx_conn_on_readable(struct dx_worker *w, dx_conn_t *conn);
 
 /* Drain the pending response. Returns 0 or -1 (close). */
 int dx_conn_on_writable(struct dx_worker *w, dx_conn_t *conn);
+
+/*
+ * Arm a read buffer when the connection is idle and the peer started sending.
+ * The idle state holds no buffer, so the slot is taken back here.
+ * Returns 0 on success, -1 when no buffer is available.
+ */
+int dx_conn_ensure_buffer(struct dx_worker *w, dx_conn_t *conn);
+
+/*
+ * Refresh the connection timer for its current state: header timeout while
+ * reading, body timeout while discarding, send timeout while writing, and the
+ * keep-alive timeout while idle. Never fails.
+ */
+void dx_conn_arm_timer(struct dx_worker *w, dx_conn_t *conn);
+
+/* Milliseconds left on the connection timer, or -1 when it is not armed. */
+int64_t dx_conn_timer_left_ms(const struct dx_worker *w, const dx_conn_t *conn);
 
 #endif /* DX_CONN_H */

@@ -291,6 +291,15 @@ size_t dx_pool_active(const dx_pool_t *pool)
 /* The single body v0.2 serves when no document root is configured. */
 static const char conn_hello_body[] = "Dantrix " DX_VERSION_STRING ": the HTTP core is alive.\n";
 
+/* Forward declarations: the keep-alive helpers are shared by the static and
+ * the in-memory response paths, which live in different order in this file. */
+static int conn_after_response(struct dx_worker *w, dx_conn_t *conn);
+static bool response_keeps_alive(const struct dx_worker *w, const dx_conn_t *conn,
+                                 const dx_http_request_t *req, const unsigned char *base,
+                                 int status);
+static const char *connection_value(bool keep_alive, int minor_version);
+static int conn_hold_pipelined(dx_conn_t *conn, size_t leftover);
+
 void dx_conn_init(dx_conn_t *conn, int fd, const dx_http_limits_t *limits)
 {
     if (conn == NULL) {
@@ -299,11 +308,16 @@ void dx_conn_init(dx_conn_t *conn, int fd, const dx_http_limits_t *limits)
     conn->fd = fd;
     conn->state = DX_CONN_READING;
     conn->eof = false;
-    conn->close_after_response = false;
+    conn->close_conn = false;
     conn->buf_mem = NULL;
+    conn->hold = NULL;
+    conn->hold_len = 0;
     conn->file_fd = -1;
     conn->file_offset = 0;
     conn->file_left = 0;
+    conn->body_left = 0;
+    conn->requests = 0;
+    dx_timer_node_reset(&conn->timer);
     dx_buffer_init(&conn->buf, NULL, 0);
     dx_http_parser_init(&conn->parser, limits);
     memset(&conn->acc, 0, sizeof(conn->acc));
@@ -324,6 +338,28 @@ void dx_conn_release_file(dx_conn_t *conn)
     }
     conn->file_offset = 0;
     conn->file_left = 0;
+}
+
+/* Release pipelined bytes parked while a response was staged. */
+void dx_conn_release_hold(dx_conn_t *conn)
+{
+    if (conn == NULL) {
+        return;
+    }
+    if (conn->hold != NULL) {
+        free(conn->hold);
+        conn->hold = NULL;
+    }
+    conn->hold_len = 0;
+}
+
+void dx_conn_record_status(dx_conn_t *conn, int status)
+{
+    if (conn == NULL) {
+        return;
+    }
+    conn->acc.status = status;
+    conn->acc.body_bytes = 0;
 }
 
 void dx_conn_release_buffer(dx_conn_t *conn, dx_bufpool_t *pool)
@@ -359,9 +395,14 @@ bool dx_conn_has_pending(const dx_conn_t *conn)
     return (conn != NULL) && dx_buffer_readable(&conn->buf) > 0;
 }
 
+/*
+ * True while the server still owes the client bytes: a staged response that
+ * is not fully written, or a file body in flight. Request bytes sitting in
+ * the same buffer do not count: they are input, not output.
+ */
 bool dx_conn_has_work(const dx_conn_t *conn)
 {
-    return (conn != NULL) && (dx_buffer_readable(&conn->buf) > 0 || conn->file_left > 0);
+    return (conn != NULL) && (conn->response_pending || conn->file_left > 0);
 }
 
 /*
@@ -388,6 +429,7 @@ static int conn_flush(struct dx_worker *w, dx_conn_t *conn)
         }
         if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             conn->state = DX_CONN_WRITING;
+            conn->response_pending = true;
             return 0;
         }
         dx_log_write(dx_worker_log(w), DX_LOG_DEBUG, "conn %llu: send: %s",
@@ -395,11 +437,7 @@ static int conn_flush(struct dx_worker *w, dx_conn_t *conn)
         return -1;
     }
     conn->state = DX_CONN_READING;
-    /* A streamed file counts as pending output: the connection stays open
-     * until the last body byte is on the wire. */
-    if ((conn->close_after_response && conn->file_left == 0) || conn->eof) {
-        return -1;
-    }
+    conn->response_pending = false;
     return 0;
 }
 
@@ -473,9 +511,84 @@ static int conn_flush_file(struct dx_worker *w, dx_conn_t *conn)
         return -1;
     }
     conn->state = DX_CONN_READING;
-    if (conn->close_after_response && conn->file_left == 0) {
+    return 0;
+}
+
+/*
+ * Arm the one timer this connection owns, choosing the deadline from its
+ * current state. A refresh that moves less than a second is free, so calling
+ * this on every event is cheap.
+ */
+void dx_conn_arm_timer(struct dx_worker *w, dx_conn_t *conn)
+{
+    uint64_t now;
+    uint64_t delay;
+
+    if (w == NULL || conn == NULL || w->timers == NULL) {
+        return;
+    }
+    now = (uint64_t)dx_now_ms();
+    switch (conn->state) {
+    case DX_CONN_WRITING:
+        delay = w->life.send_timeout_ms;
+        break;
+    case DX_CONN_IDLE:
+        delay = w->life.keepalive_timeout_ms;
+        break;
+    case DX_CONN_READING:
+        delay = (conn->body_left > 0) ? w->life.body_timeout_ms : w->life.header_timeout_ms;
+        break;
+    default:
+        return;
+    }
+    if (delay == 0) {
+        dx_timer_wheel_cancel(w->timers, &conn->timer);
+        return;
+    }
+    (void)dx_timer_wheel_refresh(w->timers, &conn->timer, delay, now);
+    conn->timer.owner = conn;
+}
+
+int64_t dx_conn_timer_left_ms(const struct dx_worker *w, const dx_conn_t *conn)
+{
+    uint64_t deadline;
+
+    if (w == NULL || conn == NULL || w->timers == NULL) {
         return -1;
     }
+    deadline = dx_timer_node_deadline(&conn->timer);
+    if (deadline == 0) {
+        return -1;
+    }
+    {
+        uint64_t now = (uint64_t)dx_now_ms();
+
+        if (deadline <= now) {
+            return 0;
+        }
+        return (int64_t)(deadline - now);
+    }
+}
+
+int dx_conn_ensure_buffer(struct dx_worker *w, dx_conn_t *conn)
+{
+    unsigned char *mem;
+
+    if (w == NULL || conn == NULL) {
+        return -1;
+    }
+    if (conn->buf.data != NULL) {
+        return 0;
+    }
+    mem = (unsigned char *)dx_bufpool_acquire(w->bufs, DX_CONN_BUF_SIZE);
+    if (mem == NULL) {
+        dx_log_write(dx_worker_log(w), DX_LOG_WARN,
+                     "closing connection: no read buffer available (%zu in use)",
+                     dx_bufpool_outstanding(w->bufs));
+        return -1;
+    }
+    conn->buf_mem = mem;
+    dx_buffer_init(&conn->buf, mem, DX_CONN_BUF_SIZE);
     return 0;
 }
 
@@ -491,7 +604,7 @@ int dx_conn_on_writable(struct dx_worker *w, dx_conn_t *conn)
     if (conn->file_left > 0 && conn_flush_file(w, conn) != 0) {
         return -1;
     }
-    return 0;
+    return conn_after_response(w, conn);
 }
 
 /* Bounded copy for access-log fields; always NUL terminates. */
@@ -552,8 +665,9 @@ static void access_fill(dx_conn_t *conn, const dx_http_request_t *req, const uns
 
 /*
  * Stage the response bytes for the flush loop. The caller consumed the request
- * bytes first and v0.2 closes after every response, so overwriting the buffer
- * is safe: nothing else shares the allocation at this point.
+ * bytes first and the buffer belongs to this connection alone, so overwriting
+ * it is safe; the pipelined bytes that followed are lost unless the caller
+ * copied them out (see conn_process_requests()).
  */
 static int conn_stage_response(dx_conn_t *conn, const char *resp, size_t len)
 {
@@ -563,7 +677,7 @@ static int conn_stage_response(dx_conn_t *conn, const char *resp, size_t len)
     memcpy(conn->buf.data, resp, len);
     conn->buf.off = 0;
     conn->buf.len = len;
-    conn->close_after_response = true;
+    conn->response_pending = true;
     return 0;
 }
 
@@ -609,8 +723,43 @@ static void conn_discard_input(dx_conn_t *conn)
  * -1 on a fatal error. Every response path sets conn->close_after_response
  * because v0.3 still closes after every response.
  */
+/*
+ * Stage the response bytes, push them out (headers first, then the streamed
+ * file body) and run the post-response step. Single exit point for every
+ * response so the keep-alive rules cannot be forgotten on one path.
+ */
+static int conn_finish(struct dx_worker *w, dx_conn_t *conn, const char *resp, size_t len)
+{
+    if (len == 0 || conn_stage_response(conn, resp, len) != 0) {
+        return -1;
+    }
+    if (conn_flush(w, conn) != 0) {
+        return -1;
+    }
+    if (conn->file_left > 0 && conn_flush_file(w, conn) != 0) {
+        return -1;
+    }
+    return conn_after_response(w, conn);
+}
+
+/* Stage an error page: these responses always end the connection. */
+static int conn_finish_error(struct dx_worker *w, dx_conn_t *conn, int status,
+                             const char *extra_headers)
+{
+    char tmp[DX_RESPONSE_TMP];
+    size_t len = dx_http_response_error(tmp, sizeof(tmp), status, extra_headers);
+
+    conn->close_conn = true;
+    return conn_finish(w, conn, tmp, len);
+}
+
+/*
+ * Serve a static request end to end: resolve the target, open the file,
+ * evaluate the conditional and Range headers, stage the response headers and
+ * arm the file transfer.
+ */
 static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http_request_t *req,
-                             const unsigned char *base, bool head)
+                             const unsigned char *base, bool head, size_t consumed)
 {
     const char *target = (const char *)base + req->target_off;
     size_t target_len = req->target_len;
@@ -626,6 +775,8 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
     dx_path_opts_t path_opts;
     dx_open_result_t opened;
     dx_open_t open_result;
+    bool keep_alive;
+    const char *connection;
     size_t voff;
     size_t vlen;
 
@@ -633,22 +784,12 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
     path_opts.hidden_files = w->static_opts.hidden_files;
     status = dx_path_resolve(target, target_len, &path_opts, &resolved);
     if (status != 0) {
-        len = dx_http_response_error(tmp, sizeof(tmp), status, NULL);
         access_fill(conn, req, base, status, 0);
-        if (len == 0 || conn_stage_response(conn, tmp, len) != 0) {
-            return -1;
-        }
-        return conn_flush(w, conn);
+        return conn_finish_error(w, conn, status, NULL);
     }
-
     if (w->fs == NULL) {
-        status = 404;
-        len = dx_http_response_error(tmp, sizeof(tmp), status, NULL);
-        access_fill(conn, req, base, status, 0);
-        if (len == 0 || conn_stage_response(conn, tmp, len) != 0) {
-            return -1;
-        }
-        return conn_flush(w, conn);
+        access_fill(conn, req, base, 404, 0);
+        return conn_finish_error(w, conn, 404, NULL);
     }
 
     /* 2. Open below the document root. */
@@ -656,16 +797,21 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
         dx_fs_open(w->fs, resolved.path, resolved.had_trailing_slash, location, sizeof(location),
                    &location_len, served_file, sizeof(served_file), &opened);
 
+    keep_alive =
+        response_keeps_alive(w, conn, req, base, (open_result == DX_OPEN_REDIRECT) ? 301 : 200);
+    connection = connection_value(keep_alive, req->minor_version);
+    conn->close_conn = !keep_alive;
+
     if (open_result == DX_OPEN_REDIRECT) {
         extra_len = (size_t)snprintf(extra, sizeof(extra), "Location: %.*s\r\n", (int)location_len,
                                      location);
-        status = 301;
-        len = dx_http_response_build(tmp, sizeof(tmp), status, extra, NULL, NULL, 0u, true);
-        access_fill(conn, req, base, status, 0);
-        if (len == 0 || extra_len >= sizeof(extra) || conn_stage_response(conn, tmp, len) != 0) {
-            return -1;
+        if (extra_len >= sizeof(extra)) {
+            return conn_finish_error(w, conn, 500, NULL);
         }
-        return conn_flush(w, conn);
+        access_fill(conn, req, base, 301, 0);
+        len = dx_http_response_build_ex(tmp, sizeof(tmp), 301, extra, NULL, NULL, 0u, true,
+                                        connection);
+        return conn_finish(w, conn, tmp, len);
     }
 
     if (open_result == DX_OPEN_LISTING) {
@@ -673,32 +819,20 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
         size_t body_len = dx_fs_list(w->fs, resolved.path, listing, sizeof(listing));
 
         if (body_len == 0) {
-            status = 403; /* unreadable or too large to render */
-            len = dx_http_response_error(tmp, sizeof(tmp), status, NULL);
-            access_fill(conn, req, base, status, 0);
-            if (len == 0 || conn_stage_response(conn, tmp, len) != 0) {
-                return -1;
-            }
-            return conn_flush(w, conn);
+            access_fill(conn, req, base, 403, 0);
+            return conn_finish_error(w, conn, 403, NULL);
         }
-        len = dx_http_response_build(tmp, sizeof(tmp), 200, NULL, "text/html; charset=utf-8",
-                                     listing, body_len, head);
         access_fill(conn, req, base, 200, head ? 0u : body_len);
-        if (len == 0 || conn_stage_response(conn, tmp, len) != 0) {
-            return -1;
-        }
-        return conn_flush(w, conn);
+        len = dx_http_response_build_ex(tmp, sizeof(tmp), 200, NULL, "text/html; charset=utf-8",
+                                        listing, body_len, head, connection);
+        return conn_finish(w, conn, tmp, len);
     }
 
     if (open_result != DX_OPEN_OK) {
         status =
             (open_result == DX_OPEN_FORBIDDEN) ? 403 : ((open_result == DX_OPEN_ERROR) ? 500 : 404);
-        len = dx_http_response_error(tmp, sizeof(tmp), status, NULL);
         access_fill(conn, req, base, status, 0);
-        if (len == 0 || conn_stage_response(conn, tmp, len) != 0) {
-            return -1;
-        }
-        return conn_flush(w, conn);
+        return conn_finish_error(w, conn, status, NULL);
     }
 
     /* 3. Validators for the opened file. */
@@ -730,6 +864,10 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
             extra_len += (size_t)snprintf(extra + extra_len, sizeof(extra) - extra_len,
                                           "Cache-Control: %s\r\n", w->static_opts.cache_control);
         }
+        if (extra_len >= sizeof(extra)) {
+            (void)close(opened.fd);
+            return conn_finish_error(w, conn, 500, NULL);
+        }
 
         /* Conditional requests: If-None-Match wins over If-Modified-Since. */
         if (etag[0] != '\0' &&
@@ -741,14 +879,11 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
             not_modified = true;
         }
         if (not_modified) {
-            len = dx_http_response_build(tmp, sizeof(tmp), 304, extra, NULL, NULL, 0u, true);
             access_fill(conn, req, base, 304, 0);
-            if (len == 0 || extra_len >= sizeof(extra) ||
-                conn_stage_response(conn, tmp, len) != 0) {
-                return -1;
-            }
+            len = dx_http_response_build_ex(tmp, sizeof(tmp), 304, extra, NULL, NULL, 0u, true,
+                                            connection);
             (void)close(opened.fd);
-            return conn_flush(w, conn);
+            return conn_finish(w, conn, tmp, len);
         }
 
         /* 4. Range handling (GET only; HEAD always describes the full file). */
@@ -778,15 +913,14 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
                                        "Content-Range: bytes */%llu\r\nAccept-Ranges: bytes\r\n",
                                        (unsigned long long)size);
 
-                len = dx_http_response_build(tmp, sizeof(tmp), 416, extra, NULL, NULL, 0u, true);
                 access_fill(conn, req, base, 416, 0);
-                if (len == 0 || written < 0 || (size_t)written >= sizeof(extra) - extra_len ||
-                    conn_stage_response(conn, tmp, len) != 0) {
-                    (void)close(opened.fd);
-                    return -1;
-                }
                 (void)close(opened.fd);
-                return conn_flush(w, conn);
+                if (written < 0 || (size_t)written >= sizeof(extra) - extra_len) {
+                    return conn_finish_error(w, conn, 500, NULL);
+                }
+                len = dx_http_response_build_ex(tmp, sizeof(tmp), 416, extra, NULL, NULL, 0u, true,
+                                                connection);
+                return conn_finish(w, conn, tmp, len);
             }
 
             if (range_result == DX_RANGE_OK) {
@@ -800,39 +934,223 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
             }
             extra_len += (size_t)snprintf(extra + extra_len, sizeof(extra) - extra_len,
                                           "Accept-Ranges: bytes\r\n");
+            if (extra_len >= sizeof(extra)) {
+                (void)close(opened.fd);
+                return conn_finish_error(w, conn, 500, NULL);
+            }
 
             (void)dx_mime_content_type(w->mime,
                                        (served_file[0] != '\0') ? served_file : resolved.path,
                                        content_type, sizeof(content_type));
 
             status = partial ? 206 : 200;
-            len = dx_http_response_headers(tmp, sizeof(tmp), status, extra, content_type,
-                                           (size_t)body_len, head);
             access_fill(conn, req, base, status, head ? 0u : (size_t)body_len);
-            if (len == 0 || extra_len >= sizeof(extra) ||
-                conn_stage_response(conn, tmp, len) != 0) {
+            len = dx_http_response_headers(tmp, sizeof(tmp), status, extra, content_type,
+                                           (size_t)body_len, head, connection);
+            if (len == 0) {
                 (void)close(opened.fd);
-                return -1;
+                return conn_finish_error(w, conn, 500, NULL);
             }
 
             if (head) {
                 /* HEAD sends identical headers and no body. */
                 (void)close(opened.fd);
-                return conn_flush(w, conn);
+                return conn_finish(w, conn, tmp, len);
             }
             /* Arm the transfer; the body is streamed after the headers. */
             conn->file_fd = opened.fd;
             conn->file_offset = start;
             conn->file_left = body_len;
+
+            /*
+             * The request is done; what follows in the buffer belongs to the
+             * next pipelined request, so it is parked before the response
+             * overwrites the buffer.
+             */
+            dx_buffer_consume(&conn->buf, consumed);
+            if (conn_hold_pipelined(conn, dx_buffer_readable(&conn->buf)) != 0) {
+                (void)close(opened.fd);
+                return -1;
+            }
         }
     }
+    return conn_finish(w, conn, tmp, len);
+}
 
-    if (conn_flush(w, conn) != 0) {
+/*
+ * Header token search: does a comma separated header value contain token?
+ * Case insensitive, with optional whitespace around the commas.
+ */
+static bool header_has_token(const char *value, size_t len, const char *token)
+{
+    size_t token_len = strlen(token);
+    size_t pos = 0;
+
+    while (pos < len) {
+        size_t start;
+        size_t item_len;
+
+        while (pos < len && (value[pos] == ',' || value[pos] == ' ' || value[pos] == '\t')) {
+            pos++;
+        }
+        start = pos;
+        while (pos < len && value[pos] != ',') {
+            pos++;
+        }
+        item_len = pos - start;
+        while (item_len > 0 &&
+               (value[start + item_len - 1u] == ' ' || value[start + item_len - 1u] == '\t')) {
+            item_len--;
+        }
+        if (item_len == token_len && strncasecmp(value + start, token, token_len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Decide whether the connection survives the response that was just built.
+ * The rules come straight from the README: error statuses, a client requested
+ * close, an explicit HTTP/1.0 without keep-alive, the request budget and
+ * shutdown all end the connection.
+ */
+static bool response_keeps_alive(const struct dx_worker *w, const dx_conn_t *conn,
+                                 const dx_http_request_t *req, const unsigned char *base,
+                                 int status)
+{
+    size_t voff;
+    size_t vlen;
+
+    if (status >= 400 || req == NULL || conn->eof || w->draining) {
+        return false;
+    }
+    if (w->life.keepalive_requests > 0 && conn->requests + 1u >= w->life.keepalive_requests) {
+        return false;
+    }
+    if (dx_http_request_find_header(req, base, "Connection", &voff, &vlen)) {
+        const char *value = (const char *)base + voff;
+
+        if (header_has_token(value, vlen, "close")) {
+            return false;
+        }
+        if (req->minor_version == 0) {
+            /* HTTP/1.0 needs an explicit keep-alive. */
+            return header_has_token(value, vlen, "keep-alive");
+        }
+    }
+    return req->minor_version == 1;
+}
+
+/* Connection header value that belongs in the response being built. */
+static const char *connection_value(bool keep_alive, int minor_version)
+{
+    if (!keep_alive) {
+        return "close";
+    }
+    return (minor_version == 0) ? "keep-alive" : NULL; /* 1.1 implies keep-alive */
+}
+
+/*
+ * Move the bytes that follow a request out of the read buffer before the
+ * response overwrites it. Only pipelining needs this, so the holdover is
+ * allocated on that path and freed as soon as the next request consumed it.
+ */
+static int conn_hold_pipelined(dx_conn_t *conn, size_t leftover)
+{
+    unsigned char *saved;
+
+    if (leftover == 0) {
+        return 0;
+    }
+    saved = (unsigned char *)malloc(leftover);
+    if (saved == NULL) {
         return -1;
     }
+    memcpy(saved, conn->buf.data + conn->buf.off, leftover);
+    conn->hold = saved;
+    conn->hold_len = leftover;
+    return 0;
+}
+
+/* Put held pipelined bytes back in front of the read buffer. */
+static int conn_restore_pipelined(struct dx_worker *w, dx_conn_t *conn)
+{
+    size_t len = conn->hold_len;
+
+    if (len == 0) {
+        return 0;
+    }
+    if (dx_conn_ensure_buffer(w, conn) != 0) {
+        free(conn->hold);
+        conn->hold = NULL;
+        conn->hold_len = 0;
+        return -1;
+    }
+    if (len > conn->buf.cap) {
+        /* Cannot happen: the holdover came out of this same buffer. */
+        free(conn->hold);
+        conn->hold = NULL;
+        conn->hold_len = 0;
+        return -1;
+    }
+    memcpy(conn->buf.data, conn->hold, len);
+    conn->buf.off = 0;
+    conn->buf.len = len;
+    free(conn->hold);
+    conn->hold = NULL;
+    conn->hold_len = 0;
+    return 0;
+}
+
+/*
+ * Push the staged response out and run the post-response step. Used where the
+ * bytes were staged earlier (file transfer, dispatch).
+ */
+static int conn_flush_out(struct dx_worker *w, dx_conn_t *conn)
+{
     if (conn->file_left > 0 && conn_flush_file(w, conn) != 0) {
         return -1;
     }
+    return conn_after_response(w, conn);
+}
+
+static int conn_process(struct dx_worker *w, dx_conn_t *conn);
+
+/*
+ * Called when the last byte of a response is on the wire. Closes the
+ * connection when the response said so, otherwise resets for the next request:
+ * pipelined bytes are answered first, and an empty connection goes idle with
+ * its read buffer released.
+ */
+static int conn_after_response(struct dx_worker *w, dx_conn_t *conn)
+{
+    if (conn->file_left > 0 || dx_conn_has_pending(conn)) {
+        return 0; /* more to send */
+    }
+    conn->requests++;
+    if (conn->close_conn || conn->eof) {
+        return -1;
+    }
+
+    /* Ready for the next request on the same connection. */
+    dx_http_parser_init(&conn->parser, &w->limits);
+    conn->close_conn = false;
+    conn->body_left = 0;
+    conn->state = DX_CONN_READING;
+
+    if (conn_restore_pipelined(w, conn) != 0) {
+        return -1;
+    }
+    if (dx_conn_has_pending(conn)) {
+        /* Pipelined request: answer it before waiting for more bytes. */
+        return conn_process(w, conn);
+    }
+
+    /* Idle: the read buffer goes back to the pool while nothing is pending. */
+    dx_conn_release_buffer(conn, w->bufs);
+    conn->state = DX_CONN_IDLE;
+    dx_conn_arm_timer(w, conn);
     return 0;
 }
 
@@ -841,73 +1159,66 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
  * queue the response. Returns 0 while the connection stays open, -1 when it
  * must close now.
  */
-static int conn_process(struct dx_worker *w, dx_conn_t *conn)
+/*
+ * Build and stage the answer for a request whose headers were parsed and
+ * whose body (if any) has been fully received. `consumed` covers the header
+ * block plus the body, so the bytes are only dropped here.
+ */
+static int conn_dispatch(struct dx_worker *w, dx_conn_t *conn)
 {
-    size_t consumed = 0;
-    dx_parse_result_t r;
     char tmp[DX_RESPONSE_TMP];
-    size_t len;
-    int status;
+    size_t consumed;
+    size_t len = 0;
+    int status = 0;
     const char *extra = NULL;
     size_t body_bytes = 0;
     const unsigned char *base;
     const dx_http_request_t *req;
+    const char *connection;
 
     if (conn->buf.data == NULL) {
-        return -1; /* unreachable: every connection owns a buffer */
+        return -1; /* unreachable: a live connection owns a buffer */
     }
-    r = dx_http_parser_feed(&conn->parser, conn->buf.data + conn->buf.off,
-                            dx_buffer_readable(&conn->buf), &consumed);
-    if (r == DX_PARSE_NEED_DATA) {
-        return 0; /* wait for more bytes */
-    }
-
-    if (r == DX_PARSE_ERROR) {
-        /* The request is rejected before any method is known. */
-        status = conn->parser.status_code;
-        len = dx_http_response_error(tmp, sizeof(tmp), status, NULL);
-        access_fill(conn, NULL, NULL, status, 0);
-        if (len == 0 || conn_stage_response(conn, tmp, len) != 0) {
-            return -1;
-        }
-        /*
-         * The client may still be sending the oversized or malformed
-         * request; discard what is already in flight so the error response
-         * is read instead of lost to an RST.
-         */
-        conn_discard_input(conn);
-        return conn_flush(w, conn);
-    }
-
     base = conn->buf.data + conn->buf.off;
     req = &conn->parser.req;
+    consumed = conn->body_offset + (size_t)req->content_length;
 
-    switch (dx_http_dispatch_method(req, base, &status, &extra)) {
-    case DX_DISPATCH_SERVE:
-        status = 200;
-        if (method_is(req, base, "OPTIONS")) {
-            extra = "Allow: GET, HEAD, OPTIONS\r\n";
-            len = dx_http_response_build(tmp, sizeof(tmp), 200, extra, NULL, NULL, 0u, false);
-        } else {
-            bool head = method_is(req, base, "HEAD");
+    /* Decide what to answer. */
+    {
+        bool head = method_is(req, base, "HEAD");
+        bool is_options = method_is(req, base, "OPTIONS");
+        bool keep_alive;
+        dx_dispatch_t action = dx_http_dispatch_method(req, base, &status, &extra);
 
-            if (w->fs != NULL) {
+        if (action == DX_DISPATCH_SERVE) {
+            status = 200;
+            if (!is_options && w->fs != NULL) {
                 /* Static file serving: the response may arm a file transfer,
                  * which continues in conn_flush_file() after the headers.
                  * The request bytes are not consumed yet: the resolver and
                  * the header lookups still read them through base. */
-                return conn_serve_static(w, conn, req, base, head);
+                return conn_serve_static(w, conn, req, base, head, consumed);
             }
-            /* No document root configured: the core still answers. */
-            len = dx_http_response_build(tmp, sizeof(tmp), 200, NULL, "text/plain; charset=utf-8",
-                                         conn_hello_body, sizeof(conn_hello_body) - 1u, head);
-            body_bytes = head ? 0u : sizeof(conn_hello_body) - 1u;
         }
-        break;
-    case DX_DISPATCH_ERROR:
-    default:
-        len = dx_http_response_error(tmp, sizeof(tmp), status, extra);
-        break;
+        keep_alive = response_keeps_alive(w, conn, req, base, status);
+        connection = connection_value(keep_alive, req->minor_version);
+        conn->close_conn = !keep_alive;
+
+        if (action == DX_DISPATCH_SERVE) {
+            if (is_options) {
+                extra = "Allow: GET, HEAD, OPTIONS\r\n";
+                len = dx_http_response_build_ex(tmp, sizeof(tmp), status, extra, NULL, NULL, 0u,
+                                                false, connection);
+            } else {
+                /* No document root configured: the core still answers. */
+                len = dx_http_response_build_ex(tmp, sizeof(tmp), status, NULL,
+                                                "text/plain; charset=utf-8", conn_hello_body,
+                                                sizeof(conn_hello_body) - 1u, head, connection);
+                body_bytes = head ? 0u : sizeof(conn_hello_body) - 1u;
+            }
+        } else {
+            len = dx_http_response_error_ex(tmp, sizeof(tmp), status, extra, connection);
+        }
     }
 
     if (len == 0) {
@@ -921,10 +1232,87 @@ static int conn_process(struct dx_worker *w, dx_conn_t *conn)
     access_fill(conn, req, base, status, body_bytes);
 
     dx_buffer_consume(&conn->buf, consumed);
+    if (conn_hold_pipelined(conn, dx_buffer_readable(&conn->buf)) != 0) {
+        return -1;
+    }
     if (conn_stage_response(conn, tmp, len) != 0) {
         return -1;
     }
-    return conn_flush(w, conn);
+    return conn_flush_out(w, conn);
+}
+
+/*
+ * Feed the parser and act on the result: answer a rejection, start or finish
+ * the body drain, or dispatch a request that needs no body.
+ * Returns 0 while the connection stays open, -1 when it must close now.
+ */
+static int conn_process(struct dx_worker *w, dx_conn_t *conn)
+{
+    size_t consumed = 0;
+    dx_parse_result_t r;
+    const unsigned char *base;
+    const dx_http_request_t *req;
+
+    if (conn->buf.data == NULL) {
+        return -1; /* unreachable: a live connection owns a buffer */
+    }
+    r = dx_http_parser_feed(&conn->parser, conn->buf.data + conn->buf.off,
+                            dx_buffer_readable(&conn->buf), &consumed);
+    if (r == DX_PARSE_NEED_DATA) {
+        return 0; /* wait for more bytes */
+    }
+
+    if (r == DX_PARSE_ERROR) {
+        /* The request is rejected before any method is known. */
+        int status = conn->parser.status_code;
+
+        access_fill(conn, NULL, NULL, status, 0);
+        conn->close_conn = true;
+        /*
+         * The client may still be sending the oversized or malformed
+         * request; discard what is already in flight so the error response
+         * is read instead of lost to an RST.
+         */
+        conn_discard_input(conn);
+        return conn_finish_error(w, conn, status, NULL);
+    }
+
+    base = conn->buf.data + conn->buf.off;
+    req = &conn->parser.req;
+
+    /*
+     * A request body is read and discarded before the response goes out, so
+     * the next request on a kept-alive connection starts at a clean boundary.
+     */
+    if (req->has_content_length && req->content_length > 0) {
+        if (req->content_length > w->life.max_body_size) {
+            access_fill(conn, req, base, 413, 0);
+            conn_discard_input(conn);
+            return conn_finish_error(w, conn, 413, NULL);
+        }
+        conn->body_left = req->content_length;
+        conn->body_offset = consumed;
+        conn->state = DX_CONN_READING;
+        /*
+         * The headers stay in the buffer until the whole body arrived: the
+         * dispatch step still reads method, target and header values through
+         * the offsets the parser produced.
+         */
+        {
+            size_t available = dx_buffer_readable(&conn->buf) - consumed;
+
+            if (available >= conn->body_left) {
+                /* The body was already here (pipelined or eager client). */
+                conn->body_left = 0;
+            } else {
+                conn->body_left -= available;
+                dx_conn_arm_timer(w, conn);
+                return 0; /* the rest of the body arrives with later reads */
+            }
+        }
+    }
+    conn->body_offset = consumed;
+    return conn_dispatch(w, conn);
 }
 
 /*
@@ -981,15 +1369,17 @@ int dx_conn_on_readable(struct dx_worker *w, dx_conn_t *conn)
     if (conn == NULL || conn->state == DX_CONN_FREE || conn->state == DX_CONN_CLOSING) {
         return 0;
     }
-    if (conn->close_after_response) {
+    if (dx_conn_has_work(conn)) {
         /*
-         * The response is queued or on the wire; whatever else the client
-         * sends is irrelevant because the connection closes after the flush.
-         * Interest no longer includes EPOLLIN, so this guard only covers the
-         * window between staging the response and updating the interest.
+         * A response is still on its way out. Responses keep their order, so
+         * nothing new is parsed; the interest mask already dropped EPOLLIN.
          */
         return 0;
     }
+    if (dx_conn_ensure_buffer(w, conn) != 0) {
+        return -1;
+    }
+    conn->state = DX_CONN_READING;
 
     while (budget > 0) {
         ssize_t n;
@@ -1013,17 +1403,46 @@ int dx_conn_on_readable(struct dx_worker *w, dx_conn_t *conn)
 
         n = read(conn->fd, conn->buf.data + conn->buf.len, dx_buffer_writable(&conn->buf));
         if (n > 0) {
-            size_t got = (size_t)n;
+            conn->buf.len += (size_t)n;
+            conn->bytes_in += (size_t)n;
 
-            conn->buf.len += got;
-            conn->bytes_in += got;
-            if (conn_process(w, conn) != 0) {
-                return -1; /* response sent or queued: the flush decided */
+            if (conn->body_left > 0) {
+                /*
+                 * Request body: discard it so the connection stream stays
+                 * aligned for the next keep-alive request. The header block
+                 * is kept in the buffer until the body is complete.
+                 */
+                size_t available = dx_buffer_readable(&conn->buf);
+
+                if (available > conn->body_offset) {
+                    available -= conn->body_offset;
+                } else {
+                    available = 0;
+                }
+                if (available >= conn->body_left) {
+                    /*
+                     * Body complete: conn_dispatch() consumes the header
+                     * block plus the body in one step, so nothing is dropped
+                     * twice and the next pipelined request starts aligned.
+                     */
+                    conn->body_left = 0;
+                    if (conn_dispatch(w, conn) != 0) {
+                        return -1;
+                    }
+                } else {
+                    conn->body_left -= available;
+                    dx_conn_arm_timer(w, conn);
+                    continue; /* wait for the rest of the body */
+                }
+            } else if (conn_process(w, conn) != 0) {
+                return -1;
             }
-            if (conn->close_after_response) {
-                return dx_conn_has_work(conn) ? 0 : -1;
+            if (dx_conn_has_work(conn) || conn->state == DX_CONN_IDLE) {
+                /* Response staged, or everything answered: yield. */
+                dx_conn_arm_timer(w, conn);
+                return 0;
             }
-            continue;
+            continue; /* pipelined data may still be waiting in the buffer */
         }
         if (n == 0) {
             /*
@@ -1050,7 +1469,9 @@ int dx_conn_on_readable(struct dx_worker *w, dx_conn_t *conn)
         if (!dx_conn_has_work(conn)) {
             return -1;
         }
+        dx_conn_arm_timer(w, conn);
         return 0; /* finish the reply through EPOLLOUT */
     }
+    dx_conn_arm_timer(w, conn);
     return 0;
 }

@@ -12,6 +12,58 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.4.0] - 2026-10-11
+
+### Added
+
+- `src/timer.c`: hashed timing wheel with one intrusive node per connection
+  (256 buckets of one second). Installing, refreshing and cancelling are O(1),
+  a refresh inside the same second keeps the node where it is (lazy refresh),
+  and `dx_timer_wheel_next_timeout_ms()` gives the event loop the exact
+  millisecond timeout for `epoll_wait`. Deadlines are absolute, so a timer in a
+  shared bucket is never fired early.
+- Keep-alive: responses no longer close the connection. The connection
+  survives when the status is below 400, the client did not ask for `close`,
+  HTTP/1.1 is in use (or HTTP/1.0 sent `Connection: keep-alive`) and the
+  `keepalive_requests` budget is not exhausted; otherwise the response carries
+  `Connection: close` and the socket ends after it.
+- Pipelining: requests already buffered are answered in order after the
+  previous response has been fully sent. Bytes that follow a request are
+  parked in a small holdover while the response reuses the read buffer.
+- Request bodies are read and discarded (bounded by `max_body_size`, `413`
+  above it) so a kept-alive connection stays aligned; `body_timeout` guards the
+  drain.
+- Timeouts wired to the wheel: `header_timeout` (with a `408` answer when part
+  of a request arrived, a silent close when nothing did), `body_timeout`,
+  `send_timeout` (refreshed on every write progress step) and
+  `keepalive_timeout`.
+- Idle connections release their read buffer back to the pool, which is what
+  keeps 10,000 idle connections cheap; the buffer is taken again when the peer
+  sends data.
+- Graceful shutdown: the listener is detached, in-flight connections finish,
+  and whatever is left is closed when `shutdown_timeout` expires.
+- New CLI flags: `--keepalive-requests`, `--header-timeout`, `--body-timeout`,
+  `--send-timeout`, `--keepalive-timeout`, `--shutdown-timeout` (durations
+  accept `s`, `m` and `ms` suffixes) and `--max-body-size`.
+- `tests/c10k_test.py` (`make test-c10k N=...`): holds N idle connections
+  open, checks every one of them still answers, and verifies a clean shutdown.
+  10,000 connections are accepted in well under a second.
+- Tests: `test_timer` (80 checks) and a smoke test extended to 65 checks
+  covering keep-alive, pipelining, body draining, `408`, idle closes and the
+  access log for repeated requests.
+
+### Fixed
+
+- A pending response is now tracked explicitly instead of inferred from bytes
+  in the buffer: request bytes waiting to be parsed are input, not output, and
+  treating them as pending output made the server answer partial requests by
+  writing them back to the client.
+- The `408` written on a header timeout no longer includes the partially
+  received request in the response.
+- A request body that arrived together with the headers, or split across
+  packets, is drained exactly once; before, the body bytes were consumed twice
+  and the next request on the connection was parsed from a shifted offset.
+
 ## [0.3.0] - 2026-10-11
 
 ### Added
@@ -140,7 +192,8 @@ releases.
 - Tests: unit tests for buffer, pool, log and util modules (179 checks), plus a
   sanitizer-friendly integration smoke test (`tests/smoke_test.py`).
 
-[Unreleased]: https://github.com/WildanDeveloper/dantrix/compare/0.3.0...HEAD
+[Unreleased]: https://github.com/WildanDeveloper/dantrix/compare/0.4.0...HEAD
+[0.4.0]: https://github.com/WildanDeveloper/dantrix/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/WildanDeveloper/dantrix/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/WildanDeveloper/dantrix/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/WildanDeveloper/dantrix/releases/tag/0.1.0

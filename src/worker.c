@@ -10,7 +10,9 @@
 #include <unistd.h>
 
 #include "dantrix.h"
+#include "http_response.h"
 #include "net.h"
+#include "util.h"
 
 #include <time.h>
 
@@ -22,7 +24,7 @@ dx_log_t *dx_worker_log(dx_worker_t *w)
 int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *log,
                    const volatile sig_atomic_t *stop_flag, const dx_http_limits_t *limits,
                    dx_log_t *access_log, dx_log_format_t log_format, dx_fs_t *fs, dx_mime_t *mime,
-                   const dx_static_opts_t *static_opts)
+                   const dx_static_opts_t *static_opts, const dx_lifecycle_opts_t *life)
 {
     struct epoll_event ev;
 
@@ -47,11 +49,17 @@ int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *lo
     if (static_opts != NULL) {
         w->static_opts = *static_opts;
     }
+    if (life != NULL) {
+        w->life = *life;
+    }
     if (w->static_opts.cache_control == NULL) {
         w->static_opts.cache_control = "";
     }
     if (w->static_opts.sendfile_chunk == 0) {
         w->static_opts.sendfile_chunk = 1024u * 1024u;
+    }
+    if (w->life.keepalive_requests == 0) {
+        w->life.keepalive_requests = 1000u;
     }
     w->max_conns = max_conns;
     w->stop_flag = stop_flag;
@@ -63,6 +71,11 @@ int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *lo
     }
     w->bufs = dx_bufpool_create(DX_CONN_BUF_SIZE, DX_BUF_CHUNK_SLOTS);
     if (w->bufs == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    w->timers = dx_timer_wheel_create();
+    if (w->timers == NULL) {
         errno = ENOMEM;
         return -1;
     }
@@ -98,6 +111,8 @@ void dx_worker_destroy(dx_worker_t *w)
     w->pool = NULL;
     dx_bufpool_destroy(w->bufs);
     w->bufs = NULL;
+    dx_timer_wheel_destroy(w->timers);
+    w->timers = NULL;
 }
 
 /* Format the peer address for the access log; "-" when unknown. */
@@ -153,6 +168,9 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
     conn->buf_mem = mem;
     dx_buffer_init(&conn->buf, mem, DX_CONN_BUF_SIZE);
     format_peer(peer, conn->peer, sizeof(conn->peer));
+    /* The header clock starts at accept, so a silent client cannot hold a
+     * connection slot forever. */
+    dx_conn_arm_timer(w, conn);
 
     memset(&ev, 0, sizeof(ev));
     ev.events = EPOLLIN | EPOLLRDHUP;
@@ -197,6 +215,7 @@ static void conn_close(dx_worker_t *w, dx_conn_t *conn)
         return;
     }
     conn->state = DX_CONN_CLOSING;
+    dx_timer_wheel_cancel(w->timers, &conn->timer);
 
     fd = conn->fd;
     conn->fd = -1;
@@ -213,6 +232,8 @@ static void conn_close(dx_worker_t *w, dx_conn_t *conn)
 
     /* A streamed file is owned by the connection until it is closed. */
     dx_conn_release_file(conn);
+    /* Pipelined bytes parked for the next request. */
+    dx_conn_release_hold(conn);
 
     /* Returns the pooled slot or frees the grown heap allocation. */
     dx_conn_release_buffer(conn, w->bufs);
@@ -235,12 +256,11 @@ static int conn_update_interest(dx_worker_t *w, dx_conn_t *conn)
         return -1;
     }
     memset(&ev, 0, sizeof(ev));
-    if (conn->eof || conn->close_after_response) {
+    if (conn->eof || dx_conn_has_work(conn)) {
         /*
-         * Nothing more will be read: after an EOF read() would return 0
-         * forever, and with the response staged the request is over. Only
-         * EPOLLOUT stays registered while the reply (headers or file body)
-         * drains.
+         * Only EPOLLOUT while output is pending: on a level-triggered epoll
+         * it would otherwise keep the loop spinning. After an EOF read()
+         * would return 0 forever, so EPOLLIN is dropped as well.
          */
         if (!dx_conn_has_work(conn)) {
             return -1; /* nothing left to send: the caller closes */
@@ -248,9 +268,6 @@ static int conn_update_interest(dx_worker_t *w, dx_conn_t *conn)
         ev.events = EPOLLOUT;
     } else {
         ev.events = EPOLLIN | EPOLLRDHUP;
-        if (conn->state == DX_CONN_WRITING) {
-            ev.events |= EPOLLOUT;
-        }
     }
     ev.data.u64 = dx_tag_conn(conn->index, conn->generation);
     return epoll_ctl(w->epfd, EPOLL_CTL_MOD, conn->fd, &ev);
@@ -363,6 +380,69 @@ static void handle_event(dx_worker_t *w, const struct epoll_event *ev)
     }
 }
 
+/*
+ * Timeout policy. An idle connection is closed silently, a connection that
+ * already received part of a request gets 408 before the close, and one that
+ * is stuck sending or discarding a body is closed outright.
+ */
+static void conn_on_timeout(struct dx_worker *w, dx_conn_t *conn)
+{
+    const char *what;
+    bool got_bytes;
+
+    got_bytes = (dx_buffer_readable(&conn->buf) > 0) || conn->parser.scan > 0;
+    switch (conn->state) {
+    case DX_CONN_IDLE:
+        what = "keepalive timeout";
+        break;
+    case DX_CONN_WRITING:
+        what = "send timeout";
+        break;
+    case DX_CONN_READING:
+        what = (conn->body_left > 0) ? "body timeout" : "header timeout";
+        break;
+    default:
+        return;
+    }
+
+    dx_log_write(dx_worker_log(w), DX_LOG_DEBUG, "conn %llu: %s, closing",
+                 (unsigned long long)conn->id, what);
+
+    if (got_bytes && conn->state == DX_CONN_READING && conn->body_left == 0) {
+        /*
+         * Part of a request arrived: answer 408 so the client learns why.
+         * The partial request is dropped first, otherwise the client would
+         * read its own bytes back before the error page.
+         */
+        char tmp[2048];
+        size_t len = dx_http_response_error(tmp, sizeof(tmp), 408, NULL);
+
+        if (len > 0) {
+            size_t keep = conn->buf.cap;
+
+            dx_buffer_init(&conn->buf, conn->buf.data, keep);
+            if (dx_buffer_writable(&conn->buf) >= len) {
+                (void)dx_buffer_append(&conn->buf, tmp, len);
+                dx_conn_record_status(conn, 408);
+                conn->close_conn = true;
+                (void)dx_conn_on_writable(w, conn);
+            }
+        }
+    }
+    conn_close(w, conn);
+}
+
+static void on_timer_expired(void *ctx, dx_timer_node_t *node)
+{
+    struct dx_worker *w = (struct dx_worker *)ctx;
+    dx_conn_t *conn = (dx_conn_t *)node->owner;
+
+    if (conn == NULL || conn->state == DX_CONN_FREE || conn->state == DX_CONN_CLOSING) {
+        return; /* the slot was recycled: the timer is stale */
+    }
+    conn_on_timeout(w, conn);
+}
+
 /* Close everything still open; used on shutdown and after a fatal error. */
 static void drain_connections(dx_worker_t *w)
 {
@@ -393,15 +473,51 @@ int dx_worker_run(dx_worker_t *w)
         return -1;
     }
 
-    while (w->stop_flag == NULL || *w->stop_flag == 0) {
-        int n = epoll_wait(w->epfd, events, DX_MAX_EVENTS, -1);
+    for (;;) {
+        uint64_t now = (uint64_t)dx_now_ms();
+        int timeout_ms = dx_timer_wheel_next_timeout_ms(w->timers, now);
+        int n;
         int i;
+        bool stopping = (w->stop_flag != NULL && *w->stop_flag != 0);
+
+        if (!stopping && !w->draining) {
+            /* Normal operation: wait for the nearest timer or an event. */
+            n = epoll_wait(w->epfd, events, DX_MAX_EVENTS, timeout_ms);
+        } else if (!w->draining) {
+            /*
+             * Graceful shutdown started: stop accepting, then wait for the
+             * in-flight connections until the shutdown budget runs out.
+             */
+            w->draining = true;
+            w->shutdown_deadline_ms = now + w->life.shutdown_timeout_ms;
+            dx_log_write(w->log, DX_LOG_INFO, "draining %zu open connection(s) before shutdown",
+                         dx_pool_active(w->pool));
+            if (w->epfd >= 0 && w->listen_fd >= 0) {
+                (void)epoll_ctl(w->epfd, EPOLL_CTL_DEL, w->listen_fd, NULL);
+            }
+            if (dx_pool_active(w->pool) == 0) {
+                break;
+            }
+            n = epoll_wait(w->epfd, events, DX_MAX_EVENTS, DX_TIMER_TICK_MS);
+        } else {
+            if (dx_pool_active(w->pool) == 0) {
+                break;
+            }
+            if (now >= w->shutdown_deadline_ms) {
+                dx_log_write(w->log, DX_LOG_WARN,
+                             "shutdown timeout expired, closing %zu connection(s) forcefully",
+                             dx_pool_active(w->pool));
+                drain_connections(w);
+                break;
+            }
+            n = epoll_wait(w->epfd, events, DX_MAX_EVENTS, DX_TIMER_TICK_MS);
+        }
 
         if (n < 0) {
             if (errno == EINTR) {
                 /*
-                 * A signal arrived. The handler only sets the stop flag, which
-                 * the loop condition above observes on the next turn.
+                 * A signal arrived. The handler only sets the stop flag,
+                 * which the loop condition above observes on the next turn.
                  */
                 continue;
             }
@@ -413,12 +529,11 @@ int dx_worker_run(dx_worker_t *w)
         for (i = 0; i < n; i++) {
             handle_event(w, &events[i]);
         }
+
+        /* Fire every timer that came due (timeouts, keep-alive, body, send). */
+        (void)dx_timer_wheel_advance(w->timers, (uint64_t)dx_now_ms(), on_timer_expired, w);
     }
 
-    if (w->stop_flag != NULL && *w->stop_flag != 0) {
-        dx_log_write(w->log, DX_LOG_INFO, "draining %zu open connection(s) before shutdown",
-                     dx_pool_active(w->pool));
-    }
     drain_connections(w);
     free(events);
     return rc;
