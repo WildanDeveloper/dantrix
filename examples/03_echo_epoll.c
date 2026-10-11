@@ -35,6 +35,7 @@
 /* Per-connection state kept by index, never by raw pointer, in real servers. */
 struct conn {
     int fd;
+    int eof;                 /* peer sent FIN: echo remains, then close */
     size_t off;              /* first byte of pending output */
     size_t len;              /* end of valid data in buf */
     unsigned char buf[4096]; /* read buffer and pending echo window */
@@ -70,14 +71,21 @@ static int conn_flush(int epfd, struct epoll_event *ev, struct conn *c)
             continue;
         }
         if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            /* Still pending: keep EPOLLOUT registered to resume later. */
-            ev->events = EPOLLIN | EPOLLOUT;
+            /*
+             * Still pending: keep EPOLLOUT registered to resume later. After
+             * an EOF, EPOLLIN must NOT stay registered: read() keeps
+             * returning 0 and a level-triggered epoll would spin.
+             */
+            ev->events = c->eof ? EPOLLOUT : (EPOLLIN | EPOLLOUT);
             epoll_ctl(epfd, EPOLL_CTL_MOD, c->fd, ev);
             return 0;
         }
         return -1;
     }
     c->off = c->len = 0;
+    if (c->eof) {
+        return -1; /* the echo was the last work: caller closes */
+    }
     /* Drained: drop EPOLLOUT or the loop would spin. */
     ev->events = EPOLLIN;
     epoll_ctl(epfd, EPOLL_CTL_MOD, c->fd, ev);
@@ -177,6 +185,7 @@ int main(void)
                     }
                     c = &conns[j];
                     c->fd = fd;
+                    c->eof = 0;
                     c->off = c->len = 0;
                     memset(&ev, 0, sizeof(ev));
                     ev.events = EPOLLIN;
@@ -211,9 +220,8 @@ int main(void)
                         }
                         if (nread == 0) {
                             /* EOF: echo what arrived, then close. */
+                            c->eof = 1;
                             if (conn_flush(epfd, &events[e], c) != 0) {
-                                conn_close(epfd, c);
-                            } else if (c->off == c->len) {
                                 conn_close(epfd, c);
                             }
                             break;

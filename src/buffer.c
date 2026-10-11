@@ -164,6 +164,34 @@ static bool free_list_push(dx_bufpool_t *pool, uint32_t chunk_index, uint32_t sl
     return true;
 }
 
+/* Reserve room for n more entries; false when memory runs out. */
+static bool free_list_reserve(dx_bufpool_t *pool, size_t n)
+{
+    size_t needed = pool->free_count + n;
+    size_t new_cap;
+
+    if (needed <= pool->free_cap) {
+        return true;
+    }
+    new_cap = (pool->free_cap == 0) ? 64u : pool->free_cap;
+    while (new_cap < needed) {
+        if (new_cap > ((size_t)-1) / 2u) {
+            return false; /* doubling would overflow */
+        }
+        new_cap *= 2u;
+    }
+    {
+        uint64_t *p = (uint64_t *)realloc(pool->free_list, new_cap * sizeof(*p));
+
+        if (p == NULL) {
+            return false;
+        }
+        pool->free_list = p;
+        pool->free_cap = new_cap;
+    }
+    return true;
+}
+
 /*
  * Allocate one more chunk and register all of its slots as free. Returns the
  * ordinal of the new chunk, or SIZE_MAX on failure.
@@ -186,6 +214,15 @@ static size_t bufpool_add_chunk(dx_bufpool_t *pool)
     bytes = pool->slot_size * pool->chunk_slots;
     if (pool->slot_size != 0 && bytes / pool->slot_size != pool->chunk_slots) {
         return (size_t)-1; /* size overflow */
+    }
+
+    /*
+     * Grow the free list first: if this fails, bail out before any chunk
+     * memory exists, so the pool never ends up with allocated slots that are
+     * missing from the free list (those would be lost until destroy).
+     */
+    if (!free_list_reserve(pool, pool->chunk_slots)) {
+        return (size_t)-1;
     }
 
     chunk = (dx_chunk_t *)calloc(1, sizeof(*chunk));
@@ -212,14 +249,9 @@ static size_t bufpool_add_chunk(dx_bufpool_t *pool)
     *tail = chunk;
     pool->total_slots += pool->chunk_slots;
 
+    /* Cannot fail: free_list_reserve guaranteed the capacity. */
     for (size_t i = 0; i < pool->chunk_slots; i++) {
-        if (!free_list_push(pool, (uint32_t)index, (uint32_t)i)) {
-            /*
-             * The chunk is linked in already; its remaining slots simply stay
-             * unavailable, which is safe (they were never handed out).
-             */
-            break;
-        }
+        (void)free_list_push(pool, (uint32_t)index, (uint32_t)i);
     }
     return index;
 }

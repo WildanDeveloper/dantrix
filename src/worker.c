@@ -10,6 +10,8 @@
 #include "dantrix.h"
 #include "net.h"
 
+#include <time.h>
+
 dx_log_t *dx_worker_log(dx_worker_t *w)
 {
     return (w == NULL) ? NULL : w->log;
@@ -214,13 +216,20 @@ static void accept_loop(dx_worker_t *w)
         }
         if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
             /*
-             * Resource exhaustion. Leaving the listener registered means the
-             * next event retries the accept, which is the desired back
-             * pressure behaviour: better to refuse than to spin.
+             * Resource exhaustion. The listener stays registered, but with a
+             * non-empty accept queue EPOLLIN would refire immediately and turn
+             * this into a 100% CPU spin until descriptors free up. Backing off
+             * briefly keeps the loop alive without burning a core. The timer
+             * wheel (v0.4) replaces this sleep with a proper delayed retry.
              */
             dx_log_write(w->log, DX_LOG_ERROR,
                          "accept4: %s (serving %zu connections, %zu accepted total)",
                          dx_strerror(errno), dx_pool_active(w->pool), w->accepted_total);
+            {
+                struct timespec backoff = { 0, 100 * 1000 * 1000 }; /* 100 ms */
+
+                (void)nanosleep(&backoff, NULL);
+            }
             return;
         }
         dx_log_write(w->log, DX_LOG_ERROR, "accept4: %s", dx_strerror(errno));

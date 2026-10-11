@@ -70,6 +70,38 @@ void dx_pool_destroy(dx_pool_t *pool)
     free(pool);
 }
 
+/*
+ * Reserve room for n more entries before any chunk memory is allocated; false
+ * when memory runs out. Growing first guarantees that a successfully allocated
+ * chunk always lands in the free list in full.
+ */
+static bool pool_free_list_reserve(struct dx_pool *pool, size_t n)
+{
+    size_t needed = pool->free_count + n;
+    size_t new_cap;
+
+    if (needed <= pool->free_cap) {
+        return true;
+    }
+    new_cap = (pool->free_cap == 0) ? 64u : pool->free_cap;
+    while (new_cap < needed) {
+        if (new_cap > ((size_t)-1) / 2u) {
+            return false; /* doubling would overflow */
+        }
+        new_cap *= 2u;
+    }
+    {
+        uint32_t *p = (uint32_t *)realloc(pool->free_list, new_cap * sizeof(*p));
+
+        if (p == NULL) {
+            return false;
+        }
+        pool->free_list = p;
+        pool->free_cap = new_cap;
+    }
+    return true;
+}
+
 /* Allocate one chunk of conn slots and record it. Returns false on failure. */
 static bool pool_add_chunk(dx_pool_t *pool)
 {
@@ -105,30 +137,21 @@ static bool pool_add_chunk(dx_pool_t *pool)
         pool->chunks = new_chunks;
         pool->chunks_cap = new_cap;
     }
+
+    /* Free list capacity is guaranteed before the chunk becomes visible. */
+    if (!pool_free_list_reserve(pool, pool->conn_slots)) {
+        free(chunk);
+        free(mem);
+        return false;
+    }
+
     pool->chunks[pool->nchunks++] = chunk;
 
-    /* Every slot of the new chunk goes onto the free list. */
     for (i = 0; i < pool->conn_slots; i++) {
-        size_t global_index = (pool->total_slots) + i;
+        size_t global_index = pool->total_slots + i;
 
-        if (pool->free_count == pool->free_cap) {
-            size_t new_cap = (pool->free_cap == 0) ? 64u : pool->free_cap * 2u;
-            uint32_t *p = (uint32_t *)realloc(pool->free_list, new_cap * sizeof(*p));
-
-            if (p == NULL) {
-                /*
-                 * Slots already registered stay usable; the rest of this chunk
-                 * simply remains hidden until the next acquire attempt.
-                 */
-                pool->total_slots += i;
-                return true;
-            }
-            pool->free_list = p;
-            pool->free_cap = new_cap;
-        }
         if (global_index > 0xffffffffu) {
-            pool->total_slots += i;
-            return true;
+            break; /* unreachable: guarded by the 32 bit check above */
         }
         pool->free_list[pool->free_count++] = (uint32_t)global_index;
     }
@@ -199,13 +222,13 @@ bool dx_pool_release(dx_pool_t *pool, dx_conn_t *conn)
     if (pool->active > 0) {
         pool->active--;
     }
+    /*
+     * Capacity is guaranteed for every live slot (see pool_free_list_reserve),
+     * so this push cannot fail for a properly owned slot.
+     */
     if (pool->free_count < pool->free_cap) {
         pool->free_list[pool->free_count++] = conn->index;
     }
-    /*
-     * If the free list is full the slot is simply not reusable until the next
-     * chunk allocation; it stays marked FREE so it can never be closed twice.
-     */
     return true;
 }
 

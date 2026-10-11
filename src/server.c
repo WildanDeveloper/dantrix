@@ -83,13 +83,16 @@ int dx_server_run(const dx_server_config_t *cfg)
         return -1;
     }
 
+    /*
+     * The worker takes ownership of listen_fd: dx_worker_destroy closes it, so
+     * every failure path from here on must go through destroy and never close
+     * the descriptor directly (double close could hand the fd to a new
+     * connection).
+     */
     if (dx_worker_init(&worker, listen_fd, cfg->max_conns, cfg->log, &g_stop) != 0) {
-        int saved = errno;
-
         dx_log_write(cfg->log, DX_LOG_ERROR, "worker init failed: %s",
-                     dx_strerror(saved));
-        (void)close(listen_fd);
-        errno = saved;
+                     dx_strerror(errno));
+        dx_worker_destroy(&worker);
         return -1;
     }
 
