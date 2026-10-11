@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: build (${{ matrix.cc }}, ${{ matrix.build }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+        build: [release, debug]
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with -Werror
+        run: |
+          make clean
+          if [ "${{ matrix.build }}" = "debug" ]; then
+            make debug WERROR=1
+          else
+            make WERROR=1
+          fi
+      - name: Build examples
+        run: make examples
+      - name: Unit tests
+        run: make test
+
+  sanitizers:
+    name: sanitizers (asan+ubsan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with sanitizers
+        run: |
+          mkdir -p build
+          gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wpedantic -Werror \
+              -O1 -g -fsanitize=address,undefined \
+              -fno-sanitize-recover=undefined -fno-omit-frame-pointer \
+              src/*.c -o build/dantrix-asan
+      - name: Unit tests under ASan/UBSan
+        run: |
+          for t in buffer log pool util; do
+            gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wpedantic -Werror \
+                -O1 -g -fsanitize=address,undefined \
+                -fno-sanitize-recover=undefined \
+                -Isrc -Itests/unit tests/unit/test_$t.c src/buffer.c \
+                src/conn.c src/log.c src/net.c src/server.c src/util.c \
+                src/worker.c -o build/test_${t}_asan -lpthread
+            ./build/test_${t}_asan
+          done
+      - name: Smoke test under ASan/UBSan
+        run: python3 tests/smoke_test.py build/dantrix-asan
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cppcheck clang-format
+      - name: cppcheck
+        run: |
+          cppcheck --enable=warning,style,performance,portability \
+              --std=c11 --error-exitcode=1 --quiet -I src src
+      - name: clang-format check
+        run: |
+          clang-format --dry-run --Werror src/*.c src/*.h

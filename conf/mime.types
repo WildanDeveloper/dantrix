@@ -1,0 +1,29 @@
+# Minimal MIME type table (extension -> type). Additional entries can be added
+# on separate lines with the same format. The table ships as a placeholder for
+# v0.3, where static file serving reads it.
+
+text/html                 html htm
+text/css                  css
+text/javascript           js mjs
+application/json          json
+application/xml           xml
+text/plain                txt
+text/csv                  csv
+text/markdown             md
+image/png                 png
+image/jpeg                jpg jpeg
+image/gif                 gif
+image/svg+xml             svg
+image/webp                webp
+image/avif                avif
+image/x-icon              ico
+font/woff                 woff
+font/woff2                woff2
+font/ttf                  ttf
+application/pdf           pdf
+application/zip           zip
+application/gzip          gz
+application/wasm          wasm
+audio/mpeg                mp3
+video/mp4                 mp4
+video/webm                webm

@@ -1,0 +1,45 @@
+# Build artifacts
+/build/
+/bin/
+*.o
+*.a
+*.so
+*.so.*
+*.gcda
+*.gcno
+*.gcov
+
+# Fuzzing artifacts
+/fuzz/*_seed_corpus/
+/fuzz/artifacts/
+/fuzz/findings/
+/corpus/
+/build/*_seed_corpus/
+
+# Benchmark and test output
+/bench/results/
+/bench/www/
+*.prof
+*.svg
+/flame.svg
+
+# Coverage
+/coverage/
+
+# Runtime files
+*.log
+*.pid
+/core
+/core.*
+
+# Editor and OS files
+*~
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+compile_commands.json
+
+# Local scratch directories
+/tmp/
