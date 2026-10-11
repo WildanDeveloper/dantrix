@@ -3,9 +3,13 @@
  *
  * The buffer keeps three offsets into one allocation: data (base), cap
  * (allocated size), and the pair (off, len) describing the live window
- * [off, len). Nothing in a connection ever calls malloc on the hot path:
- * buffers are acquired from dx_bufpool_t and returned when the connection is
- * released.
+ * [off, len).
+ *
+ * A connection takes its buffer from a dx_bufpool_t slab and gives it back when
+ * it is released, so the steady state never allocates. Two paths do grow a
+ * buffer with malloc() on purpose: a request header larger than the pooled slot
+ * (conn_grow), and an in-memory response body that has to outlive the stack
+ * frame that built it (the directory listing).
  */
 #ifndef DX_BUFFER_H
 #define DX_BUFFER_H
@@ -23,7 +27,11 @@ typedef struct {
 /* Attach caller-owned storage (typically a pooled slot) to a buffer. */
 void dx_buffer_init(dx_buffer_t *b, unsigned char *data, size_t cap);
 
-/* Detach the buffer, keeping the offsets so they can be restored. */
+/*
+ * Detach the buffer: the memory is no longer owned by this buffer and every
+ * offset is cleared. The previous caller had to restore the window itself
+ * (dx_buffer_init), so nothing is kept here.
+ */
 void dx_buffer_detach(dx_buffer_t *b);
 
 /* Number of valid bytes in [off, len). */

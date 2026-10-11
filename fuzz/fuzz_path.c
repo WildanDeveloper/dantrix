@@ -10,6 +10,7 @@
  * Build modes: libFuzzer (clang -fsanitize=fuzzer) or the deterministic
  * standalone driver (FUZZ_STANDALONE), which runs in CI with plain gcc.
  */
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,11 +36,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     dx_range_t range;
     dx_mime_t *mime;
     char content_type[128];
+    bool resolve_ok;
 
     opts.hidden_files = ((size & 1u) != 0u);
+    memset(&resolved, 0, sizeof(resolved));
 
     /* The target is the raw input: it may be anything a client sends. */
-    if (dx_path_resolve((const char *)data, size, &opts, &resolved) == 0) {
+    resolve_ok = dx_path_resolve((const char *)data, size, &opts, &resolved) == 0;
+    if (resolve_ok) {
         size_t i;
         size_t n = strlen(resolved.path);
 
@@ -49,7 +53,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             invariant_failed("resolved path is absolute");
         }
         for (i = 0; i < n; i++) {
-            if (resolved.path[i] < 0x20u || resolved.path[i] == 0x7fu) {
+            /* Compare as unsigned: the byte may legitimately be negative in a
+             * signed char, and the intent is the 0x00-0x1f / 0x7f range. */
+            if ((unsigned char)resolved.path[i] < 0x20u ||
+                (unsigned char)resolved.path[i] == 0x7fu) {
                 invariant_failed("resolved path contains a control byte");
             }
         }
@@ -67,14 +74,25 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
     }
 
-    /* MIME mapping must always produce a value or fail cleanly. */
+    /*
+     * MIME mapping must always produce a value or fail cleanly. It runs on
+     * every input, also the ones dx_path_resolve() rejected: resolved is only
+     * filled on success, so using it unconditionally read uninitialised stack.
+     */
     mime = dx_mime_create(NULL, "application/octet-stream");
     if (mime == NULL) {
         invariant_failed("mime set could not be created");
         return 1;
     }
-    if (dx_mime_content_type(mime, resolved.path, content_type, sizeof(content_type)) == 0) {
-        content_type[0] = '\0';
+    {
+        /* Empty for a rejected resolve: resolved.path is only filled on
+         * success, so using it unconditionally read uninitialised stack. */
+        static const char empty[] = "";
+        const char *mime_path = resolve_ok ? resolved.path : empty;
+
+        if (dx_mime_content_type(mime, mime_path, content_type, sizeof(content_type)) == 0) {
+            content_type[0] = '\0';
+        }
     }
     if (content_type[0] == '\0') {
         invariant_failed("content type composed to an empty string");

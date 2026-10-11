@@ -182,8 +182,97 @@ static void test_custom_file(void)
     (void)unlink(dir);
 }
 
+/*
+ * Regression: a mime.types file that reaches the 1 MiB cap made the reader
+ * terminate one byte past its own allocation. The probe below builds files
+ * just below, exactly at and just above the cap; under ASan the old code
+ * reported heap-buffer-overflow at mime_load_custom.
+ */
+static void test_size_cap_boundary(void)
+{
+    static const size_t caps[] = {1024u * 1024u - 1u, 1024u * 1024u, 1024u * 1024u + 1u,
+                                  2u * 1024u * 1024u};
+    char path[] = "/tmp/dantrix-mime-cap-XXXXXX";
+    int fd;
+
+    dx_test_begin("mime/size_cap_boundary");
+
+    fd = mkstemp(path);
+    CHECK(fd >= 0);
+    if (fd < 0) {
+        return;
+    }
+
+    for (size_t c = 0; c < sizeof(caps) / sizeof(caps[0]); c++) {
+        size_t want = caps[c];
+        size_t written = 0;
+        unsigned int i = 0;
+        FILE *f = fdopen(dup(fd), "wb");
+        dx_mime_t *m;
+
+        CHECK(f != NULL);
+        if (f == NULL) {
+            continue;
+        }
+        /* Fixed length lines so the file lands on or just past the cap. */
+        while (written < want) {
+            char line[32];
+            int n = snprintf(line, sizeof(line), "text/plain e%06u;\n", i);
+
+            if (n <= 0) {
+                break;
+            }
+            (void)fwrite(line, 1u, (size_t)n, f);
+            written += (size_t)n;
+            i++;
+        }
+        (void)fclose(f);
+
+        m = dx_mime_create(path, "application/octet-stream");
+        CHECK(m != NULL); /* no overflow, no failure */
+        if (m != NULL) {
+            char ct[64];
+
+            CHECK(dx_mime_custom_count(m) > 0u);
+            (void)dx_mime_content_type(m, "/x.e000001", ct, sizeof(ct));
+            CHECK(strcmp(ct, "text/plain; charset=utf-8") == 0);
+            dx_mime_destroy(m);
+        }
+    }
+    (void)close(fd);
+    (void)unlink(path);
+}
+
+/* A tiny output buffer must fail cleanly instead of emitting a partial type. */
+static void test_content_type_overflow(void)
+{
+    dx_mime_t *m = dx_mime_create(NULL, "application/octet-stream");
+    char tiny[8];
+
+    dx_test_begin("mime/content_type_overflow");
+    CHECK(m != NULL);
+    if (m == NULL) {
+        return;
+    }
+    CHECK_EQ(dx_mime_content_type(m, "/a.html", tiny, sizeof(tiny)), 0u);
+    CHECK_EQ(tiny[0], '\0');
+    CHECK(dx_mime_content_type(m, "/a.html", NULL, 10u) == 0u);
+    /* A NULL set falls back to the built-in default, never a crash. */
+    {
+        char fallback[64];
+
+        CHECK(dx_mime_content_type(NULL, "/a.bin", fallback, sizeof(fallback)) > 0u);
+        CHECK(strcmp(fallback, "application/octet-stream") == 0);
+        /* Too small for the fallback too: reported as "did not fit". */
+        CHECK_EQ(dx_mime_content_type(NULL, "/a.bin", tiny, sizeof(tiny)), 0u);
+    }
+    dx_mime_destroy(m);
+}
+
 int main(void)
 {
+    test_size_cap_boundary();
+    test_content_type_overflow();
     test_extension();
     test_builtin_types();
     test_charset_rule();

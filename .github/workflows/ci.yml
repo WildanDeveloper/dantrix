@@ -30,6 +30,10 @@ jobs:
         run: make examples
       - name: Unit tests
         run: make test
+      - name: Regression test (separate server processes)
+        env:
+          DANTRIX_TEST_PORT: ${{ ${{ matrix.cc == 'gcc' && '18101' || '18201' }} }}
+        run: python3 tests/regression_test.py bin/dantrix
 
   sanitizers:
     name: sanitizers (asan+ubsan)
@@ -58,6 +62,10 @@ jobs:
           done
       - name: Smoke test under ASan/UBSan
         run: python3 tests/smoke_test.py build/dantrix-asan
+      - name: Regression test under ASan/UBSan
+        env:
+          DANTRIX_TEST_PORT: "18101"
+        run: python3 tests/regression_test.py build/dantrix-asan
       - name: Parser fuzz harness (deterministic standalone driver)
         run: make fuzz
       - name: C10K check (2000 held connections)
@@ -80,4 +88,4 @@ jobs:
               -I src src
       - name: clang-format check
         run: |
-          clang-format --dry-run --Werror src/*.c src/*.h
+          clang-format --dry-run --Werror src/*.c src/*.h fuzz/*.c tests/unit/*.c

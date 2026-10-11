@@ -54,6 +54,7 @@ typedef struct dx_worker {
     dx_static_opts_t static_opts;           /* static serving options */
     dx_lifecycle_opts_t life;               /* keep-alive and timeout settings */
     dx_timer_wheel_t *timers;               /* one timer node per connection */
+    dx_timer_node_t accept_timer;           /* deferred accept retry after EMFILE */
     bool draining;                          /* shutdown: listener is detached */
     uint64_t shutdown_deadline_ms;          /* when draining started */
     size_t max_conns;                       /* mirrors the pool cap for quick checks */
@@ -61,7 +62,6 @@ typedef struct dx_worker {
     uint64_t accepted_total;
     uint64_t rejected_total;
     uint64_t closed_total;
-    uint64_t requests_total;
 } dx_worker_t;
 
 /*

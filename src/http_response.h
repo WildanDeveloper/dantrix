@@ -36,11 +36,11 @@ size_t dx_http_response_build(char *out, size_t cap, int status, const char *ext
 /*
  * Same as dx_http_response_build(), but with an explicit Connection header
  * value: NULL omits the header (HTTP/1.1 keep-alive), "close" and "keep-alive"
- * are sent as given.
+ * are sent as given. server_tokens false omits the Server header entirely.
  */
 size_t dx_http_response_build_ex(char *out, size_t cap, int status, const char *extra_headers,
                                  const char *content_type, const char *body, size_t body_len,
-                                 bool omit_body, const char *connection);
+                                 bool omit_body, const char *connection, bool server_tokens);
 
 /*
  * Build headers for a body that is streamed afterwards (sendfile). The body
@@ -51,14 +51,14 @@ size_t dx_http_response_build_ex(char *out, size_t cap, int status, const char *
  */
 size_t dx_http_response_headers(char *out, size_t cap, int status, const char *extra_headers,
                                 const char *content_type, size_t content_length, bool omit_body,
-                                const char *connection);
+                                const char *connection, bool server_tokens);
 
 /*
  * Build an error page (fixed body, no input reflection) with an explicit
  * Connection value. Returns the number of bytes written, or 0 on overflow.
  */
 size_t dx_http_response_error_ex(char *out, size_t cap, int status, const char *extra_headers,
-                                 const char *connection);
+                                 const char *connection, bool server_tokens);
 
 /*
  * Build the fixed minimal error page for status. The body never reflects any

@@ -1,0 +1,35 @@
+[Unit]
+Description=Dantrix HTTP Server
+Documentation=https://github.com/WildanDeveloper/dantrix
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dantrix
+Group=dantrix
+Environment=DANTRIX_ROOT=/var/www/dantrix
+Environment=DANTRIX_BIND=0.0.0.0
+Environment=DANTRIX_PORT=8080
+ExecStart=/usr/local/bin/dantrix
+# Reload and reopen are v0.6 features; SIGTERM is the supported stop signal.
+KillSignal=SIGTERM
+# Larger than shutdown_timeout so the graceful drain finishes before SIGKILL.
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=1
+LimitNOFILE=1048576
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/dantrix
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

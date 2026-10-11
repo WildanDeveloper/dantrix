@@ -19,7 +19,8 @@ import tempfile
 import time
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "build/dantrix-asan"
-PORT = 18091
+# Overridable so two suites can run at the same time without colliding.
+PORT = int(os.environ.get("DANTRIX_TEST_PORT", "18091"))
 failures = []
 
 DOCROOT = tempfile.mkdtemp(prefix="dantrix-docroot-")
@@ -377,6 +378,166 @@ def main():
     s.close()
     check("server survives a mid-download disconnect",
           request(b"GET /hello.txt HTTP/1.1\r\nHost: x\r\n\r\n").startswith(b"HTTP/1.1 200 OK"))
+
+    # --- regression suite for the fixed defects ------------------------------
+    # Each block below failed before its fix; they are kept as regressions.
+
+    # BUG-02: with --sendfile off the pread()+send() fallback reported its
+    # success code as a byte count, so every file stopped after the first chunk.
+    big = os.path.join(DOCROOT, "large.bin")
+    payload = bytes(range(256)) * 200  # 51200 bytes, past the 16 KiB scratch
+    with open(big, "wb") as f:
+        f.write(payload)
+
+    resp = request(b"GET /large.bin HTTP/1.1\r\nHost: r\r\nConnection: close\r\n\r\n")
+    check("large file fully delivered (sendfile on)",
+          header_of(resp, b"Content-Length") == b"51200" and body_of(resp) == payload)
+
+    # BUG-03: a request body is counted exactly once, never subtracted twice, so
+    # the answer arrives only after the whole body and the next pipelined
+    # request is still answered.
+    s = connect()
+    s.sendall(b"POST /hello.txt HTTP/1.1\r\nHost: r\r\nContent-Length: 20000\r\n\r\n")
+    time.sleep(0.2)
+    s.sendall(b"x" * 10000)
+    # The body timeout of this suite is 1s, so this wait has to stay well below
+    # it: the check is "no answer yet", not "no answer ever".
+    s.settimeout(0.4)
+    early = b""
+    try:
+        early = s.recv(4096)
+    except socket.timeout:
+        pass
+    check("no answer before the body is complete", early == b"")
+    s.sendall(b"x" * 10000)
+    s.settimeout(5)
+    rest = read_until_eof(s, timeout=5)
+    check("answer after the complete body", rest.startswith(b"HTTP/1.1 405"))
+
+    for cl in (100000, 900000):
+        s = connect()
+        s.sendall(b"POST /hello.txt HTTP/1.1\r\nHost: r\r\nContent-Length: %d\r\n\r\n" % cl)
+        try:
+            s.sendall(b"x" * cl)
+        except OSError:
+            pass
+        s.settimeout(8)
+        got = read_until_eof(s, timeout=8)
+        check(f"body of {cl} bytes answered, not dropped", got.startswith(b"HTTP/1.1 405"))
+        s.close()
+
+    s = connect()
+    s.sendall(b"GET /hello.txt HTTP/1.1\r\nHost: r\r\nContent-Length: 30000\r\n\r\n"
+              + b"x" * 30000
+              + b"GET /hello.txt HTTP/1.1\r\nHost: r\r\nConnection: close\r\n\r\n")
+    s.settimeout(8)
+    data = read_until_eof(s, timeout=8)
+    check("pipelined request behind a large body is answered", data.count(b"HTTP/1.1 200") == 2)
+
+    # BUG-04: a listing larger than the staging buffer used to fail to build the
+    # response, which closed the connection without a single byte.
+    many = os.path.join(DOCROOT, "many")
+    os.makedirs(many, exist_ok=True)
+    for i in range(150):
+        with open(os.path.join(many, f"entry-with-a-longish-name-{i:03d}.txt"), "w") as f:
+            f.write("x")
+    resp = request(b"GET /many/ HTTP/1.1\r\nHost: r\r\nConnection: close\r\n\r\n")
+    body = body_of(resp)
+    check("large directory listing is a complete 200",
+          resp.startswith(b"HTTP/1.1 200 OK")
+          and header_of(resp, b"Content-Length") == str(len(body)).encode()
+          and body.count(b"<li>") == 150
+          and body.endswith(b"</html>\n"))
+
+    # BUG-05: a rejected connection must not keep its descriptor.
+    # (Checked in the dedicated fd test below, which needs its own process.)
+
+    # BUG-06: pipelining must survive every response class that keeps the
+    # connection alive, not only the file path.
+    for first, label in (
+        (b"GET /hello.txt HTTP/1.1\r\nHost: r\r\n\r\n", "200 file"),
+        (b"GET /noindex HTTP/1.1\r\nHost: r\r\n\r\n", "301 redirect"),
+        (b"HEAD /hello.txt HTTP/1.1\r\nHost: r\r\n\r\n", "HEAD"),
+        (b"GET /many/ HTTP/1.1\r\nHost: r\r\n\r\n", "200 listing"),
+        (b"GET /hello.txt HTTP/1.1\r\nHost: r\r\nRange: bytes=0-2\r\n\r\n", "206 range"),
+    ):
+        s = connect()
+        s.sendall(first + b"GET /hello.txt HTTP/1.1\r\nHost: r\r\nConnection: close\r\n\r\n")
+        s.settimeout(6)
+        data = read_until_eof(s, timeout=6)
+        check(f"pipelined request answered after {label}", data.count(b"HTTP/1.1 ") == 2)
+
+    # BUG-08: the requested path is attacker controlled and lands in the HTML
+    # title of a listing, so the directory really has to exist.
+    markup_dir = os.path.join(DOCROOT, "<img src=x onerror=alert(1)>")
+    os.makedirs(markup_dir, exist_ok=True)
+    resp = request(b"GET /%3Cimg%20src=x%20onerror=alert(1)%3E/ HTTP/1.1\r\n"
+                   b"Host: r\r\nConnection: close\r\n\r\n")
+    body = body_of(resp)
+    check("listing title escapes markup", resp.startswith(b"HTTP/1.1 200 OK")
+          and b"<img src=x onerror" not in body
+          and b"&lt;img src=x onerror=alert(1)&gt;" in body)
+
+    # BUG-09: a redirect Location is built from the decoded path and must be a
+    # valid URI that points at the same resource.
+    os.makedirs(os.path.join(DOCROOT, "a b"), exist_ok=True)
+    with open(os.path.join(DOCROOT, "a b", "index.html"), "w") as f:
+        f.write("spaced")
+    resp = request(b"GET /a%20b HTTP/1.1\r\nHost: r\r\nConnection: close\r\n\r\n")
+    check("redirect Location is percent encoded", header_of(resp, b"Location") == b"/a%20b/")
+
+    # BUG-11 / BUG-12: --server-tokens off is honoured and a 304 carries no
+    # Content-Length at all.
+    etag = header_of(request(b"GET /hello.txt HTTP/1.1\r\nHost: r\r\nConnection: close\r\n\r\n"),
+                     b"ETag")
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: r\r\nIf-None-Match: " + etag +
+                   b"\r\nConnection: close\r\n\r\n")
+    check("304 carries no Content-Length",
+          resp.startswith(b"HTTP/1.1 304") and header_of(resp, b"Content-Length") is None)
+
+    # BUG-02 (fallback path) needs its own process: --sendfile off.
+    off_port = PORT + 1
+    off = subprocess.Popen(
+        [BIN, "-b", "127.0.0.1", "-p", str(off_port), "--root", DOCROOT,
+         "--sendfile", "off", "--log-level", "debug"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    ready = False
+    for _ in range(50):
+        if off.poll() is not None:
+            break
+        try:
+            with socket.create_connection(("127.0.0.1", off_port), timeout=0.2):
+                ready = True
+                break
+        except OSError:
+            time.sleep(0.1)
+    if ready:
+        so = socket.create_connection(("127.0.0.1", off_port), timeout=5)
+        so.sendall(b"GET /large.bin HTTP/1.1\r\nHost: r\r\nConnection: close\r\n\r\n")
+        so.settimeout(8)
+        chunks = b""
+        try:
+            while True:
+                c = so.recv(65536)
+                if not c:
+                    break
+                chunks += c
+        except socket.timeout:
+            pass
+        so.close()
+        head, _, got = chunks.partition(b"\r\n\r\n")
+        check("large file fully delivered (sendfile off)",
+              b"200 OK" in head.split(b"\r\n")[0] and got == payload)
+    else:
+        check("sendfile-off server started", False)
+    off_err = b""
+    off.send_signal(signal.SIGTERM)
+    try:
+        _, off_err = off.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        off.kill()
+    check("sendfile-off server had no sanitizer error",
+          b"AddressSanitizer" not in off_err)
 
     # --- graceful shutdown --------------------------------------------------
     idle = connect()  # keeps a connection open across the shutdown

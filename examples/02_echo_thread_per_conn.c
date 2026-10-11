@@ -47,6 +47,10 @@ static void *echo_thread(void *arg)
                 }
                 goto done;
             }
+            if (sent == 0) {
+                /* No progress and no error: retrying would spin forever. */
+                goto done;
+            }
             off += sent;
         }
     }

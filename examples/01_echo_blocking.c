@@ -85,6 +85,10 @@ int main(void)
                     perror("write");
                     break;
                 }
+                if (sent == 0) {
+                    /* No progress and no error: retrying would spin forever. */
+                    break;
+                }
                 off += sent;
             }
         }

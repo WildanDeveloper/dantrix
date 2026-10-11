@@ -46,6 +46,10 @@ static int write_all(int fd, const char *buf, size_t len)
             }
             return -1;
         }
+        if (sent == 0) {
+            /* No progress and no error: retrying would spin forever. */
+            return -1;
+        }
         off += (size_t)sent;
     }
     return 0;

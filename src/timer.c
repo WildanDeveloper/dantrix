@@ -94,9 +94,15 @@ static void detach(dx_timer_wheel_t *wheel, dx_timer_node_t *node)
     if (wheel->active > 0) {
         wheel->active--;
     }
-    if (node->deadline_ms == wheel->slot_min[slot]) {
-        refresh_slot_min(wheel, slot);
-    }
+    /*
+     * The cached minimum must be recomputed unconditionally. The lazy refresh
+     * path raises node->deadline_ms without touching slot_min, so comparing
+     * the two is not a valid test for "the removed node was the minimum": the
+     * cache can be stale in both directions and a leftover past deadline in an
+     * empty bucket would make next_timeout_ms() return 0 forever, spinning the
+     * event loop. Buckets hold a handful of nodes, so the scan is cheap.
+     */
+    refresh_slot_min(wheel, slot);
 }
 
 /* Link a node into the bucket its deadline belongs to. */
@@ -222,23 +228,43 @@ size_t dx_timer_wheel_advance(dx_timer_wheel_t *wheel, uint64_t now_ms,
 
     for (size_t s = 0; s < steps; s++) {
         uint32_t bucket = (uint32_t)((start_tick + s) % DX_TIMER_SLOTS);
-        dx_timer_node_t *node = wheel->slots[bucket];
+        bool progressed = true;
 
-        while (node != NULL) {
-            dx_timer_node_t *next = node->next;
+        /*
+         * The bucket is re-scanned from its head after every firing. The old
+         * walk followed the saved "next" pointer, but a callback may cancel or
+         * re-arm another node of the same bucket: the walk then visited a node
+         * that was no longer linked, counted it down a second time and
+         * refreshed the cached minimum of a bucket it did not belong to.
+         *
+         * Re-anchoring is the only way to stay correct under that mutation. It
+         * costs one extra linear pass per bucket, and callbacks do not touch
+         * other timers in this server, so the usual shape is two passes.
+         */
+        while (progressed) {
+            dx_timer_node_t *node;
+            dx_timer_node_t *due = NULL;
 
+            progressed = false;
+            for (node = wheel->slots[bucket]; node != NULL; node = node->next) {
+                if (node->active && node->deadline_ms <= now_ms) {
+                    due = node;
+                    break;
+                }
+            }
+            if (due == NULL) {
+                break;
+            }
             /*
              * Fire against the absolute deadline, not the bucket turn, so a
              * timer that shares a bucket with a later one is not fired early.
              */
-            if (node->deadline_ms <= now_ms) {
-                detach(wheel, node);
-                fired++;
-                if (on_expire != NULL) {
-                    on_expire(ctx, node);
-                }
+            detach(wheel, due);
+            fired++;
+            progressed = true;
+            if (on_expire != NULL) {
+                on_expire(ctx, due);
             }
-            node = next;
         }
     }
     wheel->processed_ms = end_tick * DX_TIMER_TICK_MS;

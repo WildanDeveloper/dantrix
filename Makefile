@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.1.0
+VERSION := 0.4.1
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -76,7 +76,7 @@ EX_SRC := $(wildcard $(EXAMPLES)/*.c)
 EX_BINS := $(patsubst $(EXAMPLES)/%.c,$(BUILD)/%,$(EX_SRC))
 
 .PHONY: all release debug profile asan tsan examples \
-        test test-unit test-asan test-tsan test-c10k \
+        test test-unit test-asan test-tsan test-regression test-c10k \
         lint format format-check coverage bench stress fuzz valgrind \
         install uninstall docker clean distclean help
 
@@ -89,14 +89,20 @@ debug: $(BUILD)/debug/dantrix
 profile: $(BUILD)/profile/dantrix
 
 # --- Compile rules --------------------------------------------------------
+# -MMD -MP records the headers each object depends on. Without it a changed
+# header left stale objects in place, and the mismatched struct layouts showed
+# up as wrong counters at runtime instead of a rebuild.
+DEPFLAGS := -MMD -MP
+DEPS := $(LIB_OBJS:.o=.d) $(MAIN_OBJ:.o=.d) $(DBG_OBJS:.o=.d) $(DBG_MAIN:.o=.d)
+
 $(BUILD)/release/%.o: $(SRC)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(ALL_CFLAGS) -c $< -o $@
+	$(CC) $(ALL_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD)/debug/%.o: $(SRC)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(DEFS) $(WARN) $(HARDEN_C) $(DBG_CFLAGS) $(CFLAGS_EXTRA) \
-	    -c $< -o $@
+	    $(DEPFLAGS) -c $< -o $@
 
 $(BIN)/dantrix: $(LIB_OBJS) $(MAIN_OBJ)
 	@mkdir -p $(dir $@)
@@ -174,10 +180,10 @@ test-tsan:
 	for src in $(TEST_SRCS); do \
 	    name=$$(basename $$src .c); \
 	    $(CC) $(STD) $(DEFS) $(WARN) -O1 -g -fsanitize=thread \
-	        -I$(SRC) -I$(TESTS) $(SRC)/util.c $(SRC)/log.c \
-	        $(TESTS)/$$src -o $(BUILD)/$${name#test_}_tsan -lpthread || exit 1; \
+	        -I$(SRC) -I$(TESTS) $(LIB_SRCS) $$src \
+	        -o $(BUILD)/$${name#test_}_tsan -lpthread || exit 1; \
 	done; \
-	echo "build TSan test binaries with the command above"
+	echo "built $(words $(TEST_SRCS)) TSan test binaries in $(BUILD)"
 
 valgrind:
 	@command -v valgrind >/dev/null 2>&1 || { \
@@ -235,6 +241,9 @@ stress:
 # can be overridden: make test-c10k N=2000
 N ?= 10000
 
+test-regression:
+	@python3 tests/regression_test.py $(BIN)/dantrix
+
 test-c10k: release
 	@python3 tests/c10k_test.py $(N) $(BIN)/dantrix
 
@@ -278,3 +287,6 @@ distclean: clean
 
 help:
 	@sed -n '1,12p' Makefile
+
+# --- Generated header dependencies ----------------------------------------
+-include $(DEPS)

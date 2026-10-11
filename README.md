@@ -116,6 +116,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Incremental HTTP/1.1 parser and error responses | ✅ | v0.2.0 |
 | Static files: `sendfile`, MIME, `HEAD`, `ETag`, `Range` | ✅ | v0.3.0 |
 | Keep-alive, pipelining, timer wheel, timeouts | ✅ | v0.4.0 |
+| Defect audit of v0.4.0 (34 defects, regression suite) | ✅ | v0.4.1 |
 | Multi-worker with `SO_REUSEPORT` | 📝 | v0.5.0 |
 | Configuration, CLI, signals, graceful shutdown and reload | 📝 | v0.6.0 |
 | Benchmark suite and optimization | 📝 | v0.7.0 |
@@ -163,7 +164,8 @@ The **Target** column shows the release version in which the feature is schedule
 | HTTP | Incremental HTTP/1.1 parser | Zero-copy and strict (resistant to request smuggling) | v0.2 |
 | HTTP | Methods `GET`, `HEAD`, `OPTIONS` | `405` or `501` for other methods | v0.2 |
 | HTTP | Standard error responses | 400, 403, 404, 405, 408, 413, 414, 416, 431, 500, 501, 505 | v0.2 |
-| Operations | Logging | Access and error logs; common, combined, json formats; per-worker buffer | v0.2 to v0.6 |
+| Operations | Logging | Access and error logs, common and combined formats | v0.2 |
+| Operations | Logging | `json` format and per-worker buffered writes | v0.6 |
 | Static | Static file serving | Zero-copy `sendfile()` and `MSG_MORE` | v0.3 |
 | Static | MIME types | Built-in table and custom file | v0.3 |
 | Static | Cache validators | `ETag`, `Last-Modified`, `304 Not Modified` | v0.3 |
@@ -1086,7 +1088,17 @@ Each worker writes to its **own buffer**, which is flushed when full, every 1 se
 
 ### Log rotation
 
-Send `SIGUSR1` to the process so that Dantrix reopens its log files (compatible with `logrotate`; an example configuration is in [Deployment](#deployment)). When logs are written to `stdout`/`stderr` (for example under systemd or Docker), rotation is handled by the platform.
+Log records are written synchronously and flushed one line at a time, so a
+`logrotate` configuration has to use `copytruncate` (or restart the service)
+until the reopen signal exists.
+
+**Planned (v0.6):** `SIGUSR1` will reopen the log files so `logrotate` can use
+`postrotate` with a plain signal. Until then the shipped
+`deploy/dantrix.logrotate` leaves that hook disabled, because the default
+`SIGUSR1` disposition would terminate the process.
+
+When logs are written to `stdout`/`stderr` (for example under systemd or
+Docker), rotation is handled by the platform.
 
 ---
 
@@ -1146,46 +1158,34 @@ dantrix/
 │   ├── fuzz_path.c
 │   └── corpus/                   # seed input
 ├── src/
-│   ├── main.c
+│   ├── main.c                    # CLI: flag, durasi, validasi
 │   ├── dantrix.h                 # konstanta, makro, versi
-│   ├── config.c / config.h
-│   ├── server.c / server.h
-│   ├── worker.c / worker.h
-│   ├── conn.c / conn.h
+│   ├── server.c / server.h       # bring-up: listener, sinyal, siklus worker
+│   ├── worker.c / worker.h       # event loop epoll, accept, drain, timeout
+│   ├── conn.c / conn.h           # slot koneksi, pool, alur HTTP per koneksi
 │   ├── http_parser.c / http_parser.h
 │   ├── http_response.c / http_response.h
-│   ├── static_handler.c / static_handler.h
+│   ├── http_range.c / http_range.h
+│   ├── file.c / file.h           # document root, openat2, listing
 │   ├── path.c / path.h
 │   ├── mime.c / mime.h
-│   ├── timer_wheel.c / timer_wheel.h
-│   ├── buffer.c / buffer.h
+│   ├── timer.c / timer.h         # hashed timing wheel
+│   ├── buffer.c / buffer.h       # buffer dan slab pool
 │   ├── log.c / log.h
 │   ├── net.c / net.h
-│   ├── signals.c / signals.h
-│   ├── stats.c / stats.h
 │   └── util.c / util.h
 ├── tests/
-│   ├── unit/
-│   │   ├── testing.h             # harness minimal tanpa dependensi
-│   │   ├── test_http_parser.c
-│   │   ├── test_path.c
-│   │   ├── test_timer_wheel.c
-│   │   ├── test_buffer.c
-│   │   ├── test_config.c
-│   │   └── test_mime.c
-│   ├── integration/
-│   │   ├── conftest.py           # menjalankan server di port acak
-│   │   ├── test_basic.py
-│   │   ├── test_conditional.py
-│   │   ├── test_range.py
-│   │   ├── test_keepalive.py
-│   │   ├── test_pipelining.py
-│   │   ├── test_malformed.py
-│   │   ├── test_limits.py
-│   │   ├── test_path_traversal.py
-│   │   ├── test_signals.py
-│   │   └── test_concurrency.py
-│   └── data/                     # berkas fixture
+│   ├── unit/                     # harness C minimal, tanpa dependensi
+│   │   ├── testing.h
+│   │   ├── test_http_parser.c    test_http_range.c
+│   │   ├── test_http_response.c  test_path.c
+│   │   ├── test_file.c           test_mime.c
+│   │   ├── test_timer.c          test_pool.c
+│   │   ├── test_buffer.c         test_log.c
+│   │   └── test_util.c
+│   ├── smoke_test.py             # integrasi end-to-end (mulai server sendiri)
+│   ├── regression_test.py        # regresi yang butuh proses server terpisah
+│   └── c10k_test.py              # N koneksi bersamaan
 ├── .clang-format
 ├── .clang-tidy
 ├── .editorconfig
@@ -1203,30 +1203,32 @@ dantrix/
 
 | Module | Responsibilities |
 |---|---|
-| `main.c` | Entry point: parse the CLI and configuration, initialize, run the server |
-| `config.c` | File, environment, and CLI parsers; validation; an immutable configuration snapshot |
-| `server.c` | Creates listeners, runs workers, the main thread loop (`signalfd`) |
-| `worker.c` | Per-worker event loop, accept loop, event dispatch |
-| `conn.c` | Connection pool, state machine, read and write I/O |
+| `main.c` | Entry point: parse the CLI, durations and limits, then hand over to the server |
+| `server.c` | Listener bring-up, signal handlers, runs the worker loop |
+| `worker.c` | Event loop, accept loop, event dispatch, timeout policy, graceful drain |
+| `conn.c` | Slot pool, per-connection state machine, read/write I/O, static responses |
 | `http_parser.c` | Incremental and strict request parser |
 | `http_response.c` | Response header assembler and error pages |
-| `static_handler.c` | File resolution, conditional headers, Range, `sendfile` |
-| `path.c` | Percent-decoding, normalization, safe file opening (`openat2`) |
+| `http_range.c` | `Range` parsing and `If-Range` matching |
+| `file.c` | Document root, `openat2`, index files, redirects, directory listings |
+| `path.c` | Percent-decoding and normalization of the request target |
 | `mime.c` | Extension to MIME type table |
-| `timer_wheel.c` | Hashed timing wheel |
-| `buffer.c` | Buffers and the buffer pool |
-| `log.c` | Buffered logger, common, combined, json formats |
+| `timer.c` | Hashed timing wheel |
+| `buffer.c` | Buffers and the buffer slab pool |
+| `log.c` | Error and access logger, common and combined formats |
 | `net.c` | Socket helpers (`listen_tcp`, `set_nonblock`, TCP options) |
-| `signals.c` | Signal blocking and `signalfd` |
-| `stats.c` | Per-worker counters and aggregation |
 | `util.c` | Time (including the `Date` cache), number conversion, safe string functions |
+
+Planned modules that do not exist yet: `config.c` (file and environment
+configuration, v0.6), `signals.c` (`signalfd`, v0.6) and `stats.c` (per-worker
+counters exposed as metrics, v0.6).
 
 **Dependency layers** (a module may only depend downward):
 
 ```text
-main -> server -> worker -> conn -> {http_parser, http_response, static_handler}
-                                         static_handler -> {path, mime}
-semua modul -> {buffer, log, net, util, stats, timer_wheel}
+main -> server -> worker -> conn -> {http_parser, http_response, http_range}
+                                  conn -> {path, mime, file}
+semua modul -> {buffer, log, net, util, timer}
 ```
 
 ---
@@ -2121,6 +2123,18 @@ Each release has a single capability as its theme. A checked box marks completed
 - [x] Hashed timing wheel and all timeouts (header, body, send, idle)
 - [x] Buffer release when a connection is idle
 - [x] C10K test: 10,000 idle connections pass
+
+### v0.4.1: Defect audit
+
+- [x] Timer wheel: stale bucket minimum (100% CPU spin) and mutation during fire
+- [x] Request body: double counting, desynchronisation, bodies larger than the buffer
+- [x] File bodies with `--sendfile off`, large directory listings
+- [x] Descriptor leak on rejected connections, stale slot state and double close
+- [x] Pipelining on every response class, graceful shutdown drain
+- [x] Reflected XSS in the listing title, `Location` double decode
+- [x] `mime.types` overflow at the 1 MiB cap, `--server-tokens`, `304 Content-Length`
+- [x] Build: header dependencies, broken `test-tsan`, stale version, missing `deploy/` files
+- [x] Regression suite: `tests/regression_test.py` plus new unit and smoke checks
 
 ### v0.5.0: Multi-core
 

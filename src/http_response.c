@@ -87,8 +87,6 @@ const char *dx_http_status_reason(int status)
         return "URI Too Long";
     case 416:
         return "Range Not Satisfiable";
-    case 417:
-        return "Expectation Failed";
     case 431:
         return "Request Header Fields Too Large";
     case 500:
@@ -110,7 +108,8 @@ const char *dx_http_status_reason(int status)
  */
 static size_t response_assemble(char *out, size_t cap, int status, const char *extra_headers,
                                 const char *content_type, const char *body, size_t content_length,
-                                bool omit_body, bool body_present, const char *connection)
+                                bool omit_body, bool body_present, const char *connection,
+                                bool server_tokens)
 {
     strbuf_t sb;
     char date[40];
@@ -130,8 +129,12 @@ static size_t response_assemble(char *out, size_t cap, int status, const char *e
     sb_append_str(&sb, dx_http_status_reason(status));
     sb_append_str(&sb, "\r\n");
 
-    /* Fixed server headers. */
-    sb_append_str(&sb, "Server: " DX_PROGRAM_NAME "/" DX_VERSION_STRING "\r\n");
+    /* Fixed server headers. The token line can be switched off with
+     * --server-tokens off; it used to be emitted unconditionally, so the flag
+     * was parsed and then silently ignored. */
+    if (server_tokens) {
+        sb_append_str(&sb, "Server: " DX_PROGRAM_NAME "/" DX_VERSION_STRING "\r\n");
+    }
 
     if (dx_http_date(date, sizeof(date), -1) > 0) {
         sb_append_str(&sb, "Date: ");
@@ -148,10 +151,17 @@ static size_t response_assemble(char *out, size_t cap, int status, const char *e
     /*
      * Content-Length always describes the body the client would receive, so a
      * HEAD response carries the same length as its GET twin (RFC 9110 9.3.2).
+     *
+     * 204 and 304 must not carry one at all: neither has a body, and a length
+     * on a 304 that does not match the 200 it answers makes clients truncate
+     * or wait. "Content-Length: 0" on a 304 told the client the cached
+     * representation is empty.
      */
-    sb_append_str(&sb, "Content-Length: ");
-    sb_append_num(&sb, (unsigned long long)content_length);
-    sb_append_str(&sb, "\r\n");
+    if (status != 204 && status != 304) {
+        sb_append_str(&sb, "Content-Length: ");
+        sb_append_num(&sb, (unsigned long long)content_length);
+        sb_append_str(&sb, "\r\n");
+    }
 
     if (connection != NULL && connection[0] != '\0') {
         sb_append_str(&sb, "Connection: ");
@@ -180,33 +190,33 @@ size_t dx_http_response_build(char *out, size_t cap, int status, const char *ext
                               bool omit_body)
 {
     return response_assemble(out, cap, status, extra_headers, content_type, body, body_len,
-                             omit_body, true, "close");
+                             omit_body, true, "close", true);
 }
 
 size_t dx_http_response_build_ex(char *out, size_t cap, int status, const char *extra_headers,
                                  const char *content_type, const char *body, size_t body_len,
-                                 bool omit_body, const char *connection)
+                                 bool omit_body, const char *connection, bool server_tokens)
 {
     return response_assemble(out, cap, status, extra_headers, content_type, body, body_len,
-                             omit_body, true, connection);
+                             omit_body, true, connection, server_tokens);
 }
 
 size_t dx_http_response_headers(char *out, size_t cap, int status, const char *extra_headers,
                                 const char *content_type, size_t content_length, bool omit_body,
-                                const char *connection)
+                                const char *connection, bool server_tokens)
 {
     /* No body bytes follow: Content-Length describes the streamed file. */
     return response_assemble(out, cap, status, extra_headers, content_type, NULL, content_length,
-                             omit_body, false, connection);
+                             omit_body, false, connection, server_tokens);
 }
 
 size_t dx_http_response_error(char *out, size_t cap, int status, const char *extra_headers)
 {
-    return dx_http_response_error_ex(out, cap, status, extra_headers, "close");
+    return dx_http_response_error_ex(out, cap, status, extra_headers, "close", true);
 }
 
 size_t dx_http_response_error_ex(char *out, size_t cap, int status, const char *extra_headers,
-                                 const char *connection)
+                                 const char *connection, bool server_tokens)
 {
     /*
      * Fixed body: the status and reason are server controlled, so no client
@@ -230,8 +240,8 @@ size_t dx_http_response_error_ex(char *out, size_t cap, int status, const char *
         return 0;
     }
 
-    return dx_http_response_build_ex(out, cap, status, extra_headers, "text/html; charset=utf-8",
-                                     body, b.len, false, connection);
+    return response_assemble(out, cap, status, extra_headers, "text/html; charset=utf-8", body,
+                             b.len, false, true, connection, server_tokens);
 }
 
 dx_dispatch_t dx_http_dispatch_method(const dx_http_request_t *req, const unsigned char *base,

@@ -1,0 +1,20 @@
+# Log rotation for Dantrix. Only relevant when the logs are written to files:
+# under systemd or Docker the platform rotates them.
+#
+# SIGUSR1 reopens the log files and is a v0.6 feature. Until it exists the
+# postrotate hook must not send the signal, because the default SIGUSR1
+# disposition terminates the process.
+/var/log/dantrix/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 dantrix dantrix
+    sharedscripts
+    postrotate
+        # systemctl kill --kill-who=main --signal=SIGUSR1 dantrix.service || true
+        :
+    endscript
+}

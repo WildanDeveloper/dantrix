@@ -220,6 +220,11 @@ static void mime_load_custom(dx_mime_t *m, char *data, size_t len)
             pos = end + 1u;
             continue; /* blank line: nothing to map, and it has no terminator */
         }
+        /*
+         * The buffer is allocated with one spare byte so the last line of a
+         * file that ends exactly at the size cap can be terminated here.
+         * Terminating the newline itself is fine; data[len] is not written.
+         */
         data[end] = '\0';
         /* Comments end the line; the trailing semicolon is optional. */
         hash = strchr(data + pos, '#');
@@ -252,8 +257,10 @@ dx_mime_t *dx_mime_create(const char *custom_file, const char *default_type)
         FILE *f = fopen(custom_file, "rb");
 
         if (f != NULL) {
+            /* cap bytes are read; one extra byte keeps room for the
+             * terminator that mime_load_custom() writes after the last line. */
             size_t cap = 8192u;
-            char *buf = (char *)malloc(cap);
+            char *buf = (char *)malloc(cap + 1u);
 
             if (buf != NULL) {
                 size_t len = 0;
@@ -270,7 +277,7 @@ dx_mime_t *dx_mime_create(const char *custom_file, const char *default_type)
                         break; /* refuse pathological files */
                     }
                     cap *= 2u;
-                    bigger = (char *)realloc(buf, cap);
+                    bigger = (char *)realloc(buf, cap + 1u);
                     if (bigger == NULL) {
                         break;
                     }
@@ -321,19 +328,30 @@ const char *dx_mime_type_for(const dx_mime_t *m, const char *path)
 size_t dx_mime_content_type(const dx_mime_t *m, const char *path, char *out, size_t cap)
 {
     const char *type;
-    size_t n;
+    int w;
 
     if (out == NULL || cap == 0) {
         return 0;
     }
     type = dx_mime_type_for(m, path);
     if (!wants_charset(type)) {
+        /*
+         * copy_bounded() truncates silently; the documented contract of this
+         * function is "0 when the buffer is too small", and the caller uses
+         * that to avoid emitting a broken Content-Type.
+         */
+        if (strlen(type) >= cap) {
+            out[0] = '\0';
+            return 0;
+        }
         return copy_bounded(out, cap, type);
     }
-    n = (size_t)snprintf(out, cap, "%s; charset=utf-8", type);
-    if (n >= cap) {
+    w = snprintf(out, cap, "%s; charset=utf-8", type);
+    if (w < 0 || (size_t)w >= cap) {
+        /* Encoding failure or truncation: the caller must not emit a partial
+         * Content-Type, so report "did not fit". */
         out[0] = '\0';
         return 0;
     }
-    return n;
+    return (size_t)w;
 }

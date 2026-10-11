@@ -19,7 +19,8 @@ import time
 
 COUNT = int(sys.argv[1]) if len(sys.argv) > 1 else 10000
 BIN = sys.argv[2] if len(sys.argv) > 2 else "bin/dantrix"
-PORT = 18095
+# Overridable so two suites can run at the same time without colliding.
+PORT = int(os.environ.get("DANTRIX_C10K_PORT", "18095"))
 failures = []
 
 

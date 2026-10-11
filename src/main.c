@@ -242,7 +242,6 @@ int main(int argc, char **argv)
                                               {"max-header-size", required_argument, NULL, 'H'},
                                               {"max-headers", required_argument, NULL, 'N'},
                                               {"workers", required_argument, NULL, 'w'},
-                                              {"root", required_argument, NULL, 'r'},
                                               {"access-log", required_argument, NULL, 'A'},
                                               {"log-format", required_argument, NULL, 'F'},
                                               {"error-log", required_argument, NULL, 'E'},
@@ -502,6 +501,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "dantrix: cannot use document root '%s': %s\n", root, dx_strerror(errno));
         return DX_EXIT_FATAL;
     }
+    /*
+     * Report which path resolution the kernel provides. The probe used to
+     * exist but was never called, so the operator had no way to tell whether
+     * RESOLVE_BENEATH or the manual walk was enforcing the root.
+     */
+    fprintf(stderr, "dantrix: path resolution: %s\n",
+            dx_fs_has_openat2() ? "openat2(RESOLVE_BENEATH)" : "manual walk (openat2 unavailable)");
     mime = dx_mime_create(mime_types, default_type);
     if (mime == NULL) {
         fprintf(stderr, "dantrix: cannot build the MIME table\n");

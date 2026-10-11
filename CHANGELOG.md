@@ -12,6 +12,121 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.4.1] - 2026-10-11
+
+Audit release. Every defect below was reproduced before the fix and is now
+covered by a test: the unit suite (regressions in `test_timer.c`, `test_pool.c`,
+`test_mime.c`), `tests/smoke_test.py`, and the new `tests/regression_test.py`
+for the cases that need their own server process.
+
+### Fixed
+
+- **Event loop could spin at 100% CPU forever.** The timing wheel cached the
+  minimum deadline per bucket, but the lazy refresh path raises a node deadline
+  without touching that cache. A removal then compared the raised deadline
+  against the old minimum, decided the removed node was not the minimum and
+  skipped the recompute, leaving a past deadline in an empty bucket.
+  `next_timeout_ms()` answered `0` from then on and `epoll_wait(0)` never
+  blocked. `detach()` now always recomputes.
+- **Timer callbacks that mutate the wheel.** `advance()` followed a saved
+  `next` pointer into a node that a callback had already detached, counting the
+  active total down twice and refreshing the cached minimum of a bucket the
+  node no longer belonged to. The bucket is now re-scanned after each firing.
+- **Request bodies were double counted.** Every read recomputed the buffered
+  body total and subtracted it again, so `body_left` fell faster than bytes
+  arrived: the server answered before the body was complete and handed the rest
+  to the parser as the next request (desynchronisation), and any body larger
+  than the read buffer ended the connection with no response at all. Body bytes
+  are now counted once and dropped as they arrive, with the header block moved
+  into an owned copy, so a body of any size streams through a fixed window and
+  a pipelined request behind it is still answered.
+- **File bodies were truncated with `--sendfile off`.** The pread()+send()
+  fallback read `dx_send_all()`'s return value as a byte count; it reports
+  success as `0`, which the loop read as "file ended early", so every file
+  stopped after the first 16 KiB chunk. The fallback now streams through the
+  connection buffer, which also makes a partial send resumable.
+- **Large directory listings answered nothing.** A listing that did not fit
+  the 2 KiB staging buffer could not be turned into a response, so the
+  connection was closed with zero bytes. The body is rendered into an owned
+  buffer and streamed like a file body.
+- **Rejected connections leaked a descriptor.** Both rejection paths in
+  `conn_open()` returned without closing the descriptor `accept4()` had just
+  handed over: one leak per refused client, which exhausts the process under
+  load.
+- **Pipelined requests were dropped on most response paths.** Only the file
+  path consumed the request bytes and parked the bytes that followed, so a
+  redirect, a listing, `HEAD`, `304` or `416` overwrote them with the response.
+  `conn_finish()` is now the single place that drops the request, parks the
+  pipelined bytes and stages the response.
+- **Graceful shutdown skipped live connections.** Connection slots are handed
+  out from the top of the free list, so with `--max-conns 2` the live
+  connections sit at indices 1023 and 1022 while the drain loop scanned
+  `[0, max_conns)`: nothing was closed gracefully and every access log line was
+  lost. The loop now walks the pool's real slot space.
+- **Reflected XSS through the listing title.** The requested path is attacker
+  controlled and was written into `<title>` and `<h1>` unescaped; a directory
+  named `<img src=x onerror=...>` became markup. It is HTML escaped now.
+- **`Location` was built from the decoded path.** A redirect could emit a raw
+  space or a `#`, which is not a valid URI-reference, and double decoding
+  pointed at a different resource. The path is percent encoded again.
+- **Heap buffer overflow loading a large `mime.types`.** The reader allocated
+  exactly the bytes it read and then terminated the last line one byte past the
+  end when the file reached the 1 MiB cap. The allocation carries one spare
+  byte and the terminator is only written inside it.
+- **`--server-tokens off` was ignored.** The flag was parsed and never read;
+  responses always carried `Server: Dantrix/x.y.z`. The setting now reaches the
+  response builder.
+- **`304` responses carried `Content-Length: 0`**, which told a client the
+  cached representation was empty. `304` and `204` carry no `Content-Length` at
+  all now.
+- **A recycled connection slot kept the previous owner's state.** Reset only
+  cleared part of the slot, and never freed the read buffer that had outgrown
+  its pooled slot, the parked pipelined bytes or the scratch allocations.
+  `dx_pool_release()` now resets the slot, so the invariant holds on every
+  path. Reset also stopped closing a stale `file_fd`: descriptor numbers are
+  reused, and closing one that belonged to the previous owner closed the *next*
+  connection's descriptor (`epoll_ctl(ADD): Bad file descriptor`).
+- **A `408` could be truncated.** The result of the write was ignored and the
+  connection was closed immediately; on `EAGAIN` the client received a partial
+  error page. The pending response is now finished through the writable path,
+  bounded by the send timeout.
+- **Descriptor exhaustion stalled the event loop.** `accept_loop()` slept
+  100 ms inside the loop on `EMFILE`, stalling every other connection. The
+  listener is now removed from the epoll set and the retry is scheduled on the
+  timer wheel, so there is neither a spin nor a sleep.
+- **`accept4()` peer address was read uninitialised**, and `conn.hold` was
+  parsed as if it held body bytes.
+- Uninitialised `sockaddr_storage`, a duplicated `--root` option, a signed
+  comparison against `0x20` in the fuzz harness, a `snprintf()` result cast to
+  `size_t` without a negative check, a silent MIME truncation, pointer
+  comparison across distinct allocations in the buffer pool, a stale
+  `content_type` read by the path fuzz harness, an unused `dx_sockerr()`, a
+  `417` reason phrase the server never emits, and `write()` returning `0`
+  spinning forever in the teaching examples.
+
+### Changed
+
+- `make` now tracks header dependencies (`-MMD -MP`). A changed header used to
+  leave stale objects behind, and the mismatched struct layouts surfaced as
+  wrong counters at runtime instead of a rebuild.
+- `make test-tsan` builds every test against the whole library (the target
+  referenced a doubled path and could not run at all); `VERSION` in the
+  `Makefile` was `0.1.0`.
+- The test scripts take their port from `DANTRIX_TEST_PORT` /
+  `DANTRIX_C10K_PORT` so two suites can run at the same time.
+- `deploy/` ships the files the README referenced: `dantrix.service`,
+  `dantrix.logrotate`, `sysctl-dantrix.conf`, `Dockerfile`,
+  `docker-compose.yml`. The `logrotate` hook does not send `SIGUSR1` yet:
+  that signal is a v0.6 feature and its default disposition would kill the
+  process.
+- Documentation now matches the code: the listing and module sections name the
+  files that exist, the log section states that records are written
+  synchronously and that reopening is planned, and `conf/dantrix.conf` no
+  longer advertises the `json` log format.
+- The server prints which path resolution the kernel provides at start-up
+  (`openat2(RESOLVE_BENEATH)` or the manual walk), which the unused
+  `dx_fs_has_openat2()` probe already knew.
+
 ## [0.4.0] - 2026-10-11
 
 ### Added

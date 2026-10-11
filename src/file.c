@@ -13,6 +13,12 @@
 
 #define DX_INDEX_MAX 64u
 #define DX_LISTING_MAX 512u
+/*
+ * Room for the escaped heading path. The heading is cosmetic, so an
+ * over-long path is truncated instead of failing the whole listing: every
+ * byte may expand to six characters (&quot; and friends).
+ */
+#define DX_LISTING_TITLE_MAX 1024u
 
 struct dx_fs {
     int root_fd;
@@ -44,6 +50,9 @@ bool dx_fs_has_openat2(void)
      * must not disable the syscall for real requests. */
     return errno != ENOSYS;
 }
+
+/* Percent-encode a file name or path for use in a URI; defined further down. */
+static size_t url_encode(const char *src, size_t len, char *out, size_t cap);
 
 /* Map an open failure onto the response classes of the README. */
 static dx_open_t classify_errno(int err)
@@ -270,10 +279,23 @@ dx_open_t dx_fs_open(dx_fs_t *fs, const char *rel_path, bool had_trailing_slash,
         /* A directory requested without a trailing slash is redirected. */
         if (!had_trailing_slash) {
             if (location != NULL) {
-                int n = snprintf(location, location_cap, "/%s/", rel_path);
+                /*
+                 * rel_path is the percent-decoded name, so it is re-encoded
+                 * here: a raw space, a '#' or a '?' would either make the
+                 * Location an invalid URI-reference or point at a different
+                 * resource than the one being redirected to.
+                 */
+                char encoded[DX_LOCATION_MAX];
+                size_t n = url_encode(rel_path, strlen(rel_path), encoded, sizeof(encoded) - 2u);
+                int w;
 
-                if (n >= 0 && (size_t)n < location_cap && location_len != NULL) {
-                    *location_len = (size_t)n;
+                if (n == 0) {
+                    return DX_OPEN_ERROR; /* cannot be represented */
+                }
+                encoded[n] = '\0';
+                w = snprintf(location, location_cap, "/%s/", encoded);
+                if (w >= 0 && (size_t)w < location_cap && location_len != NULL) {
+                    *location_len = (size_t)w;
                 }
             }
             return DX_OPEN_REDIRECT;
@@ -466,10 +488,27 @@ size_t dx_fs_list(dx_fs_t *fs, const char *rel_path, char *out, size_t cap)
 
     qsort(names, count, sizeof(names[0]), name_cmp);
 
-    n = snprintf(out, cap,
-                 "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">"
-                 "<title>Index of /%s</title></head><body><h1>Index of /%s</h1><ul>\n",
-                 rel_path, rel_path);
+    /*
+     * The heading carries the requested path, which is attacker controlled:
+     * a directory called "<img src=x onerror=...>" must not become markup.
+     * Escape it, and fall back to a neutral heading when it does not fit.
+     */
+    {
+        char title[DX_LISTING_TITLE_MAX];
+        size_t path_len = strlen(rel_path);
+        size_t room = (sizeof(title) - 1u) / 6u;
+
+        if (path_len > room) {
+            path_len = room; /* truncated heading, not a failed listing */
+        }
+        if (dx_html_escape(rel_path, path_len, title, sizeof(title)) == 0) {
+            (void)copy_bounded(title, sizeof(title), "listing");
+        }
+        n = snprintf(out, cap,
+                     "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">"
+                     "<title>Index of /%s</title></head><body><h1>Index of /%s</h1><ul>\n",
+                     title, title);
+    }
     if (n < 0 || (size_t)n >= cap) {
         o = 0;
     } else {

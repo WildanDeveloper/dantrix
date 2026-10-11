@@ -17,17 +17,6 @@ const char *dx_strerror(int err)
     return (s != NULL) ? s : "unknown error";
 }
 
-const char *dx_sockerr(int fd)
-{
-    int err = 0;
-    socklen_t len = sizeof(err);
-
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0) {
-        return dx_strerror(errno);
-    }
-    return dx_strerror(err);
-}
-
 int dx_set_nonblock(int fd)
 {
     int flags = fcntl(fd, F_GETFL, 0);

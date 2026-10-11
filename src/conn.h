@@ -28,6 +28,13 @@ typedef enum {
 struct dx_worker; /* defined in worker.h */
 
 /*
+ * Size of the stack buffer a response is built in before it is staged in the
+ * connection read buffer. Shared so every response path (including the one in
+ * worker.c that writes a 408) sizes its staging buffer the same way.
+ */
+#define DX_RESPONSE_TMP 2048u
+
+/*
  * What the access logger needs about the request that was served. Strings are
  * bounded copies of client input; escaping happens at log write time.
  */
@@ -54,11 +61,28 @@ typedef struct {
     unsigned char *buf_mem; /* pool slot to hand back, NULL when malloc'd */
     unsigned char *hold;    /* pipelined bytes parked while a response is staged */
     size_t hold_len;
-    int file_fd;           /* file being streamed, -1 when none */
-    uint64_t file_offset;  /* next byte to read from file_fd */
-    uint64_t file_left;    /* response body bytes still to send */
-    uint64_t body_left;    /* request body bytes still to be discarded */
-    size_t body_offset;    /* where the body starts inside the read buffer */
+    int file_fd;          /* file being streamed, -1 when none */
+    uint64_t file_offset; /* next byte to read from file_fd */
+    uint64_t file_left;   /* response body bytes still to send */
+    /*
+     * In-memory response body (the directory listing). Owned by the
+     * connection because it outlives the stack frame that built it,
+     * and streamed through the same buffer as the headers.
+     */
+    unsigned char *mem_body;
+    size_t mem_body_len;
+    size_t mem_body_off;
+    uint64_t body_left; /* request body bytes still to be discarded */
+    uint64_t body_seen; /* body bytes already accounted for in body_left */
+    size_t body_offset; /* where the body starts inside the read buffer */
+    /*
+     * Header block moved out of the read buffer while a request body is
+     * drained. The parser addresses a request by offsets into that
+     * block, so the copy keeps every offset valid while the read buffer
+     * is reused for body bytes.
+     */
+    unsigned char *hdr;
+    size_t hdr_len;
     uint64_t requests;     /* requests already answered on this connection */
     dx_timer_node_t timer; /* the single timer this connection owns */
     dx_http_parser_t parser;
@@ -107,6 +131,15 @@ dx_conn_t *dx_pool_lookup(dx_pool_t *pool, uint32_t index, uint32_t generation);
 /* Address of a slot by index regardless of state; NULL when out of range. */
 dx_conn_t *dx_pool_slot(dx_pool_t *pool, size_t index);
 
+/*
+ * Number of slots the pool has ever allocated, which is not the same as
+ * max_conns: slots are handed out from the top of the free list, so the first
+ * connections live at the highest indices of the first chunk. Anything that
+ * walks every live connection (shutdown drain, statistics) must use this, not
+ * the connection cap.
+ */
+size_t dx_pool_total_slots(const dx_pool_t *pool);
+
 /* Number of connections currently handed out. */
 size_t dx_pool_active(const dx_pool_t *pool);
 
@@ -123,6 +156,12 @@ void dx_conn_release_buffer(dx_conn_t *conn, dx_bufpool_t *pool);
 /* Close a streamed file, if any. Safe to call at any time. */
 void dx_conn_release_file(dx_conn_t *conn);
 
+/*
+ * Release the in-memory response body and the saved header block. Safe to call
+ * at any time and from any state; both are plain owned allocations.
+ */
+void dx_conn_release_scratch(dx_conn_t *conn);
+
 /* Release pipelined bytes parked while a response was staged. */
 void dx_conn_release_hold(dx_conn_t *conn);
 
@@ -132,13 +171,17 @@ void dx_conn_release_hold(dx_conn_t *conn);
  */
 void dx_conn_record_status(dx_conn_t *conn, int status);
 
-/* Reset pointers and state without changing the generation. */
+/*
+ * Reset pointers and state without changing the generation. Every allocation
+ * the slot owns is freed or returned here, so a recycled slot never carries
+ * state (or memory) from its previous owner.
+ */
 void dx_conn_reset(dx_conn_t *conn);
 
 /* True while response bytes are waiting to be written out. */
 bool dx_conn_has_pending(const dx_conn_t *conn);
 
-/* True while header bytes or file bytes are still to be sent. */
+/* True while header bytes, file bytes or a memory body are still to be sent. */
 bool dx_conn_has_work(const dx_conn_t *conn);
 
 /*
@@ -163,8 +206,5 @@ int dx_conn_ensure_buffer(struct dx_worker *w, dx_conn_t *conn);
  * keep-alive timeout while idle. Never fails.
  */
 void dx_conn_arm_timer(struct dx_worker *w, dx_conn_t *conn);
-
-/* Milliseconds left on the connection timer, or -1 when it is not armed. */
-int64_t dx_conn_timer_left_ms(const struct dx_worker *w, const dx_conn_t *conn);
 
 #endif /* DX_CONN_H */

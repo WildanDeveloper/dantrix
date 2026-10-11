@@ -21,13 +21,13 @@ dx_log_t *dx_worker_log(dx_worker_t *w)
     return (w == NULL) ? NULL : w->log;
 }
 
+static int listener_arm(dx_worker_t *w);
+
 int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *log,
                    const volatile sig_atomic_t *stop_flag, const dx_http_limits_t *limits,
                    dx_log_t *access_log, dx_log_format_t log_format, dx_fs_t *fs, dx_mime_t *mime,
                    const dx_static_opts_t *static_opts, const dx_lifecycle_opts_t *life)
 {
-    struct epoll_event ev;
-
     if (w == NULL || listen_fd < 0 || max_conns == 0) {
         errno = EINVAL;
         return -1;
@@ -36,6 +36,7 @@ int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *lo
     memset(w, 0, sizeof(*w));
     w->epfd = -1;
     w->listen_fd = listen_fd;
+    dx_timer_node_reset(&w->accept_timer);
     w->log = log;
     w->access_log = access_log;
     w->log_format = log_format;
@@ -85,10 +86,7 @@ int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *lo
         return -1;
     }
 
-    memset(&ev, 0, sizeof(ev));
-    ev.events = EPOLLIN;
-    ev.data.u64 = dx_tag_listener();
-    if (epoll_ctl(w->epfd, EPOLL_CTL_ADD, listen_fd, &ev) != 0) {
+    if (listener_arm(w) != 0) {
         return -1;
     }
     return 0;
@@ -107,6 +105,7 @@ void dx_worker_destroy(dx_worker_t *w)
         (void)close(w->listen_fd);
         w->listen_fd = -1;
     }
+    dx_timer_wheel_cancel(w->timers, &w->accept_timer);
     dx_pool_destroy(w->pool);
     w->pool = NULL;
     dx_bufpool_destroy(w->bufs);
@@ -149,6 +148,7 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
 
     mem = (unsigned char *)dx_bufpool_acquire(w->bufs, DX_CONN_BUF_SIZE);
     if (mem == NULL) {
+        (void)close(fd);
         dx_log_write(w->log, DX_LOG_WARN,
                      "connection rejected: read buffer pool exhausted "
                      "(%zu buffers in use)",
@@ -159,6 +159,7 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
     conn = dx_pool_acquire(w->pool);
     if (conn == NULL) {
         (void)dx_bufpool_release(w->bufs, mem);
+        (void)close(fd);
         dx_log_write(w->log, DX_LOG_WARN, "connection rejected: limit of %zu connections reached",
                      w->max_conns);
         return -1;
@@ -179,9 +180,10 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
         int saved = errno;
 
         (void)close(fd);
-        dx_conn_reset(conn);
-        (void)dx_pool_release(w->pool, conn);
+        /* Buffer first: the slot must be given back while it still knows
+         * whether its memory came from the pool. */
         (void)dx_bufpool_release(w->bufs, mem);
+        (void)dx_pool_release(w->pool, conn);
         dx_log_write(w->log, DX_LOG_ERROR, "epoll_ctl(ADD): %s", dx_strerror(saved));
         errno = saved;
         return -1;
@@ -237,7 +239,7 @@ static void conn_close(dx_worker_t *w, dx_conn_t *conn)
 
     /* Returns the pooled slot or frees the grown heap allocation. */
     dx_conn_release_buffer(conn, w->bufs);
-    dx_conn_reset(conn);
+    /* dx_pool_release() resets the slot, so nothing survives this point. */
     (void)dx_pool_release(w->pool, conn);
     w->closed_total++;
 }
@@ -273,14 +275,51 @@ static int conn_update_interest(dx_worker_t *w, dx_conn_t *conn)
     return epoll_ctl(w->epfd, EPOLL_CTL_MOD, conn->fd, &ev);
 }
 
+/* Delay before the accept queue is retried after a resource failure. */
+#define DX_ACCEPT_BACKOFF_MS 100u
+
+/* Add (or re-add) the listener to the epoll set. Returns 0 or -1. */
+static int listener_arm(dx_worker_t *w)
+{
+    struct epoll_event ev;
+
+    if (w->epfd < 0 || w->listen_fd < 0) {
+        return -1;
+    }
+    memset(&ev, 0, sizeof(ev));
+    ev.events = EPOLLIN;
+    ev.data.u64 = dx_tag_listener();
+    return epoll_ctl(w->epfd, EPOLL_CTL_ADD, w->listen_fd, &ev);
+}
+
+/*
+ * Descriptor exhaustion: stop accepting without blocking the loop. The
+ * listener leaves the epoll set (otherwise EPOLLIN refires at once and spins
+ * the loop on a queue it cannot drain) and a timer wheel node brings it back.
+ */
+static void accept_backoff(dx_worker_t *w)
+{
+    if (w->epfd >= 0 && w->listen_fd >= 0) {
+        (void)epoll_ctl(w->epfd, EPOLL_CTL_DEL, w->listen_fd, NULL);
+    }
+    w->accept_timer.owner = w;
+    (void)dx_timer_wheel_refresh(w->timers, &w->accept_timer, DX_ACCEPT_BACKOFF_MS,
+                                 (uint64_t)dx_now_ms());
+}
+
 /* Accept until the queue is empty. Never blocks: the socket is non-blocking. */
 static void accept_loop(dx_worker_t *w)
 {
     for (;;) {
+        /* Zeroed so format_peer() never reads padding of an address accept4()
+         * did not fill in (it can report a short address length). */
         struct sockaddr_storage peer;
         socklen_t peer_len = sizeof(peer);
-        int fd = accept4(w->listen_fd, (struct sockaddr *)&peer, &peer_len,
-                         SOCK_NONBLOCK | SOCK_CLOEXEC);
+        int fd;
+
+        memset(&peer, 0, sizeof(peer));
+        fd = accept4(w->listen_fd, (struct sockaddr *)&peer, &peer_len,
+                     SOCK_NONBLOCK | SOCK_CLOEXEC);
 
         if (fd >= 0) {
             if (conn_open(w, fd, &peer) != 0) {
@@ -304,20 +343,16 @@ static void accept_loop(dx_worker_t *w)
         }
         if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
             /*
-             * Resource exhaustion. The listener stays registered, but with a
-             * non-empty accept queue EPOLLIN would refire immediately and turn
-             * this into a 100% CPU spin until descriptors free up. Backing off
-             * briefly keeps the loop alive without burning a core. The timer
-             * wheel (v0.4) replaces this sleep with a proper delayed retry.
+             * Resource exhaustion. The listener is taken out of the epoll set
+             * and the retry is scheduled on the timer wheel: leaving it
+             * registered would make EPOLLIN refire at once and spin the loop
+             * on a queue it cannot drain, and sleeping here would stall every
+             * other connection for the duration of the sleep.
              */
             dx_log_write(w->log, DX_LOG_ERROR,
                          "accept4: %s (serving %zu connections, %zu accepted total)",
                          dx_strerror(errno), dx_pool_active(w->pool), w->accepted_total);
-            {
-                struct timespec backoff = {0, 100 * 1000 * 1000}; /* 100 ms */
-
-                (void)nanosleep(&backoff, NULL);
-            }
+            accept_backoff(w);
             return;
         }
         dx_log_write(w->log, DX_LOG_ERROR, "accept4: %s", dx_strerror(errno));
@@ -390,6 +425,13 @@ static void conn_on_timeout(struct dx_worker *w, dx_conn_t *conn)
     const char *what;
     bool got_bytes;
 
+    /*
+     * Two sources, because the unread bytes can sit in two places: in the read
+     * buffer (normal case) or only in the parser scan position, when the
+     * connection went idle with its buffer released and a partial request
+     * arrived afterwards. Either one means the client sent something and
+     * deserves a 408 instead of a silent close.
+     */
     got_bytes = (dx_buffer_readable(&conn->buf) > 0) || conn->parser.scan > 0;
     switch (conn->state) {
     case DX_CONN_IDLE:
@@ -414,18 +456,40 @@ static void conn_on_timeout(struct dx_worker *w, dx_conn_t *conn)
          * The partial request is dropped first, otherwise the client would
          * read its own bytes back before the error page.
          */
-        char tmp[2048];
+        char tmp[DX_RESPONSE_TMP];
         size_t len = dx_http_response_error(tmp, sizeof(tmp), 408, NULL);
 
         if (len > 0) {
             size_t keep = conn->buf.cap;
+            bool flushed = false;
 
             dx_buffer_init(&conn->buf, conn->buf.data, keep);
             if (dx_buffer_writable(&conn->buf) >= len) {
                 (void)dx_buffer_append(&conn->buf, tmp, len);
                 dx_conn_record_status(conn, 408);
                 conn->close_conn = true;
-                (void)dx_conn_on_writable(w, conn);
+                /*
+                 * Honour the result. The previous code ignored it and closed
+                 * right away: on EAGAIN the response was still pending, so the
+                 * client received a truncated error page (or none at all).
+                 */
+                if (dx_conn_on_writable(w, conn) != 0) {
+                    flushed = false;
+                } else {
+                    flushed = !dx_conn_has_work(conn);
+                }
+            }
+            if (flushed) {
+                return; /* the 408 is on the wire; the close follows below */
+            }
+            if (dx_conn_has_work(conn)) {
+                /*
+                 * Still pending: let the EPOLLOUT path finish it. close_conn is
+                 * already set, so the connection ends as soon as the response is
+                 * out, and the send timeout bounds a peer that never reads.
+                 */
+                dx_conn_arm_timer(w, conn);
+                return;
             }
         }
     }
@@ -435,20 +499,42 @@ static void conn_on_timeout(struct dx_worker *w, dx_conn_t *conn)
 static void on_timer_expired(void *ctx, dx_timer_node_t *node)
 {
     struct dx_worker *w = (struct dx_worker *)ctx;
-    dx_conn_t *conn = (dx_conn_t *)node->owner;
 
-    if (conn == NULL || conn->state == DX_CONN_FREE || conn->state == DX_CONN_CLOSING) {
-        return; /* the slot was recycled: the timer is stale */
+    if (node == &w->accept_timer) {
+        /* The backoff elapsed: put the listener back and drain the queue. */
+        if (w->draining) {
+            return; /* shutting down: no new connections */
+        }
+        if (listener_arm(w) == 0) {
+            accept_loop(w);
+        }
+        return;
     }
-    conn_on_timeout(w, conn);
+    {
+        dx_conn_t *conn = (dx_conn_t *)node->owner;
+
+        if (conn == NULL || conn->state == DX_CONN_FREE || conn->state == DX_CONN_CLOSING) {
+            return; /* the slot was recycled: the timer is stale */
+        }
+        conn_on_timeout(w, conn);
+    }
 }
 
-/* Close everything still open; used on shutdown and after a fatal error. */
+/*
+ * Close everything still open; used on shutdown and after a fatal error.
+ *
+ * The loop must cover the pool's real slot space, not max_conns: slots are
+ * handed out from the top of the free list, so the first connections of a
+ * worker with --max-conns 2 live at indices 1023 and 1022. Scanning [0, 2)
+ * found nothing, skipped the graceful close and lost the access log line of
+ * every live connection.
+ */
 static void drain_connections(dx_worker_t *w)
 {
+    size_t total = dx_pool_total_slots(w->pool);
     size_t i;
 
-    for (i = 0; i < w->max_conns; i++) {
+    for (i = 0; i < total; i++) {
         dx_conn_t *conn = dx_pool_slot(w->pool, i);
 
         if (conn != NULL && conn->state != DX_CONN_FREE) {
@@ -489,6 +575,7 @@ int dx_worker_run(dx_worker_t *w)
              * in-flight connections until the shutdown budget runs out.
              */
             w->draining = true;
+            dx_timer_wheel_cancel(w->timers, &w->accept_timer);
             w->shutdown_deadline_ms = now + w->life.shutdown_timeout_ms;
             dx_log_write(w->log, DX_LOG_INFO, "draining %zu open connection(s) before shutdown",
                          dx_pool_active(w->pool));

@@ -25,10 +25,4 @@ int dx_set_tcp_nodelay(int fd);
 /* Human readable name for an errno value; never returns NULL. */
 const char *dx_strerror(int err);
 
-/*
- * Human readable name of a TCP socket error, including the queued errors that
- * SO_ERROR returns for accepted sockets. Never returns NULL.
- */
-const char *dx_sockerr(int fd);
-
 #endif /* DX_NET_H */

@@ -355,7 +355,15 @@ bool dx_bufpool_release(dx_bufpool_t *pool, const unsigned char *data)
     }
 
     for (chunk = pool->chunks; chunk != NULL; chunk = chunk->next) {
-        if (data >= chunk->mem && data < chunk->mem + (chunk->slots * chunk->slot_size)) {
+        /*
+         * Compared as integers: relational comparison of pointers into
+         * distinct allocations is undefined behaviour, and every chunk is a
+         * separate malloc here.
+         */
+        uintptr_t start = (uintptr_t)chunk->mem;
+        uintptr_t probe = (uintptr_t)data;
+
+        if (probe >= start && probe - start < chunk->slots * chunk->slot_size) {
             break;
         }
         ordinal++;
