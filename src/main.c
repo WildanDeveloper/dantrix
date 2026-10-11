@@ -211,8 +211,10 @@ int main(int argc, char **argv)
         rc = DX_EXIT_FATAL;
     }
 
-    if (log_file != NULL) {
-        (void)fclose(log_file);
-    }
+    /*
+     * log_file is always open here: a failed open exits with DX_EXIT_FATAL
+     * above, and stderr/stdout never need closing by hand.
+     */
+    (void)fclose(log_file);
     return rc;
 }

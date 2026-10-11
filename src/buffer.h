@@ -78,7 +78,7 @@ unsigned char *dx_bufpool_acquire(dx_bufpool_t *pool, size_t min_size);
  * pointer does not belong to the pool or is not currently owned (double
  * release); the pool is left untouched in that case.
  */
-bool dx_bufpool_release(dx_bufpool_t *pool, unsigned char *data);
+bool dx_bufpool_release(dx_bufpool_t *pool, const unsigned char *data);
 
 /* Diagnostics used by tests and the status endpoint. */
 size_t dx_bufpool_outstanding(const dx_bufpool_t *pool);

@@ -344,7 +344,7 @@ unsigned char *dx_bufpool_acquire(dx_bufpool_t *pool, size_t min_size)
     return chunk->mem + ((size_t)slot_index * chunk->slot_size);
 }
 
-bool dx_bufpool_release(dx_bufpool_t *pool, unsigned char *data)
+bool dx_bufpool_release(dx_bufpool_t *pool, const unsigned char *data)
 {
     dx_chunk_t *chunk;
     size_t ordinal = 0;

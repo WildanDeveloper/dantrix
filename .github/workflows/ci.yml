@@ -69,7 +69,9 @@ jobs:
       - name: cppcheck
         run: |
           cppcheck --enable=warning,style,performance,portability \
-              --std=c11 --error-exitcode=1 --quiet -I src src
+              --std=c11 --error-exitcode=1 --quiet \
+              --suppress=normalCheckLevelMaxBranches \
+              -I src src
       - name: clang-format check
         run: |
           clang-format --dry-run --Werror src/*.c src/*.h

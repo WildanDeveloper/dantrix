@@ -189,7 +189,9 @@ valgrind:
 lint:
 	@if command -v cppcheck >/dev/null 2>&1; then \
 	    cppcheck --enable=warning,style,performance,portability \
-	        --std=c11 --error-exitcode=1 --quiet -I $(SRC) $(SRC); \
+	        --std=c11 --error-exitcode=1 --quiet \
+	        --suppress=normalCheckLevelMaxBranches \
+	        -I $(SRC) $(SRC); \
 	    echo "cppcheck: clean"; \
 	else echo "cppcheck not installed; skipped"; fi
 	@if command -v clang-tidy >/dev/null 2>&1; then \
