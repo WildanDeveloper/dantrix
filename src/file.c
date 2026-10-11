@@ -246,7 +246,6 @@ dx_open_t dx_fs_open(dx_fs_t *fs, const char *rel_path, bool had_trailing_slash,
                      size_t served_cap, dx_open_result_t *out)
 {
     struct stat st;
-    char child[DX_LOCATION_MAX];
     int fd;
 
     if (fs == NULL || rel_path == NULL || out == NULL) {
@@ -280,20 +279,23 @@ dx_open_t dx_fs_open(dx_fs_t *fs, const char *rel_path, bool had_trailing_slash,
             return DX_OPEN_REDIRECT;
         }
         /* Serve the index file when present. */
-        if (fs->index_name[0] != '\0' &&
-            join_path(child, sizeof(child), rel_path, fs->index_name) == 0) {
-            int index_fd = fs_open_beneath(fs, child, &st);
+        if (fs->index_name[0] != '\0') {
+            char child[DX_LOCATION_MAX];
 
-            if (index_fd >= 0) {
-                if (S_ISREG(st.st_mode)) {
-                    out->fd = index_fd;
-                    out->st = st;
-                    if (served_path != NULL && served_cap > 0) {
-                        (void)copy_bounded(served_path, served_cap, child);
+            if (join_path(child, sizeof(child), rel_path, fs->index_name) == 0) {
+                int index_fd = fs_open_beneath(fs, child, &st);
+
+                if (index_fd >= 0) {
+                    if (S_ISREG(st.st_mode)) {
+                        out->fd = index_fd;
+                        out->st = st;
+                        if (served_path != NULL && served_cap > 0) {
+                            (void)copy_bounded(served_path, served_cap, child);
+                        }
+                        return DX_OPEN_OK;
                     }
-                    return DX_OPEN_OK;
+                    (void)close(index_fd);
                 }
-                (void)close(index_fd);
             }
         }
         /* No usable index: list the directory when allowed. */

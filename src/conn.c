@@ -615,9 +615,7 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
     const char *target = (const char *)base + req->target_off;
     size_t target_len = req->target_len;
     char tmp[DX_RESPONSE_TMP];
-    char listing[DX_LISTING_TMP];
     char extra[768];
-    char content_type[160];
     char location[DX_LOCATION_MAX];
     char served_file[DX_PATH_MAX];
     size_t extra_len = 0;
@@ -671,6 +669,7 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
     }
 
     if (open_result == DX_OPEN_LISTING) {
+        char listing[DX_LISTING_TMP];
         size_t body_len = dx_fs_list(w->fs, resolved.path, listing, sizeof(listing));
 
         if (body_len == 0) {
@@ -754,6 +753,7 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
 
         /* 4. Range handling (GET only; HEAD always describes the full file). */
         {
+            char content_type[160];
             dx_range_t range;
             dx_range_result_t range_result = DX_RANGE_NONE;
             uint64_t start = 0;
