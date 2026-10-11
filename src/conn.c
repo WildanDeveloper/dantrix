@@ -1174,7 +1174,6 @@ static int conn_dispatch(struct dx_worker *w, dx_conn_t *conn)
     size_t body_bytes = 0;
     const unsigned char *base;
     const dx_http_request_t *req;
-    const char *connection;
 
     if (conn->buf.data == NULL) {
         return -1; /* unreachable: a live connection owns a buffer */
@@ -1188,6 +1187,7 @@ static int conn_dispatch(struct dx_worker *w, dx_conn_t *conn)
         bool head = method_is(req, base, "HEAD");
         bool is_options = method_is(req, base, "OPTIONS");
         bool keep_alive;
+        const char *connection;
         dx_dispatch_t action = dx_http_dispatch_method(req, base, &status, &extra);
 
         if (action == DX_DISPATCH_SERVE) {

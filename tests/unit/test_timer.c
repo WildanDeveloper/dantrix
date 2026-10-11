@@ -248,13 +248,18 @@ static void test_wheel_wraparound(void)
 static void test_guards(void)
 {
     dx_timer_node_t a;
+    dx_timer_wheel_t *w;
 
     dx_test_begin("timer/guards");
     dx_timer_node_reset(&a);
 
+    w = dx_timer_wheel_create();
+    CHECK(w != NULL);
     CHECK_EQ(dx_timer_wheel_start(NULL, &a, 100u, 0u), -1);
-    CHECK_EQ(dx_timer_wheel_start(dx_timer_wheel_create(), NULL, 100u, 0u), -1);
+    CHECK_EQ(dx_timer_wheel_start(w, NULL, 100u, 0u), -1);
     CHECK_EQ(dx_timer_wheel_refresh(NULL, &a, 100u, 0u), -1);
+    dx_timer_wheel_destroy(w);
+
     CHECK_EQ(dx_timer_wheel_advance(NULL, 0u, NULL, NULL), 0u);
     dx_timer_wheel_cancel(NULL, &a);
     dx_timer_node_reset(NULL);
