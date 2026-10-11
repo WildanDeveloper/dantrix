@@ -24,12 +24,12 @@ typedef struct {
 } dx_chunk_t;
 
 struct dx_pool {
-    dx_chunk_t **chunks;   /* base pointers, grows by doubling */
+    dx_chunk_t **chunks; /* base pointers, grows by doubling */
     size_t nchunks;
     size_t chunks_cap;
-    size_t conn_slots;     /* slots per chunk */
-    size_t max_conns;      /* hard cap of simultaneously held slots */
-    uint32_t *free_list;   /* slot indices ready for reuse */
+    size_t conn_slots;   /* slots per chunk */
+    size_t max_conns;    /* hard cap of simultaneously held slots */
+    uint32_t *free_list; /* slot indices ready for reuse */
     size_t free_count;
     size_t free_cap;
     size_t total_slots;
@@ -323,8 +323,7 @@ static int conn_flush(struct dx_worker *w, dx_conn_t *conn)
             conn->state = DX_CONN_WRITING;
             return 0;
         }
-        dx_log_write(dx_worker_log(w), DX_LOG_DEBUG,
-                     "conn %llu: send: %s",
+        dx_log_write(dx_worker_log(w), DX_LOG_DEBUG, "conn %llu: send: %s",
                      (unsigned long long)conn->id, dx_strerror(errno));
         return -1;
     }
@@ -401,8 +400,7 @@ int dx_conn_on_readable(struct dx_worker *w, dx_conn_t *conn)
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             break;
         }
-        dx_log_write(dx_worker_log(w), DX_LOG_DEBUG,
-                     "conn %llu: read: %s",
+        dx_log_write(dx_worker_log(w), DX_LOG_DEBUG, "conn %llu: read: %s",
                      (unsigned long long)conn->id, dx_strerror(errno));
         return -1;
     }

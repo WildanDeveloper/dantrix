@@ -27,7 +27,7 @@ typedef enum {
 } dx_log_level_t;
 
 typedef struct {
-    FILE *out;          /* borrowed: this module never fclose()s it */
+    FILE *out; /* borrowed: this module never fclose()s it */
     dx_log_level_t level;
 } dx_log_t;
 

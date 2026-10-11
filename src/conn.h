@@ -17,9 +17,9 @@
 
 typedef enum {
     DX_CONN_FREE = 0, /* slot is in the free list, owns nothing */
-    DX_CONN_READING,   /* waiting for client bytes */
-    DX_CONN_WRITING,   /* output pending, EPOLLOUT registered */
-    DX_CONN_CLOSING    /* being torn down */
+    DX_CONN_READING,  /* waiting for client bytes */
+    DX_CONN_WRITING,  /* output pending, EPOLLOUT registered */
+    DX_CONN_CLOSING   /* being torn down */
 } dx_conn_state_t;
 
 struct dx_worker; /* defined in worker.h */
@@ -30,9 +30,9 @@ typedef struct {
     uint32_t generation; /* bumped on every acquire */
     uint64_t id;         /* stable ordinal for logging, never reused */
     dx_conn_state_t state;
-    bool eof;                 /* peer sent FIN; echo remains, then close */
-    dx_buffer_t buf;         /* read buffer plus the pending echo window */
-    unsigned char *buf_mem;  /* pool slot to hand back, NULL when detached */
+    bool eof;               /* peer sent FIN; echo remains, then close */
+    dx_buffer_t buf;        /* read buffer plus the pending echo window */
+    unsigned char *buf_mem; /* pool slot to hand back, NULL when detached */
     uint64_t bytes_in;
     uint64_t bytes_out;
 } dx_conn_t;

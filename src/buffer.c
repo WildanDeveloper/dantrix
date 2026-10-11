@@ -159,8 +159,7 @@ static bool free_list_push(dx_bufpool_t *pool, uint32_t chunk_index, uint32_t sl
         pool->free_list = p;
         pool->free_cap = new_cap;
     }
-    pool->free_list[pool->free_count++] =
-        ((uint64_t)chunk_index << 32) | (uint64_t)slot_index;
+    pool->free_list[pool->free_count++] = ((uint64_t)chunk_index << 32) | (uint64_t)slot_index;
     return true;
 }
 

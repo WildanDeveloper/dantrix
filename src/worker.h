@@ -17,12 +17,12 @@
 #include "log.h"
 
 typedef struct dx_worker {
-    int epfd;                       /* epoll instance, -1 when not running */
-    int listen_fd;                  /* listening socket, -1 when not running */
-    dx_pool_t *pool;                /* connection slots */
-    dx_bufpool_t *bufs;             /* per-connection read buffers */
-    dx_log_t *log;                  /* borrowed logger */
-    size_t max_conns;               /* mirrors the pool cap for quick checks */
+    int epfd;                               /* epoll instance, -1 when not running */
+    int listen_fd;                          /* listening socket, -1 when not running */
+    dx_pool_t *pool;                        /* connection slots */
+    dx_bufpool_t *bufs;                     /* per-connection read buffers */
+    dx_log_t *log;                          /* borrowed logger */
+    size_t max_conns;                       /* mirrors the pool cap for quick checks */
     const volatile sig_atomic_t *stop_flag; /* borrowed; NULL means never stop */
     uint64_t accepted_total;
     uint64_t rejected_total;
@@ -50,11 +50,7 @@ dx_log_t *dx_worker_log(dx_worker_t *w);
  * Event tag helpers. A tag is (kind, generation, index) packed into the epoll
  * user data word; see dantrix.h for the bit layout.
  */
-enum {
-    DX_TAG_KIND_INVALID = 0u,
-    DX_TAG_KIND_LISTENER = 1u,
-    DX_TAG_KIND_CONN = 2u
-};
+enum { DX_TAG_KIND_INVALID = 0u, DX_TAG_KIND_LISTENER = 1u, DX_TAG_KIND_CONN = 2u };
 
 static inline uint64_t dx_tag_listener(void)
 {

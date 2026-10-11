@@ -64,8 +64,8 @@ void dx_log_write(dx_log_t *log, dx_log_level_t level, const char *fmt, ...)
         if (n == 0) {
             stamp[0] = '\0';
         } else {
-            int written = snprintf(stamp + n, sizeof(stamp) - n, ".%03ldZ",
-                                   (long)(ts.tv_nsec / 1000000L));
+            int written =
+                snprintf(stamp + n, sizeof(stamp) - n, ".%03ldZ", (long)(ts.tv_nsec / 1000000L));
             if (written < 0 || (size_t)written >= sizeof(stamp) - n) {
                 /* Truncated timestamp: fall back to the seconds-only form. */
                 stamp[n] = '\0';

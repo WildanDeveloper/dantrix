@@ -7,8 +7,7 @@
 #include <string.h>
 
 /* Capture one formatted record in memory instead of a file. */
-static size_t capture(char *buf, size_t cap, dx_log_t *log, dx_log_level_t level,
-                      const char *msg)
+static size_t capture(char *buf, size_t cap, dx_log_t *log, dx_log_level_t level, const char *msg)
 {
     FILE *mem = fmemopen(buf, cap, "w");
     size_t len;
@@ -41,7 +40,7 @@ static void test_levels(void)
     CHECK(dx_log_level_parse("warn", &v) && v == DX_LOG_WARN);
     CHECK(dx_log_level_parse("error", &v) && v == DX_LOG_ERROR);
 
-    CHECK(!dx_log_level_parse("INFO", &v));      /* case sensitive by design */
+    CHECK(!dx_log_level_parse("INFO", &v)); /* case sensitive by design */
     CHECK(!dx_log_level_parse("", &v));
     CHECK(!dx_log_level_parse("verbose", &v));
     CHECK(!dx_log_level_parse(NULL, &v));

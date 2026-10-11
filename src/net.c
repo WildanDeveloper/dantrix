@@ -121,11 +121,10 @@ int dx_listen_tcp(const char *addr, int port, int backlog)
     }
     return fd;
 
-fail:
-    {
-        int saved = errno;
-        (void)close(fd);
-        errno = saved;
-        return -1;
-    }
+fail: {
+    int saved = errno;
+    (void)close(fd);
+    errno = saved;
+    return -1;
+}
 }

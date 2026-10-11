@@ -89,15 +89,15 @@ static int conn_open(dx_worker_t *w, int fd)
     if (mem == NULL) {
         dx_log_write(w->log, DX_LOG_WARN,
                      "connection rejected: read buffer pool exhausted "
-                     "(%zu buffers in use)", dx_bufpool_outstanding(w->bufs));
+                     "(%zu buffers in use)",
+                     dx_bufpool_outstanding(w->bufs));
         return -1;
     }
 
     conn = dx_pool_acquire(w->pool);
     if (conn == NULL) {
         (void)dx_bufpool_release(w->bufs, mem);
-        dx_log_write(w->log, DX_LOG_WARN,
-                     "connection rejected: limit of %zu connections reached",
+        dx_log_write(w->log, DX_LOG_WARN, "connection rejected: limit of %zu connections reached",
                      w->max_conns);
         return -1;
     }
@@ -148,8 +148,7 @@ static void conn_close(dx_worker_t *w, dx_conn_t *conn)
     }
     if (conn->buf_mem != NULL) {
         if (!dx_bufpool_release(w->bufs, conn->buf_mem)) {
-            dx_log_write(w->log, DX_LOG_ERROR,
-                         "conn %llu: read buffer was not owned by the pool",
+            dx_log_write(w->log, DX_LOG_ERROR, "conn %llu: read buffer was not owned by the pool",
                          (unsigned long long)conn->id);
         }
         conn->buf_mem = NULL;
@@ -226,7 +225,7 @@ static void accept_loop(dx_worker_t *w)
                          "accept4: %s (serving %zu connections, %zu accepted total)",
                          dx_strerror(errno), dx_pool_active(w->pool), w->accepted_total);
             {
-                struct timespec backoff = { 0, 100 * 1000 * 1000 }; /* 100 ms */
+                struct timespec backoff = {0, 100 * 1000 * 1000}; /* 100 ms */
 
                 (void)nanosleep(&backoff, NULL);
             }
@@ -257,8 +256,7 @@ static void handle_event(dx_worker_t *w, const struct epoll_event *ev)
          * stale event. conn_close may release the slot, hence the single use
          * of the pointer below.
          */
-        dx_conn_t *conn = dx_pool_lookup(w->pool, dx_tag_index(tag),
-                                         dx_tag_generation(tag));
+        dx_conn_t *conn = dx_pool_lookup(w->pool, dx_tag_index(tag), dx_tag_generation(tag));
         bool close_it = false;
 
         if (conn == NULL) {
@@ -346,8 +344,7 @@ int dx_worker_run(dx_worker_t *w)
     }
 
     if (w->stop_flag != NULL && *w->stop_flag != 0) {
-        dx_log_write(w->log, DX_LOG_INFO,
-                     "draining %zu open connection(s) before shutdown",
+        dx_log_write(w->log, DX_LOG_INFO, "draining %zu open connection(s) before shutdown",
                      dx_pool_active(w->pool));
     }
     drain_connections(w);

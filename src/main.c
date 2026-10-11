@@ -26,33 +26,33 @@
 static void print_usage(FILE *out)
 {
     fprintf(out,
-        "Dantrix %s - epoll based HTTP/1.1 server (v0.1: TCP echo core)\n"
-        "\n"
-        "Usage:\n"
-        "  dantrix [OPTION]...\n"
-        "\n"
-        "General:\n"
-        "  -h, --help               Show this help\n"
-        "  -V, --version            Show version and compiled features\n"
-        "\n"
-        "Network:\n"
-        "  -b, --bind ADDR          Bind address                       [%s]\n"
-        "  -p, --port PORT          TCP port                           [%d]\n"
-        "      --backlog N          listen() queue                     [%d]\n"
-        "      --max-conns N        Connection limit                   [%d]\n"
-        "  -w, --workers N          Worker count (only 1 in v0.1)      [1]\n"
-        "\n"
-        "Logging:\n"
-        "      --error-log DEST     stderr, stdout, or a file path     [stderr]\n"
-        "      --log-level LEVEL    debug, info, warn, error           [info]\n"
-        "\n"
-        "Accepted for compatibility, not implemented yet:\n"
-        "  -r, --root DIR           Document root (used from v0.3)\n"
-        "      --access-log DEST    Access log (used from v0.2)\n"
-        "\n"
-        "Exit codes: 0 ok, 1 fatal error, 2 invalid arguments.\n",
-        DX_VERSION_STRING, DX_DEFAULT_BIND, DX_DEFAULT_PORT, DX_DEFAULT_BACKLOG,
-        DX_DEFAULT_MAX_CONNS);
+            "Dantrix %s - epoll based HTTP/1.1 server (v0.1: TCP echo core)\n"
+            "\n"
+            "Usage:\n"
+            "  dantrix [OPTION]...\n"
+            "\n"
+            "General:\n"
+            "  -h, --help               Show this help\n"
+            "  -V, --version            Show version and compiled features\n"
+            "\n"
+            "Network:\n"
+            "  -b, --bind ADDR          Bind address                       [%s]\n"
+            "  -p, --port PORT          TCP port                           [%d]\n"
+            "      --backlog N          listen() queue                     [%d]\n"
+            "      --max-conns N        Connection limit                   [%d]\n"
+            "  -w, --workers N          Worker count (only 1 in v0.1)      [1]\n"
+            "\n"
+            "Logging:\n"
+            "      --error-log DEST     stderr, stdout, or a file path     [stderr]\n"
+            "      --log-level LEVEL    debug, info, warn, error           [info]\n"
+            "\n"
+            "Accepted for compatibility, not implemented yet:\n"
+            "  -r, --root DIR           Document root (used from v0.3)\n"
+            "      --access-log DEST    Access log (used from v0.2)\n"
+            "\n"
+            "Exit codes: 0 ok, 1 fatal error, 2 invalid arguments.\n",
+            DX_VERSION_STRING, DX_DEFAULT_BIND, DX_DEFAULT_PORT, DX_DEFAULT_BACKLOG,
+            DX_DEFAULT_MAX_CONNS);
 }
 
 static void print_version(FILE *out)
@@ -95,20 +95,18 @@ int main(int argc, char **argv)
     FILE *log_file = NULL;
     int opt;
 
-    static const struct option long_opts[] = {
-        { "help",        no_argument,       NULL, 'h' },
-        { "version",     no_argument,       NULL, 'V' },
-        { "bind",        required_argument, NULL, 'b' },
-        { "port",        required_argument, NULL, 'p' },
-        { "backlog",     required_argument, NULL, 'B' },
-        { "max-conns",   required_argument, NULL, 'M' },
-        { "workers",     required_argument, NULL, 'w' },
-        { "root",        required_argument, NULL, 'r' },
-        { "access-log",  required_argument, NULL, 'A' },
-        { "error-log",   required_argument, NULL, 'E' },
-        { "log-level",   required_argument, NULL, 'L' },
-        { NULL, 0, NULL, 0 }
-    };
+    static const struct option long_opts[] = {{"help", no_argument, NULL, 'h'},
+                                              {"version", no_argument, NULL, 'V'},
+                                              {"bind", required_argument, NULL, 'b'},
+                                              {"port", required_argument, NULL, 'p'},
+                                              {"backlog", required_argument, NULL, 'B'},
+                                              {"max-conns", required_argument, NULL, 'M'},
+                                              {"workers", required_argument, NULL, 'w'},
+                                              {"root", required_argument, NULL, 'r'},
+                                              {"access-log", required_argument, NULL, 'A'},
+                                              {"error-log", required_argument, NULL, 'E'},
+                                              {"log-level", required_argument, NULL, 'L'},
+                                              {NULL, 0, NULL, 0}};
 
     while ((opt = getopt_long(argc, argv, "hVb:p:w:r:", long_opts, NULL)) != -1) {
         switch (opt) {
@@ -123,8 +121,7 @@ int main(int argc, char **argv)
             break;
         case 'p':
             if (!dx_parse_int(optarg, 1, 65535, &port)) {
-                fprintf(stderr, "dantrix: invalid port '%s' (expected 1..65535)\n",
-                        optarg);
+                fprintf(stderr, "dantrix: invalid port '%s' (expected 1..65535)\n", optarg);
                 return DX_EXIT_USAGE;
             }
             break;
@@ -146,22 +143,19 @@ int main(int argc, char **argv)
                 return DX_EXIT_USAGE;
             }
             if (workers != 1) {
-                fprintf(stderr,
-                        "dantrix: only one worker is supported in v0.1 "
-                        "(multi-worker lands in v0.5)\n");
+                fprintf(stderr, "dantrix: only one worker is supported in v0.1 "
+                                "(multi-worker lands in v0.5)\n");
                 return DX_EXIT_USAGE;
             }
             break;
         case 'r':
-            fprintf(stderr,
-                    "dantrix: warning: --root is accepted but static file "
-                    "serving starts in v0.3\n");
+            fprintf(stderr, "dantrix: warning: --root is accepted but static file "
+                            "serving starts in v0.3\n");
             break;
         case 'A':
             if (strcmp(optarg, "off") != 0) {
-                fprintf(stderr,
-                        "dantrix: warning: --access-log is accepted but the "
-                        "access log starts in v0.2\n");
+                fprintf(stderr, "dantrix: warning: --access-log is accepted but the "
+                                "access log starts in v0.2\n");
             }
             break;
         case 'E':
@@ -192,8 +186,7 @@ int main(int argc, char **argv)
      */
     log_file = open_log_dest(log_dest);
     if (log_file == NULL) {
-        fprintf(stderr, "dantrix: cannot open error log '%s': %s\n",
-                log_dest, dx_strerror(errno));
+        fprintf(stderr, "dantrix: cannot open error log '%s': %s\n", log_dest, dx_strerror(errno));
         return DX_EXIT_FATAL;
     }
 

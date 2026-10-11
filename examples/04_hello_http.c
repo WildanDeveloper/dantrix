@@ -24,14 +24,13 @@
 #define BACKLOG 64
 
 /* A complete, fixed response: no client input is reflected back (XSS rule). */
-static const char RESPONSE[] =
-    "HTTP/1.1 200 OK\r\n"
-    "Server: dx-example\r\n"
-    "Content-Type: text/plain; charset=utf-8\r\n"
-    "Content-Length: 15\r\n"
-    "Connection: close\r\n"
-    "\r\n"
-    "hello, HTTP!\r\n";
+static const char RESPONSE[] = "HTTP/1.1 200 OK\r\n"
+                               "Server: dx-example\r\n"
+                               "Content-Type: text/plain; charset=utf-8\r\n"
+                               "Content-Length: 15\r\n"
+                               "Connection: close\r\n"
+                               "\r\n"
+                               "hello, HTTP!\r\n";
 
 /* Send one blocking write, retrying on EINTR and short writes. */
 static int write_all(int fd, const char *buf, size_t len)

@@ -77,9 +77,8 @@ int dx_server_run(const dx_server_config_t *cfg)
 
     listen_fd = dx_listen_tcp(cfg->bind_addr, cfg->port, cfg->backlog);
     if (listen_fd < 0) {
-        dx_log_write(cfg->log, DX_LOG_ERROR,
-                     "cannot listen on %s:%d: %s",
-                     cfg->bind_addr, cfg->port, dx_strerror(errno));
+        dx_log_write(cfg->log, DX_LOG_ERROR, "cannot listen on %s:%d: %s", cfg->bind_addr,
+                     cfg->port, dx_strerror(errno));
         return -1;
     }
 
@@ -90,25 +89,21 @@ int dx_server_run(const dx_server_config_t *cfg)
      * connection).
      */
     if (dx_worker_init(&worker, listen_fd, cfg->max_conns, cfg->log, &g_stop) != 0) {
-        dx_log_write(cfg->log, DX_LOG_ERROR, "worker init failed: %s",
-                     dx_strerror(errno));
+        dx_log_write(cfg->log, DX_LOG_ERROR, "worker init failed: %s", dx_strerror(errno));
         dx_worker_destroy(&worker);
         return -1;
     }
 
-    dx_log_write(cfg->log, DX_LOG_INFO,
-                 "%s %s listening on %s:%d (max %zu connections)",
-                 DX_PROGRAM_NAME, DX_VERSION_STRING, cfg->bind_addr, cfg->port,
-                 cfg->max_conns);
+    dx_log_write(cfg->log, DX_LOG_INFO, "%s %s listening on %s:%d (max %zu connections)",
+                 DX_PROGRAM_NAME, DX_VERSION_STRING, cfg->bind_addr, cfg->port, cfg->max_conns);
 
     rc = dx_worker_run(&worker);
 
     if (rc == 0) {
-        dx_log_write(cfg->log, DX_LOG_INFO,
-                     "shutdown complete (accepted %llu, rejected %llu, closed %llu)",
-                     (unsigned long long)worker.accepted_total,
-                     (unsigned long long)worker.rejected_total,
-                     (unsigned long long)worker.closed_total);
+        dx_log_write(
+            cfg->log, DX_LOG_INFO, "shutdown complete (accepted %llu, rejected %llu, closed %llu)",
+            (unsigned long long)worker.accepted_total, (unsigned long long)worker.rejected_total,
+            (unsigned long long)worker.closed_total);
     } else {
         dx_log_write(cfg->log, DX_LOG_ERROR, "worker stopped with an error");
     }

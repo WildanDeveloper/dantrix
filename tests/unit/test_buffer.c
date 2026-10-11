@@ -31,7 +31,7 @@ static void test_buffer_window(void)
     /* Consume more than available is clamped, never wraps. */
     dx_buffer_consume(&b, 100);
     CHECK_EQ(dx_buffer_readable(&b), 0);
-    CHECK_EQ(b.off, 0);      /* fully drained resets the window */
+    CHECK_EQ(b.off, 0); /* fully drained resets the window */
     CHECK_EQ(b.len, 0);
     CHECK_EQ(dx_buffer_writable(&b), 16);
 
@@ -99,10 +99,10 @@ static void test_pool_basics(void)
     /* Ownership accounting is exact. */
     CHECK(dx_bufpool_release(pool, a));
     CHECK_EQ(dx_bufpool_outstanding(pool), 1);
-    CHECK(!dx_bufpool_release(pool, a));       /* double release rejected */
+    CHECK(!dx_bufpool_release(pool, a)); /* double release rejected */
     CHECK_EQ(dx_bufpool_outstanding(pool), 1);
-    CHECK(!dx_bufpool_release(pool, a + 7));   /* not a slot base */
-    CHECK(!dx_bufpool_release(pool, NULL));    /* defensive */
+    CHECK(!dx_bufpool_release(pool, a + 7)); /* not a slot base */
+    CHECK(!dx_bufpool_release(pool, NULL));  /* defensive */
     CHECK_EQ(dx_bufpool_outstanding(pool), 1);
 
     /* A pointer from outside every chunk is rejected. */
@@ -116,7 +116,7 @@ static void test_pool_basics(void)
     CHECK_EQ(dx_bufpool_outstanding(pool), 0);
     {
         unsigned char *again = dx_bufpool_acquire(pool, 64);
-        CHECK(again == a || again == b);       /* only two slots exist */
+        CHECK(again == a || again == b); /* only two slots exist */
         (void)dx_bufpool_release(pool, again);
     }
 

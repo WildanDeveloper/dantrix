@@ -166,8 +166,7 @@ int main(void)
             if (events[e].data.fd == -1) {
                 /* Listener: accept until the queue is empty. */
                 for (;;) {
-                    int fd = accept4(listen_fd, NULL, NULL,
-                                     SOCK_NONBLOCK | SOCK_CLOEXEC);
+                    int fd = accept4(listen_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
                     struct conn *c;
                     int j;
 
@@ -208,8 +207,7 @@ int main(void)
                 if ((events[e].events & (EPOLLIN | EPOLLRDHUP)) != 0) {
                     /* Read until EAGAIN or EOF: level-triggered demands it. */
                     for (;;) {
-                        ssize_t nread = read(c->fd, c->buf + c->len,
-                                             sizeof(c->buf) - c->len);
+                        ssize_t nread = read(c->fd, c->buf + c->len, sizeof(c->buf) - c->len);
 
                         if (nread > 0) {
                             c->len += (size_t)nread;
