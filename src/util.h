@@ -40,6 +40,13 @@ long long dx_now_ms(void);
 int dx_write_all(int fd, const void *buf, size_t len);
 
 /*
+ * send() wrapper with the same guarantees as dx_write_all(), always using
+ * MSG_NOSIGNAL so a disconnected peer cannot raise SIGPIPE.
+ * Returns 0 on success, -1 on error (errno preserved).
+ */
+int dx_send_all(int fd, const void *buf, size_t len);
+
+/*
  * Strict unsigned decimal parser over an exact byte range (no NUL needed).
  * Rejects empty input, non-digits, and values that overflow unsigned long long.
  * Returns true on success.

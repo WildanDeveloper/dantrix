@@ -21,7 +21,8 @@ dx_log_t *dx_worker_log(dx_worker_t *w)
 
 int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *log,
                    const volatile sig_atomic_t *stop_flag, const dx_http_limits_t *limits,
-                   dx_log_t *access_log, dx_log_format_t log_format)
+                   dx_log_t *access_log, dx_log_format_t log_format, dx_fs_t *fs, dx_mime_t *mime,
+                   const dx_static_opts_t *static_opts)
 {
     struct epoll_event ev;
 
@@ -36,10 +37,21 @@ int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *lo
     w->log = log;
     w->access_log = access_log;
     w->log_format = log_format;
+    w->fs = fs;
+    w->mime = mime;
     if (limits != NULL) {
         w->limits = *limits;
     } else {
         dx_http_limits_default(&w->limits);
+    }
+    if (static_opts != NULL) {
+        w->static_opts = *static_opts;
+    }
+    if (w->static_opts.cache_control == NULL) {
+        w->static_opts.cache_control = "";
+    }
+    if (w->static_opts.sendfile_chunk == 0) {
+        w->static_opts.sendfile_chunk = 1024u * 1024u;
     }
     w->max_conns = max_conns;
     w->stop_flag = stop_flag;
@@ -199,6 +211,9 @@ static void conn_close(dx_worker_t *w, dx_conn_t *conn)
     /* One line per completed request, emitted while the record is intact. */
     access_emit(w, conn);
 
+    /* A streamed file is owned by the connection until it is closed. */
+    dx_conn_release_file(conn);
+
     /* Returns the pooled slot or frees the grown heap allocation. */
     dx_conn_release_buffer(conn, w->bufs);
     dx_conn_reset(conn);
@@ -224,9 +239,10 @@ static int conn_update_interest(dx_worker_t *w, dx_conn_t *conn)
         /*
          * Nothing more will be read: after an EOF read() would return 0
          * forever, and with the response staged the request is over. Only
-         * EPOLLOUT stays registered while the reply drains.
+         * EPOLLOUT stays registered while the reply (headers or file body)
+         * drains.
          */
-        if (!dx_conn_has_pending(conn)) {
+        if (!dx_conn_has_work(conn)) {
             return -1; /* nothing left to send: the caller closes */
         }
         ev.events = EPOLLOUT;

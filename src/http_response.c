@@ -103,9 +103,14 @@ const char *dx_http_status_reason(int status)
     return "Unknown";
 }
 
-size_t dx_http_response_build(char *out, size_t cap, int status, const char *extra_headers,
-                              const char *content_type, const char *body, size_t body_len,
-                              bool omit_body)
+/*
+ * Shared assembly. body_present tells whether the body bytes follow the
+ * headers in this buffer; when false, content_length describes a body that is
+ * streamed afterwards (sendfile) and nothing is appended.
+ */
+static size_t response_assemble(char *out, size_t cap, int status, const char *extra_headers,
+                                const char *content_type, const char *body, size_t content_length,
+                                bool omit_body, bool body_present)
 {
     strbuf_t sb;
     char date[40];
@@ -113,7 +118,7 @@ size_t dx_http_response_build(char *out, size_t cap, int status, const char *ext
     if (out == NULL || cap == 0) {
         return 0;
     }
-    if (body == NULL && body_len != 0) {
+    if (body == NULL && body_present && content_length != 0) {
         return 0;
     }
     sb_init(&sb, out, cap);
@@ -145,7 +150,7 @@ size_t dx_http_response_build(char *out, size_t cap, int status, const char *ext
      * HEAD response carries the same length as its GET twin (RFC 9110 9.3.2).
      */
     sb_append_str(&sb, "Content-Length: ");
-    sb_append_num(&sb, (unsigned long long)body_len);
+    sb_append_num(&sb, (unsigned long long)content_length);
     sb_append_str(&sb, "\r\n");
 
     sb_append_str(&sb, "Connection: close\r\n");
@@ -156,14 +161,30 @@ size_t dx_http_response_build(char *out, size_t cap, int status, const char *ext
     }
     sb_append_str(&sb, "\r\n");
 
-    if (!omit_body && body != NULL && body_len > 0) {
-        sb_append(&sb, body, body_len);
+    if (body_present && !omit_body && body != NULL && content_length > 0) {
+        sb_append(&sb, body, content_length);
     }
 
     if (sb.overflow) {
         return 0;
     }
     return sb.len;
+}
+
+size_t dx_http_response_build(char *out, size_t cap, int status, const char *extra_headers,
+                              const char *content_type, const char *body, size_t body_len,
+                              bool omit_body)
+{
+    return response_assemble(out, cap, status, extra_headers, content_type, body, body_len,
+                             omit_body, true);
+}
+
+size_t dx_http_response_headers(char *out, size_t cap, int status, const char *extra_headers,
+                                const char *content_type, size_t content_length, bool omit_body)
+{
+    /* No body bytes follow: Content-Length describes the streamed file. */
+    return response_assemble(out, cap, status, extra_headers, content_type, NULL, content_length,
+                             omit_body, false);
 }
 
 size_t dx_http_response_error(char *out, size_t cap, int status, const char *extra_headers)

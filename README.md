@@ -114,7 +114,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Learning material: blocking echo, thread-per-connection, `epoll` echo (`examples/`) | ✅ | v0.1.0 |
 | Single-thread `epoll` event loop, non-blocking accept, connection pool | ✅ | v0.1.0 |
 | Incremental HTTP/1.1 parser and error responses | ✅ | v0.2.0 |
-| Static files: `sendfile`, MIME, `HEAD`, `ETag`, `Range` | 📝 | v0.3.0 |
+| Static files: `sendfile`, MIME, `HEAD`, `ETag`, `Range` | ✅ | v0.3.0 |
 | Keep-alive, pipelining, timer wheel, timeouts | 📝 | v0.4.0 |
 | Multi-worker with `SO_REUSEPORT` | 📝 | v0.5.0 |
 | Configuration, CLI, signals, graceful shutdown and reload | 📝 | v0.6.0 |
@@ -2106,13 +2106,13 @@ Each release has a single capability as its theme. A checked box marks completed
 
 ### v0.3.0: Static files
 
-- [ ] Safe path resolution (`openat2` with a fallback)
-- [ ] MIME types, `HEAD`, `Content-Length`
-- [ ] `sendfile` with `MSG_MORE` and partial write handling
-- [ ] `ETag`, `Last-Modified`, `304`
-- [ ] Single range (`206`, `416`, `If-Range`)
-- [ ] Index file, directory redirect, optional listing
-- [ ] Integration tests for all of the above
+- [x] Safe path resolution (`openat2` with a fallback)
+- [x] MIME types, `HEAD`, `Content-Length`
+- [x] `sendfile` with `MSG_MORE` and partial write handling
+- [x] `ETag`, `Last-Modified`, `304`
+- [x] Single range (`206`, `416`, `If-Range`)
+- [x] Index file, directory redirect, optional listing
+- [x] Integration tests for all of the above
 
 ### v0.4.0: Persistent connections
 

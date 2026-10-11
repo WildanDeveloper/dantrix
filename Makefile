@@ -231,17 +231,24 @@ bench:
 stress:
 	@echo "stress harness lands in v0.7; nothing to run yet"
 
-# Parser fuzzer. Without clang/libFuzzer the standalone deterministic driver
-# runs the same invariant checks (300k mutated inputs) with plain gcc.
-FUZZ_SRCS := src/http_parser.c src/http_response.c src/util.c
+# Fuzzers. Without clang/libFuzzer the standalone deterministic drivers run
+# the same invariant checks with plain gcc.
+FUZZ_PARSER_SRCS := src/http_parser.c src/http_response.c src/util.c
+FUZZ_PATH_SRCS := src/path.c src/http_range.c src/mime.c
 
-$(BUILD)/fuzz_http_parser: fuzz/fuzz_http_parser.c $(FUZZ_SRCS)
+$(BUILD)/fuzz_http_parser: fuzz/fuzz_http_parser.c $(FUZZ_PARSER_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(DEFS) $(WARN) -O1 -g -DFUZZ_STANDALONE \
-	    -I$(SRC) $< $(FUZZ_SRCS) -o $@ $(LDFLAGS)
+	    -I$(SRC) $< $(FUZZ_PARSER_SRCS) -o $@ $(LDFLAGS)
 
-fuzz: $(BUILD)/fuzz_http_parser
+$(BUILD)/fuzz_path: fuzz/fuzz_path.c $(FUZZ_PATH_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) $(STD) $(DEFS) $(WARN) -O1 -g -DFUZZ_STANDALONE \
+	    -I$(SRC) $< $(FUZZ_PATH_SRCS) -o $@ $(LDFLAGS)
+
+fuzz: $(BUILD)/fuzz_http_parser $(BUILD)/fuzz_path
 	./$(BUILD)/fuzz_http_parser
+	./$(BUILD)/fuzz_path
 
 docker:
 	docker build -f deploy/Dockerfile -t dantrix:latest .

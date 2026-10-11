@@ -66,8 +66,7 @@ static void test_overflow_returns_zero(void)
     dx_test_begin("http_response/overflow");
 
     /* A too small buffer degrades to 0 instead of writing out of bounds. */
-    CHECK_EQ(dx_http_response_build(small, sizeof(small), 200, NULL, "text/plain", "x", 1u,
-                                    false),
+    CHECK_EQ(dx_http_response_build(small, sizeof(small), 200, NULL, "text/plain", "x", 1u, false),
              0u);
     CHECK_EQ(dx_http_response_build(tiny, sizeof(tiny), 200, NULL, NULL, NULL, 0u, false), 0u);
     CHECK_EQ(dx_http_response_error(small, sizeof(small), 404, NULL), 0u);

@@ -49,6 +49,9 @@ typedef struct {
     bool close_after_response; /* v0.2 always closes; keep-alive lands in v0.4 */
     dx_buffer_t buf;           /* request bytes, then the pending response */
     unsigned char *buf_mem;    /* pool slot to hand back, NULL when malloc'd */
+    int file_fd;               /* file being streamed, -1 when none */
+    uint64_t file_offset;      /* next byte to read from file_fd */
+    uint64_t file_left;        /* body bytes still to send */
     dx_http_parser_t parser;
     dx_access_t acc;
     char peer[64]; /* formatted client address, "-" when unknown */
@@ -108,11 +111,17 @@ void dx_conn_init(dx_conn_t *conn, int fd, const dx_http_limits_t *limits);
 /* Return the read buffer (pool slot or heap) and reset counters. */
 void dx_conn_release_buffer(dx_conn_t *conn, dx_bufpool_t *pool);
 
+/* Close a streamed file, if any. Safe to call at any time. */
+void dx_conn_release_file(dx_conn_t *conn);
+
 /* Reset pointers and state without changing the generation. */
 void dx_conn_reset(dx_conn_t *conn);
 
 /* True while response bytes are waiting to be written out. */
 bool dx_conn_has_pending(const dx_conn_t *conn);
+
+/* True while header bytes or file bytes are still to be sent. */
+bool dx_conn_has_work(const dx_conn_t *conn);
 
 /*
  * Read whatever is available and run the HTTP flow (parse, dispatch, respond).

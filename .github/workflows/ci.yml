@@ -45,13 +45,14 @@ jobs:
               src/*.c -o build/dantrix-asan
       - name: Unit tests under ASan/UBSan
         run: |
-          for t in buffer http_parser http_response log pool util; do
+          for t in buffer file http_parser http_range http_response log mime path pool util; do
             gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wpedantic -Werror \
                 -O1 -g -fsanitize=address,undefined \
                 -fno-sanitize-recover=undefined \
                 -Isrc -Itests/unit tests/unit/test_$t.c src/buffer.c \
-                src/conn.c src/http_parser.c src/http_response.c src/log.c \
-                src/net.c src/server.c src/util.c src/worker.c \
+                src/conn.c src/file.c src/http_parser.c src/http_range.c \
+                src/http_response.c src/log.c src/mime.c src/net.c \
+                src/path.c src/server.c src/util.c src/worker.c \
                 -o build/test_${t}_asan -lpthread
             ./build/test_${t}_asan
           done

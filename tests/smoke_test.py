@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Integration smoke test for Dantrix v0.2 (HTTP core).
+"""Integration smoke test for Dantrix v0.3 (HTTP core + static files).
 
-Runs the built binary, exercises the strict parser end to end (valid methods,
-every documented error status, split delivery), the access log, concurrency,
-and graceful shutdown on SIGTERM. Dependency free: standard library only.
+Runs the built binary against a temporary document root, exercises the strict
+parser, the file serving path (index, redirect, listing, validators, ranges),
+the access log, concurrency and graceful shutdown. Standard library only.
 
 Usage: python3 tests/smoke_test.py [path-to-binary]
 """
 
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -18,9 +19,11 @@ import time
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "build/dantrix-asan"
 PORT = 18091
+failures = []
+
+DOCROOT = tempfile.mkdtemp(prefix="dantrix-docroot-")
 ACCESS_LOG = tempfile.NamedTemporaryFile(prefix="dantrix-access-", suffix=".log", delete=False)
 ACCESS_LOG.close()
-failures = []
 
 
 def check(name, cond):
@@ -30,8 +33,29 @@ def check(name, cond):
         failures.append(name)
 
 
+def setup_docroot():
+    """Build a small tree: index, text file, binary file, dir without index."""
+    os.makedirs(os.path.join(DOCROOT, "sub"), exist_ok=True)
+    os.makedirs(os.path.join(DOCROOT, "noindex"), exist_ok=True)
+    os.makedirs(os.path.join(DOCROOT, ".hidden"), exist_ok=True)
+    with open(os.path.join(DOCROOT, "index.html"), "w") as f:
+        f.write("<h1>Dantrix</h1>\n")
+    with open(os.path.join(DOCROOT, "hello.txt"), "w") as f:
+        f.write("Hello static world!\n")
+    with open(os.path.join(DOCROOT, "big.bin"), "wb") as f:
+        f.write(bytes(range(256)) * 12)  # 3072 bytes
+    with open(os.path.join(DOCROOT, "sub", "page.html"), "w") as f:
+        f.write("<p>sub</p>\n")
+    with open(os.path.join(DOCROOT, "noindex", "readme.txt"), "w") as f:
+        f.write("no index here\n")
+    with open(os.path.join(DOCROOT, ".hidden", "secret.txt"), "w") as f:
+        f.write("secret\n")
+    with open(os.path.join(DOCROOT, ".env"), "w") as f:
+        f.write("SECRET=1\n")
+
+
 def recv_all(sock, timeout=5.0):
-    """Read until EOF (the server closes after every response in v0.2)."""
+    """Read until EOF (the server closes after every response until v0.4)."""
     sock.settimeout(timeout)
     data = b""
     while True:
@@ -55,11 +79,25 @@ def status_line(resp):
     return resp.split(b"\r\n", 1)[0].decode(errors="replace")
 
 
+def body_of(resp):
+    parts = resp.split(b"\r\n\r\n", 1)
+    return parts[1] if len(parts) > 1 else b""
+
+
+def header_of(resp, name):
+    for line in resp.split(b"\r\n\r\n", 1)[0].split(b"\r\n"):
+        if line.lower().startswith(name.lower() + b":"):
+            return line.split(b":", 1)[1].strip()
+    return None
+
+
 def main():
+    setup_docroot()
     env = dict(os.environ)
     env.setdefault("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
     proc = subprocess.Popen(
         [BIN, "-b", "127.0.0.1", "-p", str(PORT), "--log-level", "debug",
+         "--root", DOCROOT, "--directory-listing", "on",
          "--access-log", ACCESS_LOG.name, "--log-format", "combined"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
 
@@ -83,77 +121,116 @@ def main():
         return 1
     print("server started")
 
-    # --- valid requests ---------------------------------------------------
-    resp = request(b"GET /hello?x=1 HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
-    check("GET -> 200", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
-    check("GET body present", resp.endswith(b"the HTTP core is alive.\n"))
-    check("GET Content-Length matches body",
-          b"Content-Length: %d\r\n" % len(resp.split(b"\r\n\r\n", 1)[1]) in resp)
-    check("GET Connection: close", b"Connection: close\r\n" in resp)
-    check("GET nosniff", b"X-Content-Type-Options: nosniff\r\n" in resp)
-    check("GET has Date header", b"\r\nDate: " in resp)
+    # --- static files ------------------------------------------------------
+    resp = request(b"GET / HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
+    check("GET / serves index.html", resp.startswith(b"HTTP/1.1 200 OK"))
+    check("index.html has text/html charset",
+          header_of(resp, b"Content-Type") == b"text/html; charset=utf-8")
+    check("index body", body_of(resp) == b"<h1>Dantrix</h1>\n")
+    check("index has Last-Modified", header_of(resp, b"Last-Modified") is not None)
+    check("index has ETag", header_of(resp, b"ETag") is not None)
+    check("index has Accept-Ranges", header_of(resp, b"Accept-Ranges") == b"bytes")
+    check("no Content-Range on a full response", header_of(resp, b"Content-Range") is None)
 
-    resp = request(b"HEAD / HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
-    check("HEAD -> 200", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
-    check("HEAD has Content-Length 39", b"Content-Length: 39\r\n" in resp)
-    check("HEAD has no body", resp.endswith(b"\r\n\r\n"))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
+    check("text/plain charset", header_of(resp, b"Content-Type") == b"text/plain; charset=utf-8")
+    check("text body", body_of(resp) == b"Hello static world!\n")
 
-    resp = request(b"OPTIONS * HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
-    check("OPTIONS -> 200 with Allow",
-          resp.startswith(b"HTTP/1.1 200 OK\r\n") and b"Allow: GET, HEAD, OPTIONS\r\n" in resp)
+    resp = request(b"HEAD /hello.txt HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
+    check("HEAD identical Content-Length", header_of(resp, b"Content-Length") == b"20")
+    check("HEAD has no body", body_of(resp) == b"")
 
-    resp = request(b"GET / HTTP/1.0\r\n\r\n")
-    check("HTTP/1.0 without Host -> 200", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
+    with open(os.path.join(DOCROOT, "big.bin"), "rb") as f:
+        expected = f.read()
+    resp = request(b"GET /big.bin HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
+    check("sendfile body matches the file", body_of(resp) == expected)
+    check("binary Content-Length",
+          header_of(resp, b"Content-Length") == str(len(expected)).encode())
 
-    # --- rejections --------------------------------------------------------
-    cases = [
-        (b"POST / HTTP/1.1\r\nHost: x\r\n\r\n", 405),
-        (b"DELETE / HTTP/1.1\r\nHost: x\r\n\r\n", 405),
-        (b"BREW / HTTP/1.1\r\nHost: x\r\n\r\n", 501),
-        (b"GET / HTTP/1.1\r\n\r\n", 400),                       # no Host
-        (b"GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n", 400),  # duplicate Host
-        (b"GET / HTTP/1.1\nHost: x\r\n\r\n", 400),               # bare LF
-        (b"GET  / HTTP/1.1\r\n\r\n", 400),                       # double space
-        (b"GET / HTTP/1.1\r\nHost : x\r\n\r\n", 400),            # space before colon
-        (b"GET / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", 501),
-        (b"GET / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n"
-         b"Content-Length: 5\r\n\r\n", 400),
-        (b"GET / HTTP/2.4\r\nHost: x\r\n\r\n", 505),
-        (b"GET / HTTP/1.9\r\nHost: x\r\n\r\n", 505),
-        (b"GET / HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n\r\n", 400),
-    ]
-    all_ok = True
-    for raw, want in cases:
-        resp = request(raw)
-        got = status_line(resp)
-        if not got.startswith(f"HTTP/1.1 {want} "):
-            print(f"    expected {want}, got: {got}")
-            all_ok = False
-    check("13 strict-parser rejection cases (400/405/501/505)", all_ok)
+    resp = request(b"GET /sub HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
+    check("directory without slash -> 301", resp.startswith(b"HTTP/1.1 301 "))
+    check("301 Location", header_of(resp, b"Location") == b"/sub/")
 
-    resp = request(b"POST / HTTP/1.1\r\nHost: x\r\n\r\n")
-    check("405 carries Allow header", b"Allow: GET, HEAD, OPTIONS\r\n" in resp)
-    check("error pages do not reflect input",
-          b"Host" not in resp.split(b"\r\n\r\n", 1)[1])
+    resp = request(b"GET /noindex/ HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
+    check("listing enabled -> 200 with entries", resp.startswith(b"HTTP/1.1 200 OK"))
+    check("listing contains the file", b"readme.txt" in body_of(resp))
 
-    # 414: request line past the limit.
-    resp = request(b"GET /" + b"a" * 9000 + b" HTTP/1.1\r\nHost: x\r\n\r\n")
-    check("oversized request line -> 414", resp.startswith(b"HTTP/1.1 414 "))
+    # --- conditional requests and ranges ------------------------------------
+    head = request(b"HEAD /hello.txt HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
+    etag = header_of(head, b"ETag")
+    last_mod = header_of(head, b"Last-Modified")
 
-    # 431: headers past the default 16 KiB budget.
-    resp = request(b"GET / HTTP/1.1\r\nHost: x\r\n" + b"X-Pad: " + b"a" * 17000 +
-                   b"\r\n\r\n")
-    check("oversized headers -> 431", resp.startswith(b"HTTP/1.1 431 "))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nIf-None-Match: " + etag + b"\r\n\r\n")
+    check("If-None-Match match -> 304", resp.startswith(b"HTTP/1.1 304 "))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nIf-None-Match: *\r\n\r\n")
+    check("If-None-Match: * -> 304", resp.startswith(b"HTTP/1.1 304 "))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nIf-None-Match: \"other\"\r\n\r\n")
+    check("If-None-Match mismatch -> 200", resp.startswith(b"HTTP/1.1 200 OK"))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nIf-Modified-Since: " +
+                   last_mod + b"\r\n\r\n")
+    check("If-Modified-Since -> 304", resp.startswith(b"HTTP/1.1 304 "))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\n"
+                   b"If-Modified-Since: Thu, 01 Jan 1970 00:00:00 GMT\r\n\r\n")
+    check("stale If-Modified-Since -> 200", resp.startswith(b"HTTP/1.1 200 OK"))
+
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nRange: bytes=0-3\r\n\r\n")
+    check("Range -> 206", resp.startswith(b"HTTP/1.1 206 "))
+    check("206 Content-Range", header_of(resp, b"Content-Range") == b"bytes 0-3/20")
+    check("206 body", body_of(resp) == b"Hell")
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nRange: bytes=-5\r\n\r\n")
+    check("suffix range serves the tail", body_of(resp) == b"rld!\n")
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nRange: bytes=10-\r\n\r\n")
+    check("open-ended range -> 206", resp.startswith(b"HTTP/1.1 206 "))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nRange: bytes=100-200\r\n\r\n")
+    check("out of range -> 416", resp.startswith(b"HTTP/1.1 416 "))
+    check("416 Content-Range", header_of(resp, b"Content-Range") == b"bytes */20")
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nRange: bytes=0-3,5-6\r\n\r\n")
+    check("multi-range ignored -> full 200", resp.startswith(b"HTTP/1.1 200 OK"))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nRange: bytes=abc\r\n\r\n")
+    check("invalid range ignored -> 200", resp.startswith(b"HTTP/1.1 200 OK"))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nRange: bytes=0-3\r\nIf-Range: " +
+                   etag + b"\r\n\r\n")
+    check("If-Range match keeps 206", resp.startswith(b"HTTP/1.1 206 "))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\nRange: bytes=0-3\r\n"
+                   b"If-Range: \"stale\"\r\n\r\n")
+    check("If-Range mismatch -> full 200", resp.startswith(b"HTTP/1.1 200 OK"))
+
+    # --- safety -------------------------------------------------------------
+    resp = request(b"GET /../../etc/passwd HTTP/1.1\r\nHost: s\r\n\r\n")
+    check("path traversal -> 400", resp.startswith(b"HTTP/1.1 400 "))
+    resp = request(b"GET /%2e%2e%2f%2e%2e%2fetc%2fpasswd HTTP/1.1\r\nHost: s\r\n\r\n")
+    check("encoded traversal -> 400", resp.startswith(b"HTTP/1.1 400 "))
+    resp = request(b"GET /..%2f..%2fetc%2fpasswd HTTP/1.1\r\nHost: s\r\n\r\n")
+    check("mixed encoded traversal -> 400", resp.startswith(b"HTTP/1.1 400 "))
+    resp = request(b"GET /.env HTTP/1.1\r\nHost: s\r\n\r\n")
+    check("hidden file -> 404", resp.startswith(b"HTTP/1.1 404 "))
+    resp = request(b"GET /.hidden/secret.txt HTTP/1.1\r\nHost: s\r\n\r\n")
+    check("hidden directory -> 404", resp.startswith(b"HTTP/1.1 404 "))
+    resp = request(b"GET /missing.txt HTTP/1.1\r\nHost: s\r\n\r\n")
+    check("missing file -> 404", resp.startswith(b"HTTP/1.1 404 "))
+
+    # --- parser surface (still strict) --------------------------------------
+    resp = request(b"GET /hello.txt HTTP/1.1\r\n\r\n")
+    check("GET without Host -> 400", resp.startswith(b"HTTP/1.1 400 "))
+    resp = request(b"POST /hello.txt HTTP/1.1\r\nHost: s\r\n\r\n")
+    check("POST -> 405 with Allow",
+          resp.startswith(b"HTTP/1.1 405 ") and b"Allow: GET, HEAD, OPTIONS" in resp)
+    resp = request(b"BREW / HTTP/1.1\r\nHost: s\r\n\r\n")
+    check("unknown method -> 501", resp.startswith(b"HTTP/1.1 501 "))
+    resp = request(b"OPTIONS * HTTP/1.1\r\nHost: s\r\n\r\n")
+    check("OPTIONS * -> 200", resp.startswith(b"HTTP/1.1 200 OK"))
+    resp = request(b"GET /hello.txt HTTP/2.0\r\nHost: s\r\n\r\n")
+    check("HTTP/2.0 -> 505", resp.startswith(b"HTTP/1.1 505 "))
 
     # A request split into single bytes must still parse.
     with socket.create_connection(("127.0.0.1", PORT), timeout=5) as s:
-        for byte in b"GET /split HTTP/1.1\r\nHost: x\r\n\r\n":
+        for byte in b"GET /hello.txt HTTP/1.1\r\nHost: x\r\n\r\n":
             s.sendall(bytes([byte]))
             time.sleep(0.001)
         resp = recv_all(s)
-    check("byte-by-byte delivery -> 200", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
+    check("byte-by-byte delivery -> 200", resp.startswith(b"HTTP/1.1 200 OK"))
 
-    # --- concurrency and rude clients -------------------------------------
+    # --- concurrency and rude clients ---------------------------------------
     socks = []
     ok = True
     try:
@@ -161,28 +238,30 @@ def main():
             s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
             socks.append(s)
         for s in socks:
-            s.sendall(b"GET / HTTP/1.1\r\nHost: c\r\n\r\n")
+            s.sendall(b"GET /hello.txt HTTP/1.1\r\nHost: c\r\n\r\n")
         for s in socks:
             got = recv_all(s)
-            ok = ok and got.startswith(b"HTTP/1.1 200 OK\r\n")
-        check("50 concurrent connections answered independently", ok)
+            ok = ok and got.startswith(b"HTTP/1.1 200 OK") and body_of(got) == b"Hello static world!\n"
+        check("50 concurrent file requests answered independently", ok)
     finally:
         for s in socks:
             s.close()
 
     # A client that disconnects mid-request must not wedge the server.
     s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
-    s.sendall(b"GET / HTTP/1.1\r\nHost: partial")
+    s.sendall(b"GET /hello.txt HTTP/1.1\r\nHost: partial")
     s.shutdown(socket.SHUT_WR)
     s.close()
-    resp = request(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-    check("server survives a rude disconnect", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: x\r\n\r\n")
+    check("server survives a rude disconnect", resp.startswith(b"HTTP/1.1 200 OK"))
 
-    # A client that sends nothing and closes must not wedge the server.
+    # A client that disconnects mid-download must not wedge the server either.
     s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+    s.sendall(b"GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n")
+    s.recv(16)
     s.close()
-    resp = request(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-    check("server survives an empty connection", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
+    resp = request(b"GET /hello.txt HTTP/1.1\r\nHost: x\r\n\r\n")
+    check("server survives a mid-download disconnect", resp.startswith(b"HTTP/1.1 200 OK"))
 
     # --- graceful shutdown --------------------------------------------------
     proc.send_signal(signal.SIGTERM)
@@ -199,19 +278,19 @@ def main():
     # --- access log ---------------------------------------------------------
     with open(ACCESS_LOG.name, "r", errors="replace") as f:
         lines = [line.rstrip("\n") for line in f if line.strip()]
-    os.unlink(ACCESS_LOG.name)
-    check("access log has one line per response", len(lines) >= 20)
-    get_lines = [line for line in lines if '"GET /hello?x=1 HTTP/1.1" 200' in line]
-    check("access log recorded the GET", len(get_lines) == 1)
-    check("access log has peer address", get_lines and get_lines[0].startswith("127.0.0.1 - - ["))
-    check("access log combined format",
-          get_lines and '"-"' in get_lines[0].rsplit('" 200', 1)[-1] or
-          len(get_lines[0].split('"')) >= 5)
-    code_lines = [line for line in lines if ' 400 ' in line or ' 505 ' in line]
-    check("rejected requests are logged too", len(code_lines) >= 3)
+    got_lines = [line for line in lines if '"GET /hello.txt HTTP/1.1" 200' in line]
+    check("access log has one line per response", len(lines) >= 30)
+    check("access log recorded the file GET", len(got_lines) >= 5)
+    check("access log reports the served body size",
+          any(line.endswith('200 20 "-" "-"') for line in got_lines))
+    range_lines = [line for line in lines if '"GET /hello.txt HTTP/1.1" 206' in line]
+    # bytes=0-3, bytes=-5, bytes=10- and the If-Range 206 all land here.
+    check("access log records partial responses", len(range_lines) >= 3)
     check("no unescaped quotes in log lines",
           all(line.count('"') % 2 == 0 for line in lines))
 
+    os.unlink(ACCESS_LOG.name)
+    shutil.rmtree(DOCROOT, ignore_errors=True)
     print("smoke test:", "FAILED" if failures else "PASSED")
     return 1 if failures else 0
 

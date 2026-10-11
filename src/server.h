@@ -7,8 +7,11 @@
 
 #include <stddef.h>
 
+#include "file.h"
 #include "http_parser.h"
 #include "log.h"
+#include "mime.h"
+#include "worker.h"
 
 typedef struct {
     const char *bind_addr;      /* IP literal; NULL means the built-in default */
@@ -19,6 +22,10 @@ typedef struct {
     dx_log_t *log;              /* borrowed error logger */
     dx_log_t *access_log;       /* borrowed access logger; NULL disables logging */
     dx_log_format_t log_format; /* common or combined */
+    /* Static files. */
+    dx_fs_t *fs;                  /* document root handle; NULL serves no files */
+    dx_mime_t *mime;              /* extension mapping; NULL means octet-stream */
+    dx_static_opts_t static_opts; /* sendfile, etag, cache-control, ... */
 } dx_server_config_t;
 
 /*

@@ -211,9 +211,13 @@ static void test_error_table(void)
         {"GET / HTTP/1.1\r\nHost: x\r\nnocolon\r\n\r\n", 0, 400},
         /* Invalid character in the header name. */
         {"GET / HTTP/1.1\r\nHost: x\r\nB@d: v\r\n\r\n", 0, 400},
-        {"GET / HTTP/1.1\r\nHost: x\r\n\x01" "Bad: v\r\n\r\n", 0, 400},
+        {"GET / HTTP/1.1\r\nHost: x\r\n\x01"
+         "Bad: v\r\n\r\n",
+         0, 400},
         /* DEL in the header value. */
-        {"GET / HTTP/1.1\r\nHost: x\r\nX-V: a\x7f" "b\r\n\r\n", 0, 400},
+        {"GET / HTTP/1.1\r\nHost: x\r\nX-V: a\x7f"
+         "b\r\n\r\n",
+         0, 400},
         /* NUL in the header value (explicit length: string stops at NUL). */
         {"GET / HTTP/1.1\r\nHost: x\r\nX-V: a\0b\r\n\r\n", 37u, 400},
         /* Non-numeric Content-Length. */
@@ -243,8 +247,7 @@ static void test_error_table(void)
         dx_http_parser_init(&p, NULL);
         r = dx_http_parser_feed(&p, (const unsigned char *)cases[i].req, len, &consumed);
         if (r != DX_PARSE_ERROR) {
-            fprintf(stderr, "  case %zu expected error, got %d: %.40s\n", i, (int)r,
-                    cases[i].req);
+            fprintf(stderr, "  case %zu expected error, got %d: %.40s\n", i, (int)r, cases[i].req);
         }
         CHECK_EQ(r, DX_PARSE_ERROR);
         CHECK_EQ(p.status_code, cases[i].status);
@@ -256,8 +259,9 @@ static void test_error_table(void)
         dx_http_parser_t p;
         size_t consumed = 0;
 
-        CHECK_EQ(parse_whole(&p, "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
-                                 "content-length: 5\r\n\r\n",
+        CHECK_EQ(parse_whole(&p,
+                             "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
+                             "content-length: 5\r\n\r\n",
                              &consumed),
                  DX_PARSE_OK);
     }
@@ -277,7 +281,7 @@ static char *build_line_request(size_t line_len)
         return NULL;
     }
     memcpy(buf, "GET ", 4u);
-    memset(buf + 4u, 'a', line_len - 13u);  /* target fills the middle */
+    memset(buf + 4u, 'a', line_len - 13u); /* target fills the middle */
     memcpy(buf + line_len - 9u, " HTTP/1.0", 9u);
     memcpy(buf + line_len, "\r\n\r\n", 4u);
     return buf;

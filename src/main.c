@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "dantrix.h"
+#include "file.h"
 #include "http_parser.h"
 #include "log.h"
 #include "net.h"
@@ -24,8 +25,26 @@
 #define DX_EXIT_FATAL 1
 #define DX_EXIT_USAGE 2
 
+/* Parse an on/off flag. Returns 1 when parsed, 0 when the word is unknown. */
+static int parse_on_off(const char *value, bool *out)
+{
+    if (strcmp(value, "on") == 0 || strcmp(value, "true") == 0 || strcmp(value, "yes") == 0) {
+        *out = true;
+        return 1;
+    }
+    if (strcmp(value, "off") == 0 || strcmp(value, "false") == 0 || strcmp(value, "no") == 0) {
+        *out = false;
+        return 1;
+    }
+    return 0;
+}
+
 static void print_usage(FILE *out)
 {
+    const char *root = DX_DEFAULT_ROOT;
+    const char *index_name = DX_DEFAULT_INDEX;
+    const char *default_type = DX_DEFAULT_MIME;
+
     fprintf(out,
             "Dantrix %s - epoll based HTTP/1.1 server\n"
             "\n"
@@ -43,6 +62,20 @@ static void print_usage(FILE *out)
             "      --max-conns N        Connection limit                   [%d]\n"
             "  -w, --workers N          Worker count (only 1 until v0.5)   [1]\n"
             "\n"
+            "Static files:\n"
+            "  -r, --root DIR           Document root                       [%s]\n"
+            "      --index NAME         Directory index file               [%s]\n"
+            "      --directory-listing  on|off (listing when no index)     [off]\n"
+            "      --sendfile           on|off (else pread+send)           [on]\n"
+            "      --sendfile-chunk N   Bytes per sendfile call            [1m]\n"
+            "      --etag               on|off (send and evaluate ETag)    [on]\n"
+            "      --follow-symlinks    on|off (links must stay in root)    [off]\n"
+            "      --hidden-files       on|off (serve dot segments)        [off]\n"
+            "      --mime-types FILE    Extra mime.types table             [none]\n"
+            "      --default-type TYPE  Type for unknown extensions        [%s]\n"
+            "      --cache-control VAL  Cache-Control header value         [none]\n"
+            "      --server-tokens      on|off (Server: Dantrix/ver)       [on]\n"
+            "\n"
             "HTTP limits:\n"
             "      --max-request-line N Request line limit in bytes        [%d]\n"
             "      --max-header-size N  Whole-request limit in bytes (k/m/g"
@@ -55,12 +88,9 @@ static void print_usage(FILE *out)
             "      --access-log DEST    off, stderr, stdout, or a file     [%s]\n"
             "      --log-format FMT     common or combined                 [common]\n"
             "\n"
-            "Accepted for compatibility, not implemented yet:\n"
-            "  -r, --root DIR           Document root (used from v0.3)\n"
-            "\n"
             "Exit codes: 0 ok, 1 fatal error, 2 invalid arguments.\n",
             DX_VERSION_STRING, DX_DEFAULT_BIND, DX_DEFAULT_PORT, DX_DEFAULT_BACKLOG,
-            DX_DEFAULT_MAX_CONNS, 8 * 1024, 16 * 1024, 100, "off");
+            DX_DEFAULT_MAX_CONNS, root, index_name, default_type, 8 * 1024, 16 * 1024, 100, "off");
 }
 
 static void print_version(FILE *out)
@@ -94,6 +124,18 @@ int main(int argc, char **argv)
     const char *log_level_name = "info";
     const char *access_dest = NULL; /* NULL = off */
     const char *log_format_name = "common";
+    const char *root = DX_DEFAULT_ROOT;
+    const char *index_name = DX_DEFAULT_INDEX;
+    const char *mime_types = NULL;
+    const char *default_type = DX_DEFAULT_MIME;
+    const char *cache_control = "";
+    bool directory_listing = false;
+    bool sendfile = true;
+    bool etag = true;
+    bool follow_symlinks = false;
+    bool hidden_files = false;
+    bool server_tokens = true;
+    size_t sendfile_chunk = 1024u * 1024u;
     int port = DX_DEFAULT_PORT;
     int backlog = DX_DEFAULT_BACKLOG;
     int max_conns_arg = DX_DEFAULT_MAX_CONNS;
@@ -108,6 +150,8 @@ int main(int argc, char **argv)
     dx_log_format_t log_format = DX_LOG_FMT_COMMON;
     dx_http_limits_t limits;
     dx_server_config_t cfg;
+    dx_fs_t *fs = NULL;
+    dx_mime_t *mime = NULL;
     FILE *log_file = NULL;
     FILE *access_file = NULL;
     int opt;
@@ -118,6 +162,18 @@ int main(int argc, char **argv)
                                               {"port", required_argument, NULL, 'p'},
                                               {"backlog", required_argument, NULL, 'B'},
                                               {"max-conns", required_argument, NULL, 'M'},
+                                              {"root", required_argument, NULL, 'r'},
+                                              {"index", required_argument, NULL, 'X'},
+                                              {"directory-listing", required_argument, NULL, 'D'},
+                                              {"sendfile", required_argument, NULL, 'S'},
+                                              {"sendfile-chunk", required_argument, NULL, 'K'},
+                                              {"etag", required_argument, NULL, 'G'},
+                                              {"follow-symlinks", required_argument, NULL, 'Y'},
+                                              {"hidden-files", required_argument, NULL, 'U'},
+                                              {"mime-types", required_argument, NULL, 'T'},
+                                              {"default-type", required_argument, NULL, 'O'},
+                                              {"cache-control", required_argument, NULL, 'C'},
+                                              {"server-tokens", required_argument, NULL, 'Q'},
                                               {"max-request-line", required_argument, NULL, 'R'},
                                               {"max-header-size", required_argument, NULL, 'H'},
                                               {"max-headers", required_argument, NULL, 'N'},
@@ -129,7 +185,7 @@ int main(int argc, char **argv)
                                               {"log-level", required_argument, NULL, 'L'},
                                               {NULL, 0, NULL, 0}};
 
-    while ((opt = getopt_long(argc, argv, "hVb:p:w:r:", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "hVb:p:wr:", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'h':
             print_usage(stdout);
@@ -193,8 +249,63 @@ int main(int argc, char **argv)
             }
             break;
         case 'r':
-            fprintf(stderr, "dantrix: warning: --root is accepted but static file "
-                            "serving starts in v0.3\n");
+            root = optarg;
+            break;
+        case 'X':
+            index_name = optarg;
+            break;
+        case 'D':
+            if (!parse_on_off(optarg, &directory_listing)) {
+                fprintf(stderr, "dantrix: --directory-listing expects on or off\n");
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 'S':
+            if (!parse_on_off(optarg, &sendfile)) {
+                fprintf(stderr, "dantrix: --sendfile expects on or off\n");
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 'K':
+            if (!dx_parse_size(optarg, &sendfile_chunk) || sendfile_chunk < 4096u ||
+                sendfile_chunk > 64u * 1024u * 1024u) {
+                fprintf(stderr, "dantrix: invalid --sendfile-chunk '%s' (expected 4k..64m)\n",
+                        optarg);
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 'G':
+            if (!parse_on_off(optarg, &etag)) {
+                fprintf(stderr, "dantrix: --etag expects on or off\n");
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 'Y':
+            if (!parse_on_off(optarg, &follow_symlinks)) {
+                fprintf(stderr, "dantrix: --follow-symlinks expects on or off\n");
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 'U':
+            if (!parse_on_off(optarg, &hidden_files)) {
+                fprintf(stderr, "dantrix: --hidden-files expects on or off\n");
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 'T':
+            mime_types = optarg;
+            break;
+        case 'O':
+            default_type = optarg;
+            break;
+        case 'C':
+            cache_control = optarg;
+            break;
+        case 'Q':
+            if (!parse_on_off(optarg, &server_tokens)) {
+                fprintf(stderr, "dantrix: --server-tokens expects on or off\n");
+                return DX_EXIT_USAGE;
+            }
             break;
         case 'A':
             if (strcmp(optarg, "off") == 0) {
@@ -275,9 +386,37 @@ int main(int argc, char **argv)
         cfg.access_log = &access_logger;
     }
 
+    /*
+     * The document root is opened before the listener so that a bad root is a
+     * start-up error rather than a stream of 404s.
+     */
+    fs = dx_fs_create(root, index_name, directory_listing, follow_symlinks);
+    if (fs == NULL) {
+        fprintf(stderr, "dantrix: cannot use document root '%s': %s\n", root, dx_strerror(errno));
+        return DX_EXIT_FATAL;
+    }
+    mime = dx_mime_create(mime_types, default_type);
+    if (mime == NULL) {
+        fprintf(stderr, "dantrix: cannot build the MIME table\n");
+        dx_fs_destroy(fs);
+        return DX_EXIT_FATAL;
+    }
+
+    cfg.fs = fs;
+    cfg.mime = mime;
+    cfg.static_opts.sendfile = sendfile;
+    cfg.static_opts.sendfile_chunk = sendfile_chunk;
+    cfg.static_opts.etag = etag;
+    cfg.static_opts.server_tokens = server_tokens;
+    cfg.static_opts.hidden_files = hidden_files;
+    cfg.static_opts.cache_control = cache_control;
+
     if (dx_server_run(&cfg) != 0) {
         rc = DX_EXIT_FATAL;
     }
+
+    dx_mime_destroy(mime);
+    dx_fs_destroy(fs);
 
     /*
      * Both streams are open here: a failed open exits with DX_EXIT_FATAL

@@ -14,7 +14,20 @@
 #include "buffer.h"
 #include "conn.h"
 #include "dantrix.h"
+#include "file.h"
+#include "http_parser.h"
 #include "log.h"
+#include "mime.h"
+
+/* Static file serving options (v0.3), owned by the caller. */
+typedef struct {
+    bool sendfile;             /* sendfile() when true, pread()+send() otherwise */
+    size_t sendfile_chunk;     /* max bytes per sendfile call (fairness) */
+    bool etag;                 /* send and evaluate ETag */
+    bool server_tokens;        /* "Server: Dantrix/x.y.z" when true */
+    bool hidden_files;         /* serve dot segments when true */
+    const char *cache_control; /* Cache-Control value, "" to omit */
+} dx_static_opts_t;
 
 typedef struct dx_worker {
     int epfd;                               /* epoll instance, -1 when not running */
@@ -25,6 +38,9 @@ typedef struct dx_worker {
     dx_log_t *access_log;                   /* borrowed access logger; NULL = off */
     dx_log_format_t log_format;             /* common or combined */
     dx_http_limits_t limits;                /* HTTP header limits */
+    dx_fs_t *fs;                            /* document root, borrowed */
+    dx_mime_t *mime;                        /* MIME mapping, borrowed */
+    dx_static_opts_t static_opts;           /* static serving options */
     size_t max_conns;                       /* mirrors the pool cap for quick checks */
     const volatile sig_atomic_t *stop_flag; /* borrowed; NULL means never stop */
     uint64_t accepted_total;
@@ -32,10 +48,15 @@ typedef struct dx_worker {
     uint64_t closed_total;
 } dx_worker_t;
 
-/* Initialize a worker around an already listening descriptor. 0 or -1. */
+/*
+ * Initialize a worker around an already listening descriptor. fs, mime and
+ * the static options are borrowed for the lifetime of the worker; a NULL fs
+ * disables file serving (every path answers 404). Returns 0 or -1.
+ */
 int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *log,
                    const volatile sig_atomic_t *stop_flag, const dx_http_limits_t *limits,
-                   dx_log_t *access_log, dx_log_format_t log_format);
+                   dx_log_t *access_log, dx_log_format_t log_format, dx_fs_t *fs, dx_mime_t *mime,
+                   const dx_static_opts_t *static_opts);
 
 /* Release every resource the worker owns. Safe to call after a failed init. */
 void dx_worker_destroy(dx_worker_t *w);

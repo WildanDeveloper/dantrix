@@ -9,9 +9,9 @@
 
 /* Version. Keep in sync with CHANGELOG.md and the README status table. */
 #define DX_VERSION_MAJOR 0
-#define DX_VERSION_MINOR 2
+#define DX_VERSION_MINOR 3
 #define DX_VERSION_PATCH 0
-#define DX_VERSION_STRING "0.2.0"
+#define DX_VERSION_STRING "0.3.0"
 #define DX_PROGRAM_NAME "Dantrix"
 
 /*
@@ -35,6 +35,9 @@
 #define DX_DEFAULT_PORT 8080
 #define DX_DEFAULT_BACKLOG 4096
 #define DX_DEFAULT_MAX_CONNS 16384
+#define DX_DEFAULT_ROOT "./public"
+#define DX_DEFAULT_INDEX "index.html"
+#define DX_DEFAULT_MIME "application/octet-stream"
 
 /*
  * Event tag layout used as epoll_event.data.u64:

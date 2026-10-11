@@ -12,6 +12,55 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.3.0] - 2026-10-11
+
+### Added
+
+- `src/path.c`: request target to filesystem path resolution following the
+  README order: query stripping, absolute-form authority removal, strict
+  validation, **percent-decoding exactly once**, normalization (`//` collapse,
+  `.` drop, `..` resolution with a `400` on escape), and hidden segment refusal
+  (`404`, `/.well-known/` exempt). Decoded bytes are re-validated, so `%0a`
+  and `%00` cannot smuggle control characters into paths, logs or listings.
+- `src/file.c`: document root access through `openat2(RESOLVE_BENEATH)` with
+  `RESOLVE_NO_SYMLINKS` when symlinks are refused, and a per-segment
+  `O_NOFOLLOW` fallback for kernels without `openat2`. Directory handling:
+  `301` to add the trailing slash, index file serving, optional HTML listing
+  with escaped names and percent-encoded hrefs, `403` without an index,
+  `404` for non-regular files. Symlinks that would leave the root are refused
+  even with `follow_symlinks = on`.
+- `src/http_range.c`: single-range parsing (`bytes=0-499`, `bytes=500-`,
+  `bytes=-500`) with `206`, `416` (`Content-Range: bytes */size`), multi-range
+  deliberately ignored (full `200`, closing the overlapping-range attack
+  class), nginx-style `ETag` formatting (`"<mtime-hex>-<size-hex>"`), weak
+  `If-None-Match` comparison (`*` and lists), strict `If-Modified-Since`
+  IMF-fixdate parsing and strong-only `If-Range`.
+- `src/mime.c`: built-in table of ~70 extensions with the charset rule (every
+  text type, `application/json` and JavaScript get `; charset=utf-8`), plus a
+  custom `mime.types` file parser that overrides built-ins.
+- File responses in the connection flow: `Last-Modified`, `ETag`,
+  `Accept-Ranges: bytes`, `Cache-Control`, `206`/`304`/`416` handling, and
+  zero-copy delivery with `sendfile()` and a `pread()`+`send()` fallback.
+- New CLI flags: `--root`, `--index`, `--directory-listing`, `--sendfile`,
+  `--sendfile-chunk`, `--etag`, `--follow-symlinks`, `--hidden-files`,
+  `--mime-types`, `--default-type`, `--cache-control`, `--server-tokens`.
+- `fuzz/fuzz_path.c`: fuzz harness for path resolution, MIME mapping and the
+  header-driven conditional/range logic, asserting that a resolved path is
+  never absolute, never contains `..` and never carries control bytes.
+- Tests: `test_path` (76 checks), `test_mime` (63), `test_http_range` (112),
+  `test_file` (49, against a real temporary document root), plus a rewritten
+  smoke test covering the whole file surface (48 integration checks).
+
+### Fixed
+
+- Root path handling: `GET /` no longer redirects to `/./`, and the MIME type
+  is derived from the file actually served (the index) instead of the
+  directory path.
+- The response builder no longer rejects a NULL body with a non-zero length,
+  which silently produced empty responses for every file request.
+- `join_path()` returning a length instead of a success code meant directory
+  index files were never opened.
+
 ## [0.2.0] - 2026-10-11
 
 ### Added
@@ -91,6 +140,7 @@ releases.
 - Tests: unit tests for buffer, pool, log and util modules (179 checks), plus a
   sanitizer-friendly integration smoke test (`tests/smoke_test.py`).
 
-[Unreleased]: https://github.com/WildanDeveloper/dantrix/compare/0.2.0...HEAD
+[Unreleased]: https://github.com/WildanDeveloper/dantrix/compare/0.3.0...HEAD
+[0.3.0]: https://github.com/WildanDeveloper/dantrix/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/WildanDeveloper/dantrix/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/WildanDeveloper/dantrix/releases/tag/0.1.0

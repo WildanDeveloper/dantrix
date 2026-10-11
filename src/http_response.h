@@ -34,6 +34,15 @@ size_t dx_http_response_build(char *out, size_t cap, int status, const char *ext
                               bool omit_body);
 
 /*
+ * Build headers for a body that is streamed afterwards (sendfile). The body
+ * is described by content_length only and nothing is appended after the
+ * header terminator, which is what a file response needs. Returns the number
+ * of bytes written, or 0 when the buffer is too small.
+ */
+size_t dx_http_response_headers(char *out, size_t cap, int status, const char *extra_headers,
+                                const char *content_type, size_t content_length, bool omit_body);
+
+/*
  * Build the fixed minimal error page for status. The body never reflects any
  * client input, which is what makes it safe against reflected XSS.
  * extra_headers may be NULL or complete "Name: value\r\n" lines (405 uses it

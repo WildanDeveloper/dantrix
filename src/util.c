@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -136,6 +137,31 @@ int dx_write_all(int fd, const void *buf, size_t len)
         }
         if (n == 0) {
             /* No progress and no error: treat as a closed descriptor. */
+            errno = EIO;
+            return -1;
+        }
+        return -1;
+    }
+    return 0;
+}
+
+int dx_send_all(int fd, const void *buf, size_t len)
+{
+    const char *p = (const char *)buf;
+    size_t remaining = len;
+
+    while (remaining > 0) {
+        ssize_t n = send(fd, p, remaining, MSG_NOSIGNAL);
+
+        if (n > 0) {
+            p += (size_t)n;
+            remaining -= (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n == 0) {
             errno = EIO;
             return -1;
         }

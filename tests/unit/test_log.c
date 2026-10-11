@@ -123,8 +123,7 @@ static void test_access_log(void)
     CHECK(strncmp(buf, "203.0.113.7 - - [", 17u) == 0);
     CHECK(strstr(buf, "] \"GET /x HTTP/1.1\" 200 39") != NULL);
     /* Common format has no referer/agent. */
-    CHECK(strchr(buf, '"') == buf + strlen(buf) - 1u - 0u ||
-          strstr(buf, "\" \"") == NULL);
+    CHECK(strchr(buf, '"') == buf + strlen(buf) - 1u - 0u || strstr(buf, "\" \"") == NULL);
     /* One line. */
     CHECK(buf[strlen(buf) - 1u] == '\n');
 
@@ -153,8 +152,8 @@ static void test_access_log(void)
     memset(buf, 0, sizeof(buf));
     capture_access(buf, sizeof(buf), &log, DX_LOG_FMT_COMBINED, "203.0.113.7", "GET",
                    "/a\" b\\c\r\nX-Fake: yes", "HTTP/1.1", 200, 0, NULL, NULL);
-    CHECK(strstr(buf, "\\x22") != NULL);   /* the quote is escaped */
-    CHECK(strstr(buf, "\\x5c") != NULL);   /* the backslash is escaped */
+    CHECK(strstr(buf, "\\x22") != NULL);      /* the quote is escaped */
+    CHECK(strstr(buf, "\\x5c") != NULL);      /* the backslash is escaped */
     CHECK(strstr(buf, "\\x0d\\x0a") != NULL); /* CRLF is escaped */
     /* The raw newline never appears except as the final line terminator. */
     CHECK(strchr(buf, '\n') == buf + strlen(buf) - 1u);
