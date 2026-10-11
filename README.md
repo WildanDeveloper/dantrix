@@ -111,9 +111,9 @@ Dantrix is developed with a **README-driven development** approach: this documen
 
 | Component | Status | Release target |
 |---|---|---|
-| Learning material: blocking echo, thread-per-connection, `epoll` echo (`examples/`) | 📝 | v0.1.0 |
-| Single-thread `epoll` event loop, non-blocking accept, connection pool | 📝 | v0.1.0 |
-| Incremental HTTP/1.1 parser and error responses | 📝 | v0.2.0 |
+| Learning material: blocking echo, thread-per-connection, `epoll` echo (`examples/`) | ✅ | v0.1.0 |
+| Single-thread `epoll` event loop, non-blocking accept, connection pool | ✅ | v0.1.0 |
+| Incremental HTTP/1.1 parser and error responses | ✅ | v0.2.0 |
 | Static files: `sendfile`, MIME, `HEAD`, `ETag`, `Range` | 📝 | v0.3.0 |
 | Keep-alive, pipelining, timer wheel, timeouts | 📝 | v0.4.0 |
 | Multi-worker with `SO_REUSEPORT` | 📝 | v0.5.0 |
@@ -2088,21 +2088,21 @@ Each release has a single capability as its theme. A checked box marks completed
 
 ### v0.1.0: Foundations
 
-- [ ] Repository skeleton: `Makefile`, directory structure, `.clang-format`, `.editorconfig`, `.gitignore`
-- [ ] `examples/01` through `04` (blocking echo, thread-per-connection, `epoll` echo, hello HTTP)
-- [ ] Socket helpers: `listen_tcp`, `set_nonblock`, TCP options
-- [ ] Single-thread `epoll` event loop (level-triggered) with an accept loop
-- [ ] Connection pool (slab and free-list)
-- [ ] Basic logger
-- [ ] Build hardening flags and initial CI (build with `-Werror`)
+- [x] Repository skeleton: `Makefile`, directory structure, `.clang-format`, `.editorconfig`, `.gitignore`
+- [x] `examples/01` through `04` (blocking echo, thread-per-connection, `epoll` echo, hello HTTP)
+- [x] Socket helpers: `listen_tcp`, `set_nonblock`, TCP options
+- [x] Single-thread `epoll` event loop (level-triggered) with an accept loop
+- [x] Connection pool (slab and free-list)
+- [x] Basic logger
+- [x] Build hardening flags and initial CI (build with `-Werror`)
 
 ### v0.2.0: Basic HTTP
 
-- [ ] Incremental request parser (request line and headers) with unit tests
-- [ ] Strict validation (see [Strict parser rules](#strict-parser-rules))
-- [ ] Static `200` responses and error pages (400, 405, 414, 431, 501, 505)
-- [ ] Access log (common and combined)
-- [ ] Fuzzing harness for the parser
+- [x] Incremental request parser (request line and headers) with unit tests
+- [x] Strict validation (see [Strict parser rules](#strict-parser-rules))
+- [x] Static `200` responses and error pages (400, 405, 414, 431, 501, 505)
+- [x] Access log (common and combined)
+- [x] Fuzzing harness for the parser
 
 ### v0.3.0: Static files
 

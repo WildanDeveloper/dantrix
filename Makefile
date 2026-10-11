@@ -231,8 +231,17 @@ bench:
 stress:
 	@echo "stress harness lands in v0.7; nothing to run yet"
 
-fuzz:
-	@echo "fuzz targets land in v0.2 (parser) and v0.3 (path); nothing to run yet"
+# Parser fuzzer. Without clang/libFuzzer the standalone deterministic driver
+# runs the same invariant checks (300k mutated inputs) with plain gcc.
+FUZZ_SRCS := src/http_parser.c src/http_response.c src/util.c
+
+$(BUILD)/fuzz_http_parser: fuzz/fuzz_http_parser.c $(FUZZ_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) $(STD) $(DEFS) $(WARN) -O1 -g -DFUZZ_STANDALONE \
+	    -I$(SRC) $< $(FUZZ_SRCS) -o $@ $(LDFLAGS)
+
+fuzz: $(BUILD)/fuzz_http_parser
+	./$(BUILD)/fuzz_http_parser
 
 docker:
 	docker build -f deploy/Dockerfile -t dantrix:latest .

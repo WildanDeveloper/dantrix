@@ -12,6 +12,56 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.2.0] - 2026-10-11
+
+### Added
+
+- `src/http_parser.c`: incremental, zero-copy HTTP/1.x request line and header
+  parser. A request may arrive in any number of pieces; parsed fields are
+  offsets into the caller's buffer. Strict rules per the README: `CRLF` only
+  (bare `LF` or bare `CR` rejected), no whitespace before the colon, no
+  obs-fold, token-validated methods and header names, control bytes and DEL
+  rejected in targets and values.
+- Header semantics: `Host` required (and unique, non-empty) in HTTP/1.1,
+  `Content-Length` must be decimal with conflicting duplicates rejected,
+  `Transfer-Encoding` answers `501` and `501` becomes `400` when combined with
+  `Content-Length`, unknown HTTP versions answer `505`.
+- Configurable limits with `414`/`431` enforcement: `--max-request-line`,
+  `--max-header-size` (accepts `k`/`m`/`g` suffixes) and `--max-headers`.
+- `src/http_response.c`: bounded-append response builder (no `sprintf` into
+  header buffers), fixed error pages that never reflect client input, `Date`
+  IMF-fixdate header, `Connection: close` on every response, `HEAD` semantics
+  (identical headers, no body) and `OPTIONS` with `Allow`.
+- Method dispatch: `GET`, `HEAD`, `OPTIONS` served with a static `200`;
+  `POST`/`PUT`/`DELETE`/`PATCH`/`TRACE`/`CONNECT` answer `405` with `Allow`;
+  unknown methods answer `501`. Method names are case sensitive.
+- Access log (`--access-log`, `--log-format common|combined`): one CLF line per
+  completed request with the peer address captured at `accept4` time. All
+  client-controlled fields are escaped (`\xHH`) so quotes, backslashes and
+  control characters cannot forge log lines.
+- New CLI flags: `--access-log DEST`, `--log-format FMT`,
+  `--max-request-line N`, `--max-header-size N`, `--max-headers N`.
+- Read buffers grow on demand from the pooled 4 KiB slot up to
+  `max_header_size + 4`, bounded, so oversized requests are answered with
+  `431` instead of truncating the parser's view.
+- After a protocol error the server discards in-flight input (bounded to
+  64 KiB) before closing, so the error response is read by the client instead
+  of being destroyed by a TCP reset.
+- `src/util.c`: `dx_parse_ull` (strict decimal over an exact byte range),
+  `dx_parse_size` (binary `k`/`m`/`g` suffixes), `dx_http_date` (IMF-fixdate).
+- Tests: `tests/unit/test_http_parser.c` (166 checks: table-driven malformed
+  cases, byte-by-byte and CRLF-boundary split feeds, limit boundaries),
+  `tests/unit/test_http_response.c` (51 checks), access log and util coverage
+  (115 additional checks), and `fuzz/fuzz_http_parser.c`, a parser fuzz harness
+  with a deterministic standalone driver (300k mutated inputs per run,
+  libFuzzer-compatible). The smoke test now exercises the HTTP surface end to
+  end (45 integration checks).
+
+### Fixed
+
+- Access log: structural quotes were escaped like payload data, and the
+  timestamp prefix contained an escaped NUL byte from a wrong literal length.
+
 ## [0.1.0] - 2026-10-11
 
 ### Added
@@ -41,5 +91,6 @@ releases.
 - Tests: unit tests for buffer, pool, log and util modules (179 checks), plus a
   sanitizer-friendly integration smoke test (`tests/smoke_test.py`).
 
-[Unreleased]: https://github.com/WildanDeveloper/dantrix/compare/0.1.0...HEAD
+[Unreleased]: https://github.com/WildanDeveloper/dantrix/compare/0.2.0...HEAD
+[0.2.0]: https://github.com/WildanDeveloper/dantrix/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/WildanDeveloper/dantrix/releases/tag/0.1.0

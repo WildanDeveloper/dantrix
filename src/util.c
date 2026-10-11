@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -141,4 +142,107 @@ int dx_write_all(int fd, const void *buf, size_t len)
         return -1;
     }
     return 0;
+}
+
+bool dx_parse_ull(const char *s, size_t len, unsigned long long *out)
+{
+    unsigned long long value = 0;
+
+    if (s == NULL || out == NULL || len == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        if (value > (ULLONG_MAX - (unsigned long long)(c - '0')) / 10ULL) {
+            return false; /* checked multiply-add: never wrap */
+        }
+        value = value * 10ULL + (unsigned long long)(c - '0');
+    }
+    *out = value;
+    return true;
+}
+
+bool dx_parse_size(const char *s, size_t *out)
+{
+    unsigned long long value = 0;
+    size_t i = 0;
+
+    if (s == NULL || out == NULL || s[0] == '\0') {
+        return false;
+    }
+    while (s[i] >= '0' && s[i] <= '9') {
+        unsigned char c = (unsigned char)s[i];
+
+        if (value > (ULLONG_MAX - (unsigned long long)(c - '0')) / 10ULL) {
+            return false;
+        }
+        value = value * 10ULL + (unsigned long long)(c - '0');
+        i++;
+    }
+    if (i == 0) {
+        return false; /* no digits at all */
+    }
+    if (s[i] != '\0') {
+        /* Exactly one optional binary suffix, nothing after it. */
+        if (s[i + 1] != '\0') {
+            return false;
+        }
+        {
+            unsigned long long mult;
+
+            switch (s[i]) {
+            case 'k':
+            case 'K':
+                mult = 1024ULL;
+                break;
+            case 'm':
+            case 'M':
+                mult = 1024ULL * 1024ULL;
+                break;
+            case 'g':
+            case 'G':
+                mult = 1024ULL * 1024ULL * 1024ULL;
+                break;
+            default:
+                return false;
+            }
+            if (value > ULLONG_MAX / mult) {
+                return false;
+            }
+            value *= mult;
+        }
+    }
+    if (value > SIZE_MAX) {
+        return false;
+    }
+    *out = (size_t)value;
+    return true;
+}
+
+size_t dx_http_date(char *out, size_t cap, long long when_ms)
+{
+    struct timespec ts;
+    struct tm tm_buf;
+    time_t when;
+
+    if (out == NULL || cap < 30u) {
+        /* The shortest IMF-fixdate is 29 characters plus the terminator. */
+        return 0;
+    }
+    if (when_ms < 0) {
+        if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+            return 0;
+        }
+        when = ts.tv_sec;
+    } else {
+        when = (time_t)(when_ms / 1000LL);
+    }
+    if (gmtime_r(&when, &tm_buf) == NULL) {
+        return 0;
+    }
+    return strftime(out, cap, "%a, %d %b %Y %H:%M:%S GMT", &tm_buf);
 }

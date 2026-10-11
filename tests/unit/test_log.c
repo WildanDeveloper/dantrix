@@ -84,10 +84,92 @@ static void test_filtering_and_format(void)
     dx_log_write(&log, DX_LOG_INFO, "x");
 }
 
+/* Capture one dx_log_access call into buf via a temp file. */
+static size_t capture_access(char *buf, size_t cap, dx_log_t *log, dx_log_format_t fmt,
+                             const char *peer, const char *method, const char *target,
+                             const char *protocol, int status, size_t bytes, const char *referer,
+                             const char *user_agent)
+{
+    FILE *tmp = tmpfile();
+    size_t got = 0;
+
+    if (tmp == NULL) {
+        return 0;
+    }
+    log->out = tmp;
+    dx_log_access(log, fmt, peer, method, method != NULL ? strlen(method) : 0u, target,
+                  target != NULL ? strlen(target) : 0u, protocol, status, bytes, referer,
+                  user_agent);
+    rewind(tmp);
+    got = fread(buf, 1u, cap - 1u, tmp);
+    buf[got] = '\0';
+    fclose(tmp);
+    return got;
+}
+
+static void test_access_log(void)
+{
+    dx_log_t log;
+    char buf[1024];
+
+    log.level = DX_LOG_INFO;
+
+    dx_test_begin("log/access_common");
+
+    /* Common format: peer, identd, user, [time], request, status, bytes. */
+    memset(buf, 0, sizeof(buf));
+    capture_access(buf, sizeof(buf), &log, DX_LOG_FMT_COMMON, "203.0.113.7", "GET", "/x",
+                   "HTTP/1.1", 200, 39, NULL, NULL);
+    CHECK(strncmp(buf, "203.0.113.7 - - [", 17u) == 0);
+    CHECK(strstr(buf, "] \"GET /x HTTP/1.1\" 200 39") != NULL);
+    /* Common format has no referer/agent. */
+    CHECK(strchr(buf, '"') == buf + strlen(buf) - 1u - 0u ||
+          strstr(buf, "\" \"") == NULL);
+    /* One line. */
+    CHECK(buf[strlen(buf) - 1u] == '\n');
+
+    dx_test_begin("log/access_combined");
+
+    memset(buf, 0, sizeof(buf));
+    capture_access(buf, sizeof(buf), &log, DX_LOG_FMT_COMBINED, "203.0.113.7", "GET", "/",
+                   "HTTP/1.1", 200, 39, "http://ref.example/", "agent/1.0");
+    CHECK(strstr(buf, "\"GET / HTTP/1.1\" 200 39 \"http://ref.example/\" \"agent/1.0\"") != NULL);
+
+    /* Missing values degrade to dashes. */
+    memset(buf, 0, sizeof(buf));
+    capture_access(buf, sizeof(buf), &log, DX_LOG_FMT_COMBINED, "198.51.100.2", "GET", "/",
+                   "HTTP/1.0", 200, 0, NULL, NULL);
+    CHECK(strstr(buf, "\"GET / HTTP/1.0\" 200 0 \"-\" \"-\"") != NULL);
+
+    /* Unknown method or target (parse failure) becomes "-". */
+    memset(buf, 0, sizeof(buf));
+    capture_access(buf, sizeof(buf), &log, DX_LOG_FMT_COMMON, "198.51.100.2", NULL, NULL,
+                   "HTTP/1.1", 400, 0, NULL, NULL);
+    CHECK(strstr(buf, "\"- - HTTP/1.1\" 400 0") != NULL);
+
+    dx_test_begin("log/access_escaping");
+
+    /* Quotes, backslashes and control characters cannot forge log lines. */
+    memset(buf, 0, sizeof(buf));
+    capture_access(buf, sizeof(buf), &log, DX_LOG_FMT_COMBINED, "203.0.113.7", "GET",
+                   "/a\" b\\c\r\nX-Fake: yes", "HTTP/1.1", 200, 0, NULL, NULL);
+    CHECK(strstr(buf, "\\x22") != NULL);   /* the quote is escaped */
+    CHECK(strstr(buf, "\\x5c") != NULL);   /* the backslash is escaped */
+    CHECK(strstr(buf, "\\x0d\\x0a") != NULL); /* CRLF is escaped */
+    /* The raw newline never appears except as the final line terminator. */
+    CHECK(strchr(buf, '\n') == buf + strlen(buf) - 1u);
+    CHECK(strstr(buf, "X-Fake") == NULL || strstr(buf, "\\x0aX-Fake") != NULL);
+
+    /* A NULL log is a no-op. */
+    dx_log_access(NULL, DX_LOG_FMT_COMMON, "x", "GET", 3u, "/", 1u, "HTTP/1.1", 200, 0u, NULL,
+                  NULL);
+}
+
 int main(void)
 {
     test_levels();
     test_filtering_and_format();
+    test_access_log();
     printf("test_log: ");
     return dx_test_summary();
 }

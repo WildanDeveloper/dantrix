@@ -43,4 +43,20 @@ bool dx_log_level_parse(const char *name, dx_log_level_t *out);
  */
 void dx_log_write(dx_log_t *log, dx_log_level_t level, const char *fmt, ...) DX_PRINTF(3, 4);
 
+/* --------------------------- Access log -------------------------------- */
+
+typedef enum { DX_LOG_FMT_COMMON = 0, DX_LOG_FMT_COMBINED = 1 } dx_log_format_t;
+
+/*
+ * Emit one access log line for a completed request.
+ *
+ * Every client controlled string (peer, method, target, referer, user agent)
+ * is escaped: control characters, quotes and backslashes become \xHH so a
+ * client cannot forge log lines. referer and user_agent may be NULL (combined
+ * format prints "-" for missing values; they are ignored by common).
+ */
+void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const char *method,
+                   size_t method_len, const char *target, size_t target_len, const char *protocol,
+                   int status, size_t body_bytes, const char *referer, const char *user_agent);
+
 #endif /* DX_LOG_H */

@@ -39,4 +39,27 @@ long long dx_now_ms(void);
  */
 int dx_write_all(int fd, const void *buf, size_t len);
 
+/*
+ * Strict unsigned decimal parser over an exact byte range (no NUL needed).
+ * Rejects empty input, non-digits, and values that overflow unsigned long long.
+ * Returns true on success.
+ */
+bool dx_parse_ull(const char *s, size_t len, unsigned long long *out);
+
+/*
+ * Parse a size with an optional binary suffix: "8k", "1m", "2g" (base 1024)
+ * or a plain byte count. Rejects empty input, garbage, and overflow.
+ * Returns true on success.
+ */
+bool dx_parse_size(const char *s, size_t *out);
+
+/*
+ * Format an IMF-fixdate (RFC 9110 5.6.7), e.g.
+ * "Sun, 11 Oct 2026 03:15:30 GMT". when_ms may be -1 for the current time.
+ * Writes at most cap bytes; always NUL terminates when cap > 0.
+ * Returns the number of bytes written excluding the terminator, or 0 on
+ * failure.
+ */
+size_t dx_http_date(char *out, size_t cap, long long when_ms);
+
 #endif /* DX_UTIL_H */

@@ -21,7 +21,10 @@ typedef struct dx_worker {
     int listen_fd;                          /* listening socket, -1 when not running */
     dx_pool_t *pool;                        /* connection slots */
     dx_bufpool_t *bufs;                     /* per-connection read buffers */
-    dx_log_t *log;                          /* borrowed logger */
+    dx_log_t *log;                          /* borrowed error logger */
+    dx_log_t *access_log;                   /* borrowed access logger; NULL = off */
+    dx_log_format_t log_format;             /* common or combined */
+    dx_http_limits_t limits;                /* HTTP header limits */
     size_t max_conns;                       /* mirrors the pool cap for quick checks */
     const volatile sig_atomic_t *stop_flag; /* borrowed; NULL means never stop */
     uint64_t accepted_total;
@@ -31,7 +34,8 @@ typedef struct dx_worker {
 
 /* Initialize a worker around an already listening descriptor. 0 or -1. */
 int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *log,
-                   const volatile sig_atomic_t *stop_flag);
+                   const volatile sig_atomic_t *stop_flag, const dx_http_limits_t *limits,
+                   dx_log_t *access_log, dx_log_format_t log_format);
 
 /* Release every resource the worker owns. Safe to call after a failed init. */
 void dx_worker_destroy(dx_worker_t *w);

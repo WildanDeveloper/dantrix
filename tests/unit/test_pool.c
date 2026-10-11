@@ -106,7 +106,7 @@ static void test_conn_reset(void)
         return;
     }
 
-    dx_conn_init(c, 42);
+    dx_conn_init(c, 42, NULL);
     CHECK_EQ(c->fd, 42);
     CHECK(dx_conn_has_pending(c) == false); /* nothing buffered yet */
 

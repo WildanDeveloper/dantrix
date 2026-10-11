@@ -84,3 +84,117 @@ void dx_log_write(dx_log_t *log, dx_log_level_t level, const char *fmt, ...)
     (void)fputc('\n', log->out);
     (void)fflush(log->out);
 }
+
+/* --------------------------- Access log -------------------------------- */
+
+/*
+ * Append s to out at *pos, escaping control characters, quotes and backslashes
+ * as \xHH. Returns false when the output would overflow cap (the value is then
+ * truncated earlier by the caller's bound anyway; the flag stops further
+ * writes).
+ */
+static bool append_escaped(char *out, size_t cap, size_t *pos, const char *s, size_t len)
+{
+    static const char hex[] = "0123456789abcdef";
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+
+        if (c < 0x20u || c >= 0x7fu || c == '"' || c == '\\') {
+            if (*pos + 4u >= cap) {
+                return false;
+            }
+            out[(*pos)++] = '\\';
+            out[(*pos)++] = 'x';
+            out[(*pos)++] = hex[(c >> 4) & 0xfu];
+            out[(*pos)++] = hex[c & 0xfu];
+        } else {
+            if (*pos + 1u >= cap) {
+                return false;
+            }
+            out[(*pos)++] = (char)c;
+        }
+    }
+    return true;
+}
+
+/* Append fixed structural text (separators, delimiters) without escaping. */
+static void append_raw(char *out, size_t cap, size_t *pos, const char *s)
+{
+    while (*pos + 1u < cap && *s != '\0') {
+        out[(*pos)++] = *s++;
+    }
+}
+
+void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const char *method,
+                   size_t method_len, const char *target, size_t target_len, const char *protocol,
+                   int status, size_t body_bytes, const char *referer, const char *user_agent)
+{
+    struct timespec ts;
+    struct tm tm_buf;
+    char stamp[64];
+    char line[2048];
+    size_t pos = 0;
+
+    if (log == NULL || log->out == NULL) {
+        return;
+    }
+
+    /* CLF timestamp: [11/Oct/2026:10:15:30 +0000] */
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0 || localtime_r(&ts.tv_sec, &tm_buf) == NULL) {
+        stamp[0] = '\0';
+    } else if (strftime(stamp, sizeof(stamp), "%d/%b/%Y:%H:%M:%S %z", &tm_buf) == 0) {
+        stamp[0] = '\0';
+    }
+
+#define ACC_APPEND(s)                                                                              \
+    do {                                                                                           \
+        const char *str_ = (s);                                                                    \
+        append_escaped(line, sizeof(line), &pos, str_, strlen(str_));                              \
+    } while (0)
+
+    ACC_APPEND(peer != NULL ? peer : "-");
+    append_raw(line, sizeof(line), &pos, " - - [");
+    ACC_APPEND(stamp[0] != '\0' ? stamp : "-");
+    append_raw(line, sizeof(line), &pos, "] \"");
+    if (method != NULL && method_len > 0) {
+        append_escaped(line, sizeof(line), &pos, method, method_len);
+    } else {
+        append_escaped(line, sizeof(line), &pos, "-", 1u);
+    }
+    append_raw(line, sizeof(line), &pos, " ");
+    if (target != NULL && target_len > 0) {
+        append_escaped(line, sizeof(line), &pos, target, target_len);
+    } else {
+        append_escaped(line, sizeof(line), &pos, "-", 1u);
+    }
+    append_raw(line, sizeof(line), &pos, " ");
+    ACC_APPEND(protocol != NULL ? protocol : "HTTP/1.1");
+    append_raw(line, sizeof(line), &pos, "\" ");
+
+    /* Status and body bytes: numbers, appended without stdio. */
+    {
+        char num[16];
+        int n = snprintf(num, sizeof(num), "%d %zu", status, body_bytes);
+
+        if (n > 0) {
+            append_raw(line, sizeof(line), &pos, num);
+        }
+    }
+
+    if (fmt == DX_LOG_FMT_COMBINED) {
+        append_raw(line, sizeof(line), &pos, " \"");
+        ACC_APPEND(referer != NULL && referer[0] != '\0' ? referer : "-");
+        append_raw(line, sizeof(line), &pos, "\" \"");
+        ACC_APPEND(user_agent != NULL && user_agent[0] != '\0' ? user_agent : "-");
+        append_raw(line, sizeof(line), &pos, "\"");
+    }
+
+    if (pos + 2u < sizeof(line)) {
+        line[pos++] = '\n';
+        line[pos] = '\0';
+        (void)fwrite(line, 1, pos, log->out);
+        (void)fflush(log->out);
+    }
+#undef ACC_APPEND
+}

@@ -1,20 +1,24 @@
 /*
  * server.h - Process level wiring: signal handling, listener creation and the
- * single worker lifecycle for v0.1.
+ * single worker lifecycle.
  */
 #ifndef DX_SERVER_H
 #define DX_SERVER_H
 
 #include <stddef.h>
 
+#include "http_parser.h"
 #include "log.h"
 
 typedef struct {
-    const char *bind_addr; /* IP literal; NULL means the built-in default */
-    int port;              /* 1..65535 */
-    int backlog;           /* listen() queue; clamped to >= 1 */
-    size_t max_conns;      /* hard connection cap */
-    dx_log_t *log;         /* borrowed */
+    const char *bind_addr;      /* IP literal; NULL means the built-in default */
+    int port;                   /* 1..65535 */
+    int backlog;                /* listen() queue; clamped to >= 1 */
+    size_t max_conns;           /* hard connection cap */
+    dx_http_limits_t limits;    /* HTTP request line / header limits */
+    dx_log_t *log;              /* borrowed error logger */
+    dx_log_t *access_log;       /* borrowed access logger; NULL disables logging */
+    dx_log_format_t log_format; /* common or combined */
 } dx_server_config_t;
 
 /*

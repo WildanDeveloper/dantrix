@@ -1,6 +1,8 @@
 #include "worker.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
+#include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -18,7 +20,8 @@ dx_log_t *dx_worker_log(dx_worker_t *w)
 }
 
 int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *log,
-                   const volatile sig_atomic_t *stop_flag)
+                   const volatile sig_atomic_t *stop_flag, const dx_http_limits_t *limits,
+                   dx_log_t *access_log, dx_log_format_t log_format)
 {
     struct epoll_event ev;
 
@@ -31,6 +34,13 @@ int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *lo
     w->epfd = -1;
     w->listen_fd = listen_fd;
     w->log = log;
+    w->access_log = access_log;
+    w->log_format = log_format;
+    if (limits != NULL) {
+        w->limits = *limits;
+    } else {
+        dx_http_limits_default(&w->limits);
+    }
     w->max_conns = max_conns;
     w->stop_flag = stop_flag;
 
@@ -78,8 +88,33 @@ void dx_worker_destroy(dx_worker_t *w)
     w->bufs = NULL;
 }
 
+/* Format the peer address for the access log; "-" when unknown. */
+static void format_peer(const struct sockaddr_storage *ss, char *out, size_t cap)
+{
+    const void *src;
+    int family;
+
+    if (ss == NULL || out == NULL || cap == 0) {
+        return;
+    }
+    family = ss->ss_family;
+    if (family == AF_INET) {
+        src = &((const struct sockaddr_in *)(const void *)ss)->sin_addr;
+    } else if (family == AF_INET6) {
+        src = &((const struct sockaddr_in6 *)(const void *)ss)->sin6_addr;
+    } else {
+        out[0] = '-';
+        out[1] = '\0';
+        return;
+    }
+    if (inet_ntop(family, src, out, (socklen_t)cap) == NULL) {
+        out[0] = '-';
+        out[1] = '\0';
+    }
+}
+
 /* Register a new connection. Returns 0, or -1 with *fd consumed on failure. */
-static int conn_open(dx_worker_t *w, int fd)
+static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer)
 {
     unsigned char *mem;
     dx_conn_t *conn;
@@ -102,9 +137,10 @@ static int conn_open(dx_worker_t *w, int fd)
         return -1;
     }
 
-    dx_conn_init(conn, fd);
+    dx_conn_init(conn, fd, &w->limits);
     conn->buf_mem = mem;
     dx_buffer_init(&conn->buf, mem, DX_CONN_BUF_SIZE);
+    format_peer(peer, conn->peer, sizeof(conn->peer));
 
     memset(&ev, 0, sizeof(ev));
     ev.events = EPOLLIN | EPOLLRDHUP;
@@ -127,6 +163,19 @@ static int conn_open(dx_worker_t *w, int fd)
     return 0;
 }
 
+/* Emit the access log line for the request that was served, if any. */
+static void access_emit(dx_worker_t *w, const dx_conn_t *conn)
+{
+    const dx_access_t *acc = &conn->acc;
+
+    if (w->access_log == NULL || acc->status == 0) {
+        return; /* disabled, or the request never reached a response */
+    }
+    dx_log_access(w->access_log, w->log_format, conn->peer, acc->method, strlen(acc->method),
+                  acc->target, strlen(acc->target), acc->http10 ? "HTTP/1.0" : "HTTP/1.1",
+                  acc->status, acc->body_bytes, acc->referer, acc->user_agent);
+}
+
 /* Tear a connection down and give its slot and buffer back to the pools. */
 static void conn_close(dx_worker_t *w, dx_conn_t *conn)
 {
@@ -146,13 +195,12 @@ static void conn_close(dx_worker_t *w, dx_conn_t *conn)
     if (fd >= 0) {
         (void)close(fd);
     }
-    if (conn->buf_mem != NULL) {
-        if (!dx_bufpool_release(w->bufs, conn->buf_mem)) {
-            dx_log_write(w->log, DX_LOG_ERROR, "conn %llu: read buffer was not owned by the pool",
-                         (unsigned long long)conn->id);
-        }
-        conn->buf_mem = NULL;
-    }
+
+    /* One line per completed request, emitted while the record is intact. */
+    access_emit(w, conn);
+
+    /* Returns the pooled slot or frees the grown heap allocation. */
+    dx_conn_release_buffer(conn, w->bufs);
     dx_conn_reset(conn);
     (void)dx_pool_release(w->pool, conn);
     w->closed_total++;
@@ -172,7 +220,12 @@ static int conn_update_interest(dx_worker_t *w, dx_conn_t *conn)
         return -1;
     }
     memset(&ev, 0, sizeof(ev));
-    if (conn->eof) {
+    if (conn->eof || conn->close_after_response) {
+        /*
+         * Nothing more will be read: after an EOF read() would return 0
+         * forever, and with the response staged the request is over. Only
+         * EPOLLOUT stays registered while the reply drains.
+         */
         if (!dx_conn_has_pending(conn)) {
             return -1; /* nothing left to send: the caller closes */
         }
@@ -191,10 +244,13 @@ static int conn_update_interest(dx_worker_t *w, dx_conn_t *conn)
 static void accept_loop(dx_worker_t *w)
 {
     for (;;) {
-        int fd = accept4(w->listen_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        struct sockaddr_storage peer;
+        socklen_t peer_len = sizeof(peer);
+        int fd = accept4(w->listen_fd, (struct sockaddr *)&peer, &peer_len,
+                         SOCK_NONBLOCK | SOCK_CLOEXEC);
 
         if (fd >= 0) {
-            if (conn_open(w, fd) != 0) {
+            if (conn_open(w, fd, &peer) != 0) {
                 /*
                  * conn_open consumed the descriptor on every failure path, so
                  * there is nothing left to close here.

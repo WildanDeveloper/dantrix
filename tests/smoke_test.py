@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Integration smoke test for Dantrix v0.1 (TCP echo core).
+"""Integration smoke test for Dantrix v0.2 (HTTP core).
 
-Runs the built binary, exercises the echo path with sequential and concurrent
-clients, verifies graceful shutdown on SIGTERM, and fails on any non-zero exit.
-Dependency free: uses only the standard library.
+Runs the built binary, exercises the strict parser end to end (valid methods,
+every documented error status, split delivery), the access log, concurrency,
+and graceful shutdown on SIGTERM. Dependency free: standard library only.
 
 Usage: python3 tests/smoke_test.py [path-to-binary]
 """
@@ -13,10 +13,13 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "build/dantrix-asan"
 PORT = 18091
+ACCESS_LOG = tempfile.NamedTemporaryFile(prefix="dantrix-access-", suffix=".log", delete=False)
+ACCESS_LOG.close()
 failures = []
 
 
@@ -27,30 +30,37 @@ def check(name, cond):
         failures.append(name)
 
 
-def recv_all(sock, expected, timeout=5.0):
+def recv_all(sock, timeout=5.0):
+    """Read until EOF (the server closes after every response in v0.2)."""
     sock.settimeout(timeout)
     data = b""
-    deadline = time.time() + timeout
-    while len(data) < expected and time.time() < deadline:
-        chunk = sock.recv(expected - len(data))
+    while True:
+        try:
+            chunk = sock.recv(65536)
+        except socket.timeout:
+            break
         if not chunk:
             break
         data += chunk
     return data
 
 
-def echo_roundtrip(payload, label):
-    with socket.create_connection(("127.0.0.1", PORT), timeout=5) as s:
-        s.sendall(payload)
-        got = recv_all(s, len(payload))
-        check(f"{label}: echo roundtrip ({len(payload)} bytes)", got == payload)
+def request(raw, timeout=5.0):
+    with socket.create_connection(("127.0.0.1", PORT), timeout=timeout) as s:
+        s.sendall(raw)
+        return recv_all(s, timeout)
+
+
+def status_line(resp):
+    return resp.split(b"\r\n", 1)[0].decode(errors="replace")
 
 
 def main():
     env = dict(os.environ)
     env.setdefault("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
     proc = subprocess.Popen(
-        [BIN, "-b", "127.0.0.1", "-p", str(PORT), "--log-level", "debug"],
+        [BIN, "-b", "127.0.0.1", "-p", str(PORT), "--log-level", "debug",
+         "--access-log", ACCESS_LOG.name, "--log-format", "combined"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
 
     # Wait for the listener to come up.
@@ -73,44 +83,108 @@ def main():
         return 1
     print("server started")
 
-    echo_roundtrip(b"hello\n", "small")
-    echo_roundtrip(b"x" * 100_000, "100 KiB (larger than one read buffer)")
-    echo_roundtrip(b"y" * 300_000, "300 KiB (exercises backpressure)")
-    echo_roundtrip(b"", "empty write is legal")
+    # --- valid requests ---------------------------------------------------
+    resp = request(b"GET /hello?x=1 HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
+    check("GET -> 200", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
+    check("GET body present", resp.endswith(b"the HTTP core is alive.\n"))
+    check("GET Content-Length matches body",
+          b"Content-Length: %d\r\n" % len(resp.split(b"\r\n\r\n", 1)[1]) in resp)
+    check("GET Connection: close", b"Connection: close\r\n" in resp)
+    check("GET nosniff", b"X-Content-Type-Options: nosniff\r\n" in resp)
+    check("GET has Date header", b"\r\nDate: " in resp)
 
-    # Concurrent clients must not interfere with each other.
+    resp = request(b"HEAD / HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
+    check("HEAD -> 200", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
+    check("HEAD has Content-Length 39", b"Content-Length: 39\r\n" in resp)
+    check("HEAD has no body", resp.endswith(b"\r\n\r\n"))
+
+    resp = request(b"OPTIONS * HTTP/1.1\r\nHost: smoke.test\r\n\r\n")
+    check("OPTIONS -> 200 with Allow",
+          resp.startswith(b"HTTP/1.1 200 OK\r\n") and b"Allow: GET, HEAD, OPTIONS\r\n" in resp)
+
+    resp = request(b"GET / HTTP/1.0\r\n\r\n")
+    check("HTTP/1.0 without Host -> 200", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
+
+    # --- rejections --------------------------------------------------------
+    cases = [
+        (b"POST / HTTP/1.1\r\nHost: x\r\n\r\n", 405),
+        (b"DELETE / HTTP/1.1\r\nHost: x\r\n\r\n", 405),
+        (b"BREW / HTTP/1.1\r\nHost: x\r\n\r\n", 501),
+        (b"GET / HTTP/1.1\r\n\r\n", 400),                       # no Host
+        (b"GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n", 400),  # duplicate Host
+        (b"GET / HTTP/1.1\nHost: x\r\n\r\n", 400),               # bare LF
+        (b"GET  / HTTP/1.1\r\n\r\n", 400),                       # double space
+        (b"GET / HTTP/1.1\r\nHost : x\r\n\r\n", 400),            # space before colon
+        (b"GET / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", 501),
+        (b"GET / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n"
+         b"Content-Length: 5\r\n\r\n", 400),
+        (b"GET / HTTP/2.4\r\nHost: x\r\n\r\n", 505),
+        (b"GET / HTTP/1.9\r\nHost: x\r\n\r\n", 505),
+        (b"GET / HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n\r\n", 400),
+    ]
+    all_ok = True
+    for raw, want in cases:
+        resp = request(raw)
+        got = status_line(resp)
+        if not got.startswith(f"HTTP/1.1 {want} "):
+            print(f"    expected {want}, got: {got}")
+            all_ok = False
+    check("13 strict-parser rejection cases (400/405/501/505)", all_ok)
+
+    resp = request(b"POST / HTTP/1.1\r\nHost: x\r\n\r\n")
+    check("405 carries Allow header", b"Allow: GET, HEAD, OPTIONS\r\n" in resp)
+    check("error pages do not reflect input",
+          b"Host" not in resp.split(b"\r\n\r\n", 1)[1])
+
+    # 414: request line past the limit.
+    resp = request(b"GET /" + b"a" * 9000 + b" HTTP/1.1\r\nHost: x\r\n\r\n")
+    check("oversized request line -> 414", resp.startswith(b"HTTP/1.1 414 "))
+
+    # 431: headers past the default 16 KiB budget.
+    resp = request(b"GET / HTTP/1.1\r\nHost: x\r\n" + b"X-Pad: " + b"a" * 17000 +
+                   b"\r\n\r\n")
+    check("oversized headers -> 431", resp.startswith(b"HTTP/1.1 431 "))
+
+    # A request split into single bytes must still parse.
+    with socket.create_connection(("127.0.0.1", PORT), timeout=5) as s:
+        for byte in b"GET /split HTTP/1.1\r\nHost: x\r\n\r\n":
+            s.sendall(bytes([byte]))
+            time.sleep(0.001)
+        resp = recv_all(s)
+    check("byte-by-byte delivery -> 200", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
+
+    # --- concurrency and rude clients -------------------------------------
     socks = []
     ok = True
     try:
-        for i in range(50):
+        for _ in range(50):
             s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
             socks.append(s)
-        for i, s in enumerate(socks):
-            s.sendall(f"client-{i}-payload".encode())
-        for i, s in enumerate(socks):
-            got = recv_all(s, len(f"client-{i}-payload"))
-            ok = ok and got == f"client-{i}-payload".encode()
-        check("50 concurrent connections echo independently", ok)
+        for s in socks:
+            s.sendall(b"GET / HTTP/1.1\r\nHost: c\r\n\r\n")
+        for s in socks:
+            got = recv_all(s)
+            ok = ok and got.startswith(b"HTTP/1.1 200 OK\r\n")
+        check("50 concurrent connections answered independently", ok)
     finally:
         for s in socks:
             s.close()
 
-    # A client that disconnects mid-stream must not wedge the server.
+    # A client that disconnects mid-request must not wedge the server.
     s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
-    s.sendall(b"partial")
+    s.sendall(b"GET / HTTP/1.1\r\nHost: partial")
     s.shutdown(socket.SHUT_WR)
     s.close()
-    echo_roundtrip(b"after-rude-client", "server survives a rude disconnect")
+    resp = request(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    check("server survives a rude disconnect", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
 
-    # Half-close: send data then FIN, the server should still echo.
+    # A client that sends nothing and closes must not wedge the server.
     s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
-    s.sendall(b"half-close\n")
-    s.shutdown(socket.SHUT_WR)
-    got = recv_all(s, len(b"half-close\n"))
-    check("half-close echo before FIN handling", got == b"half-close\n")
     s.close()
+    resp = request(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    check("server survives an empty connection", resp.startswith(b"HTTP/1.1 200 OK\r\n"))
 
-    # Graceful shutdown: SIGTERM, exit code 0, clean logs.
+    # --- graceful shutdown --------------------------------------------------
     proc.send_signal(signal.SIGTERM)
     out, err = proc.communicate(timeout=10)
     check("SIGTERM -> exit code 0", proc.returncode == 0)
@@ -121,6 +195,22 @@ def main():
     if proc.returncode != 0 or "ERROR:" in text:
         print("--- stderr ---")
         print(text[-4000:])
+
+    # --- access log ---------------------------------------------------------
+    with open(ACCESS_LOG.name, "r", errors="replace") as f:
+        lines = [line.rstrip("\n") for line in f if line.strip()]
+    os.unlink(ACCESS_LOG.name)
+    check("access log has one line per response", len(lines) >= 20)
+    get_lines = [line for line in lines if '"GET /hello?x=1 HTTP/1.1" 200' in line]
+    check("access log recorded the GET", len(get_lines) == 1)
+    check("access log has peer address", get_lines and get_lines[0].startswith("127.0.0.1 - - ["))
+    check("access log combined format",
+          get_lines and '"-"' in get_lines[0].rsplit('" 200', 1)[-1] or
+          len(get_lines[0].split('"')) >= 5)
+    code_lines = [line for line in lines if ' 400 ' in line or ' 505 ' in line]
+    check("rejected requests are logged too", len(code_lines) >= 3)
+    check("no unescaped quotes in log lines",
+          all(line.count('"') % 2 == 0 for line in lines))
 
     print("smoke test:", "FAILED" if failures else "PASSED")
     return 1 if failures else 0

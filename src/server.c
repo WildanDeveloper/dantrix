@@ -88,7 +88,8 @@ int dx_server_run(const dx_server_config_t *cfg)
      * the descriptor directly (double close could hand the fd to a new
      * connection).
      */
-    if (dx_worker_init(&worker, listen_fd, cfg->max_conns, cfg->log, &g_stop) != 0) {
+    if (dx_worker_init(&worker, listen_fd, cfg->max_conns, cfg->log, &g_stop, &cfg->limits,
+                       cfg->access_log, cfg->log_format) != 0) {
         dx_log_write(cfg->log, DX_LOG_ERROR, "worker init failed: %s", dx_strerror(errno));
         dx_worker_destroy(&worker);
         return -1;
