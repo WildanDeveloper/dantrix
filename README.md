@@ -723,7 +723,7 @@ All the values below are the built-in defaults.
 ## Jaringan
 bind            = 0.0.0.0        # gunakan :: untuk IPv6 dual-stack
 port            = 8080
-workers         = auto           # auto = jumlah core CPU
+workers         = 1              # 0 = satu per core; v0.6 default 1
 backlog         = 4096           # dibatasi oleh net.core.somaxconn
 reuseport       = true
 max_connections = 16384          # per worker
@@ -768,7 +768,7 @@ tcp_fastopen     = 0             # panjang antrean; 0 = nonaktif
 # socket_sndbuf  = 0
 
 ## Logging
-access_log = stdout              # off, stdout, stderr, atau path file
+access_log = off                 # off, stdout, stderr, atau path file
 error_log  = stderr
 log_level  = info                # error, warn, info, debug
 log_format = combined            # common, combined, json
@@ -796,7 +796,7 @@ daemonize = false
 |---|---|---|---|---|
 | `bind` | string | `0.0.0.0` | no | Bind address. `::` creates a dual-stack IPv6 listener (`IPV6_V6ONLY=0`) |
 | `port` | int | `8080` | no | TCP port (1 to 65535). Ports below 1024 require `CAP_NET_BIND_SERVICE` or root |
-| `workers` | int or `auto` | `auto` | no | Number of workers (event loops). `auto` = number of online CPU cores |
+| `workers` | int or `auto` | `1` | no | Number of workers (event loops). `0`/`auto` = one per online core. The config-file default `auto` arrives with v0.7; v0.6 defaults to 1 so the single-threaded behaviour of v0.1..v0.5 is unchanged |
 | `backlog` | int | `4096` | no | Argument to `listen()`. Effectively limited by `net.core.somaxconn` |
 | `reuseport` | bool | `true` | no | One listener per worker with `SO_REUSEPORT`. `false` = one shared listener with `EPOLLEXCLUSIVE` |
 | `max_connections` | int | `16384` | no | Limit of active connections **per worker**. Total = `workers` × this value |
@@ -827,15 +827,15 @@ daemonize = false
 
 | Key | Type | Default | Reload | Description |
 |---|---|---|---|---|
-| `root` | path | `./public` | yes | Document root. Must exist and be readable at start |
-| `index` | string | `index.html` | yes | Name of the file served for directory requests |
+| `root` | path | `./public` | no | Document root. Must exist and be readable at start |
+| `index` | string | `index.html` | no | Name of the file served for directory requests |
 | `directory_listing` | bool | `false` | yes | Show the directory listing when there is no index (file names are HTML-escaped) |
 | `follow_symlinks` | bool | `false` | yes | `false`: symlinks are rejected. `true`: followed, but they must not escape from `root` |
 | `hidden_files` | bool | `false` | yes | `false`: paths with segments starting with a dot are answered with `404`, **except** `/.well-known/` |
 | `sendfile` | bool | `true` | yes | Use `sendfile()`; `false` uses `pread()` + `send()` |
 | `sendfile_chunk` | size | `1m` | yes | Max bytes per `sendfile()` call (maintains fairness between connections) |
 | `etag` | bool | `true` | yes | Send and evaluate `ETag` |
-| `mime_types` | path | empty | yes | Additional file mapping extensions to MIME types (`mime.types` format) |
+| `mime_types` | path | empty | no | Additional file mapping extensions to MIME types (`mime.types` format) |
 | `default_type` | string | `application/octet-stream` | yes | MIME type for unknown extensions |
 | `cache_control` | string | empty | yes | `Cache-Control` header value (not sent if empty) |
 | `server_tokens` | bool | `true` | yes | `true`: `Server: Dantrix/x.y.z`. `false`: `Server: Dantrix` |
@@ -855,7 +855,7 @@ daemonize = false
 
 | Key | Type | Default | Reload | Description |
 |---|---|---|---|---|
-| `access_log` | string | `stdout` | yes | `off`, `stdout`, `stderr`, or a file path |
+| `access_log` | string | `off` | yes | `off`, `stdout`, `stderr`, or a file path |
 | `error_log` | string | `stderr` | yes | `stderr` or a file path |
 | `log_level` | enum | `info` | yes | `error`, `warn`, `info`, `debug` (`trace` only in debug builds) |
 | `log_format` | enum | `combined` | yes | `common`, `combined`, or `json` |
@@ -875,8 +875,17 @@ daemonize = false
 - `max_header_size` must be ≥ `max_request_line`.
 - `root` must be an existing, readable directory; otherwise exit code 2.
 - If `workers × max_connections` exceeds `RLIMIT_NOFILE`, Dantrix tries to raise the *soft* limit up to the *hard* limit. If it is still insufficient, `max_connections` is lowered automatically and a warning is logged.
-- `user`/`group` only apply if the process was started as root.
+- `user`/`group` are validated on every start-up (a typo is exit code 2 even when not running as root); the actual `setgid`/`setuid` only happen when the process was started as root.
 - On `SIGHUP`, keys marked **Reload = yes** are applied to new requests or connections. Keys marked **no** require a restart; changes to them are ignored with a warning in the error log.
+
+> [!IMPORTANT]
+> Since v0.6.0 the parser accepts **every key above** and validates it, but a few
+> are accepted without an effect yet and are announced at start-up with an
+> explicit warning: `edge_triggered` (v0.7), `add_header`, `tcp_defer_accept`,
+> `tcp_fastopen`, `socket_rcvbuf` and `socket_sndbuf`. `log_format = json` is
+> rejected with exit code 2 rather than silently downgraded. `root`, `index` and
+> `mime_types` open a file descriptor at start-up and are therefore **not**
+> re-applied on `SIGHUP`; everything else in the table reloads live.
 
 </details>
 
