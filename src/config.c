@@ -555,11 +555,6 @@ int dx_config_env(dx_settings_t *s, FILE *msg)
 
 int dx_config_override(dx_settings_t *s, const char *assignment, FILE *msg)
 {
-    return dx_config_override_src(s, assignment, "-o", msg);
-}
-
-int dx_config_override_src(dx_settings_t *s, const char *assignment, const char *src, FILE *msg)
-{
     char buf[8192];
     char *eq;
 
@@ -568,16 +563,16 @@ int dx_config_override_src(dx_settings_t *s, const char *assignment, const char 
         return -1;
     }
     if (dx_strlcpy(buf, assignment, sizeof(buf)) >= sizeof(buf)) {
-        fprintf(msg, "dantrix: %s: assignment too long\n", src);
+        fprintf(msg, "dantrix: -o: assignment too long\n");
         return -1;
     }
     eq = strchr(buf, '=');
     if (eq == NULL) {
-        fprintf(msg, "dantrix: %s: expected key=value, got '%s'\n", src, assignment);
+        fprintf(msg, "dantrix: -o: expected key=value, got '%s'\n", assignment);
         return -1;
     }
     *eq = '\0';
-    return apply_pair(s, buf, eq + 1, src, NULL, msg);
+    return apply_pair(s, buf, eq + 1, "-o", NULL, msg);
 }
 
 int dx_config_set(dx_settings_t *s, const char *key, const char *value, const char *src, FILE *msg)

@@ -298,8 +298,34 @@ def main():
     # --- pipelining ---------------------------------------------------------
     with connect() as s:
         s.sendall(b"GET /hello.txt HTTP/1.1\r\nHost: s\r\n\r\n" * 3)
-        seen = [status_line(read_response(s)) for _ in range(3)]
-    check("3 pipelined requests answered in order", seen == ["HTTP/1.1 200 OK"] * 3)
+        # The server may hand all three responses over in one recv(), so read
+        # from the socket until three complete responses have arrived and then
+        # split them by Content-Length. Driving three separate read_response()
+        # calls races: the first one can swallow the bytes of the other two.
+        s.settimeout(5)
+        buf = b""
+        while buf.count(b"\r\n\r\n") < 3:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    # Framing-aware split: headers, then exactly Content-Length body bytes.
+    seen = []
+    pos = 0
+    while len(seen) < 3:
+        head_end = buf.find(b"\r\n\r\n", pos)
+        if head_end < 0:
+            break
+        head = buf[pos:head_end]
+        length = 0
+        for line in head.split(b"\r\n"):
+            if line.lower().startswith(b"content-length:"):
+                length = int(line.split(b":", 1)[1].strip())
+        body_start = head_end + 4
+        seen.append(head.split(b"\r\n", 1)[0].decode(errors="replace"))
+        pos = body_start + length
+    check("3 pipelined requests answered in order", seen == ["HTTP/1.1 200 OK"] * 3,
+          f"{len(seen)} responses: {seen}")
 
     # --- request bodies -----------------------------------------------------
     with connect() as s:

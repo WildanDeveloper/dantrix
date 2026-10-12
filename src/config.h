@@ -118,12 +118,6 @@ int dx_config_env(dx_settings_t *s, FILE *msg);
 int dx_config_override(dx_settings_t *s, const char *assignment, FILE *msg);
 
 /*
- * Same as dx_config_override(), but with a caller-supplied source label so a
- * command line flag can report itself instead of the generic "-o".
- */
-int dx_config_override_src(dx_settings_t *s, const char *assignment, const char *src, FILE *msg);
-
-/*
  * Apply a key and a value directly, without going through an intermediate
  * "key=value" string. Building that string would cap a path value at the
  * buffer size and silently truncate it (DX_CFG_PATH_MAX is 4096, far above the
