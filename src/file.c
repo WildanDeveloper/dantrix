@@ -298,9 +298,17 @@ dx_open_t dx_fs_open(dx_fs_t *fs, const char *rel_path, bool had_trailing_slash,
                 }
                 encoded[n] = '\0';
                 w = snprintf(location, location_cap, "/%s/", encoded);
-                if (w >= 0 && (size_t)w < location_cap && location_len != NULL) {
-                    *location_len = (size_t)w;
+                if (w < 0 || (size_t)w >= location_cap || location_len == NULL) {
+                    /*
+                     * The caller's buffer is too small to hold the redirect.
+                     * Returning DX_OPEN_REDIRECT anyway would emit an empty
+                     * "Location:" header, which is worse than a 500: the
+                     * client would follow a redirect to the same resource
+                     * forever. Report the failure instead.
+                     */
+                    return DX_OPEN_ERROR;
                 }
+                *location_len = (size_t)w;
             }
             if (served_path != NULL && served_cap > 0) {
                 (void)copy_bounded(served_path, served_cap, rel_path);

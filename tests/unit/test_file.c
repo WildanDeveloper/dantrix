@@ -127,6 +127,21 @@ static void test_directory_and_index(void)
     CHECK_EQ(dx_fs_open(fs, "dir", true, location, sizeof(location), &len, NULL, 0u, &r),
              DX_OPEN_FORBIDDEN);
 
+    /*
+     * A location buffer that cannot hold the redirect must fail, not return a
+     * redirect with an empty value: the client would follow it forever.
+     */
+    {
+        char tiny[8];
+        size_t tiny_len = 0u;
+
+        /* "averylongdir" -> "/averylongdir/" is 14 bytes, far past tiny[8]. */
+        mkdirs("averylongdir");
+        CHECK_EQ(dx_fs_open(fs, "averylongdir", false, tiny, sizeof(tiny), &tiny_len, NULL, 0u, &r),
+                 DX_OPEN_ERROR);
+        CHECK_EQ(tiny_len, 0u); /* reset to 0 and left there on failure */
+    }
+
     /* With an index file present, the index is served. */
     put_file("dir/index.html", "<h1>index</h1>");
     CHECK_EQ(dx_fs_open(fs, "dir", true, location, sizeof(location), &len, NULL, 0u, &r),
