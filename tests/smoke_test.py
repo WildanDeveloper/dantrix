@@ -28,9 +28,9 @@ ACCESS_LOG = tempfile.NamedTemporaryFile(prefix="dantrix-access-", suffix=".log"
 ACCESS_LOG.close()
 
 
-def check(name, cond):
+def check(name, cond, detail=""):
     status = "ok" if cond else "FAIL"
-    print(f"  [{status}] {name}")
+    print(f"  [{status}] {name}" + (f"  ({detail})" if detail and not cond else ""))
     if not cond:
         failures.append(name)
 
@@ -538,6 +538,83 @@ def main():
         off.kill()
     check("sendfile-off server had no sanitizer error",
           b"AddressSanitizer" not in off_err)
+
+    # --- second audit round --------------------------------------------------
+    # Every block below failed before its fix; they stay as regressions.
+
+    # A listing must carry exactly one Content-Length (the second one was a
+    # request-smuggling primitive), and HEAD must report the same length as GET.
+    listing = request(b"GET /many/ HTTP/1.1\r\nHost: r\r\nConnection: close\r\n\r\n")
+    head_block = listing.split(b"\r\n\r\n", 1)[0]
+    cl_count = len([l for l in head_block.split(b"\r\n")
+                    if l.lower().startswith(b"content-length")])
+    check("listing carries exactly one Content-Length", cl_count == 1)
+    listing_head = request(b"HEAD /many/ HTTP/1.1\r\nHost: r\r\nConnection: close\r\n\r\n")
+    check("HEAD listing reports the real Content-Length",
+          header_of(listing_head, b"Content-Length") == header_of(listing, b"Content-Length")
+          and int(header_of(listing_head, b"Content-Length")) > 0)
+
+    # A name whose HTML escaping expands beyond the old fixed buffer must still
+    # be listed instead of being dropped silently.
+    special = os.path.join(DOCROOT, "special")
+    os.makedirs(special, exist_ok=True)
+    for name in ("&" * 200 + ".txt", "<" * 100 + ".txt"):
+        try:
+            with open(os.path.join(special, name), "w") as f:
+                f.write("x")
+        except OSError:
+            pass
+    special_body = body_of(request(b"GET /special/ HTTP/1.1\r\nHost: r\r\n"
+                                   b"Connection: close\r\n\r\n"))
+    check("long escaped names are still listed",
+          special_body.count(b"<li>") == 2 and b"&amp;" in special_body
+          and b"&lt;" in special_body)
+
+    # A keep-alive connection must produce one access log line per request.
+    # This runs against the sendfile-off server so its log can be inspected.
+    off2_port = PORT + 2
+    off2_log = tempfile.NamedTemporaryFile(prefix="dantrix-acc-", suffix=".log", delete=False)
+    off2 = subprocess.Popen(
+        [BIN, "-b", "127.0.0.1", "-p", str(off2_port), "--root", DOCROOT,
+         "--access-log", off2_log.name, "--log-format", "common"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
+    ready = False
+    for _ in range(50):
+        if off2.poll() is not None:
+            break
+        try:
+            with socket.create_connection(("127.0.0.1", off2_port), timeout=0.2):
+                ready = True
+                break
+        except OSError:
+            time.sleep(0.1)
+    if ready:
+        s = socket.create_connection(("127.0.0.1", off2_port), timeout=5)
+        for _ in range(4):
+            s.sendall(b"GET /hello.txt HTTP/1.1\r\nHost: r\r\n\r\n")
+            s.settimeout(5)
+            got = b""
+            while b"\r\n\r\n" not in got:
+                got += s.recv(65536)
+            hdr, _, rest = got.partition(b"\r\n\r\n")
+            need = int(header_of(hdr, b"Content-Length"))
+            while len(rest) < need:
+                rest += s.recv(65536)
+        s.close()
+        time.sleep(0.4)
+        with open(off2_log.name, "r", errors="replace") as f:
+            ka_lines = [l for l in f if "/hello.txt" in l]
+        check("keep-alive logs one line per request", len(ka_lines) == 4,
+              f"{len(ka_lines)} lines for 4 requests")
+    else:
+        check("keep-alive log server started", False)
+    off2_err = b""
+    off2.send_signal(signal.SIGTERM)
+    try:
+        _, off2_err = off2.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        off2.kill()
+    os.unlink(off2_log.name)
 
     # --- graceful shutdown --------------------------------------------------
     idle = connect()  # keeps a connection open across the shutdown

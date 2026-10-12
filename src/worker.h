@@ -88,6 +88,13 @@ int dx_worker_run(dx_worker_t *w);
 dx_log_t *dx_worker_log(dx_worker_t *w);
 
 /*
+ * Write the access log line for the request recorded on conn, if any, and
+ * clear the record so the request is never logged twice. Called by the
+ * connection flow when a response completes.
+ */
+void dx_worker_emit_access(dx_worker_t *w, dx_conn_t *conn);
+
+/*
  * Event tag helpers. A tag is (kind, generation, index) packed into the epoll
  * user data word; see dantrix.h for the bit layout.
  */

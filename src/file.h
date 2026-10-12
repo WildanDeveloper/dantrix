@@ -58,9 +58,11 @@ bool dx_fs_has_openat2(void);
  * redirect target is written into location (length in location_len); the
  * location is always a path with a trailing slash, never a full URL.
  *
- * served_path/served_cap receive the relative path of the file that was
- * actually opened (the index file for a directory), which is what the MIME
- * lookup must use. It may be NULL when the caller does not need it.
+ * served_path/served_cap receive the relative path the result refers to: the
+ * file that was opened (the index file for a directory), or the directory
+ * itself for DX_OPEN_REDIRECT / DX_OPEN_LISTING. It is always filled on a
+ * non-error result, so the caller never needs a fallback. It may be NULL when
+ * the caller does not need it.
  *
  * For a directory with an index file the result is DX_OPEN_OK with the index
  * open; otherwise DX_OPEN_LISTING when listings are enabled, or

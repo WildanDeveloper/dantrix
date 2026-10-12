@@ -195,8 +195,16 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
     return 0;
 }
 
-/* Emit the access log line for the request that was served, if any. */
-static void access_emit(dx_worker_t *w, const dx_conn_t *conn)
+/*
+ * Emit the access log line for the request that was served, if any.
+ *
+ * Called once per completed request: from conn_after_response() for the normal
+ * path, and from conn_close() for a request that never reached a response
+ * (a 408 written on a timeout, or a connection dropped mid-request). The
+ * record's status is cleared after it is written, so a request is logged
+ * exactly once no matter which path runs last.
+ */
+void dx_worker_emit_access(dx_worker_t *w, dx_conn_t *conn)
 {
     const dx_access_t *acc = &conn->acc;
 
@@ -206,6 +214,7 @@ static void access_emit(dx_worker_t *w, const dx_conn_t *conn)
     dx_log_access(w->access_log, w->log_format, conn->peer, acc->method, strlen(acc->method),
                   acc->target, strlen(acc->target), acc->http10 ? "HTTP/1.0" : "HTTP/1.1",
                   acc->status, acc->body_bytes, acc->referer, acc->user_agent);
+    conn->acc.status = 0; /* one line per request, whichever path runs first */
 }
 
 /* Tear a connection down and give its slot and buffer back to the pools. */
@@ -229,8 +238,8 @@ static void conn_close(dx_worker_t *w, dx_conn_t *conn)
         (void)close(fd);
     }
 
-    /* One line per completed request, emitted while the record is intact. */
-    access_emit(w, conn);
+    /* Any request that never reached a normal response is logged here. */
+    dx_worker_emit_access(w, conn);
 
     /* A streamed file is owned by the connection until it is closed. */
     dx_conn_release_file(conn);

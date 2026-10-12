@@ -423,8 +423,51 @@ static void test_advance_with_mutation(void)
     dx_timer_wheel_destroy(w);
 }
 
+/*
+ * Regression: a lazy refresh that raises the deadline of the bucket's minimum
+ * node used to leave the cached minimum pointing at the old, now past value.
+ * next_timeout_ms() then answered 0 until the node was removed, spinning the
+ * event loop on epoll_wait(0).
+ */
+static void test_lazy_refresh_raise(void)
+{
+    dx_timer_wheel_t *w = dx_timer_wheel_create();
+    dx_timer_node_t a;
+    uint64_t now;
+    int false_wakeups = 0;
+
+    dx_test_begin("timer/lazy_refresh_raise");
+    CHECK(w != NULL);
+    if (w == NULL) {
+        return;
+    }
+    dx_timer_node_reset(&a);
+
+    /* One node, its deadline raised 800 ms inside the same second bucket. */
+    CHECK_EQ(dx_timer_wheel_start(w, &a, 10000u, 0u), 0);
+    CHECK_EQ(dx_timer_wheel_refresh(w, &a, 10000u, 800u), 0);
+    CHECK_EQ(dx_timer_node_deadline(&a), 10800u);
+
+    /* The loop must wait 800 ms, not wake up on every clock. */
+    for (now = 10000u; now < 10800u; now++) {
+        if (dx_timer_wheel_next_timeout_ms(w, now) == 0) {
+            false_wakeups++;
+        }
+    }
+    CHECK_EQ(false_wakeups, 0);
+    CHECK_EQ(dx_timer_wheel_next_timeout_ms(w, 10000u), 800);
+    CHECK_EQ(dx_timer_wheel_next_timeout_ms(w, 10700u), 100);
+
+    /* Lowering the deadline in the same bucket still lowers the minimum. */
+    CHECK_EQ(dx_timer_wheel_refresh(w, &a, 900u, 10000u), 0); /* deadline 10900 */
+    CHECK_EQ(dx_timer_wheel_next_timeout_ms(w, 10000u), 900);
+
+    dx_timer_wheel_destroy(w);
+}
+
 int main(void)
 {
+    test_lazy_refresh_raise();
     test_stale_slot_min_regression();
     test_advance_with_mutation();
     test_start_and_cancel();

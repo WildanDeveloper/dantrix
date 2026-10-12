@@ -205,8 +205,14 @@ dx_conn_t *dx_pool_acquire(dx_pool_t *pool)
     dx_conn_reset(conn);
     conn->state = DX_CONN_READING;
 
-    /* Skip generation 0 so a zeroed tag can never look valid. */
-    if (conn->generation == 0xffffffffu) {
+    /*
+     * Skip generation 0 so a zeroed tag can never look valid, and wrap at the
+     * width the tag actually carries. dx_tag_conn() masks the generation with
+     * DX_TAG_GEN_MASK before storing it, while dx_pool_lookup() compares the
+     * stored value with the full one; letting the counter grow past the mask
+     * would make every event for that slot look stale after 2^30 recycles.
+     */
+    if (conn->generation >= DX_TAG_GEN_MASK) {
         conn->generation = 0u;
     }
     conn->generation++;
@@ -569,6 +575,17 @@ static int conn_flush_file(struct dx_worker *w, dx_conn_t *conn)
 {
     unsigned char scratch[DX_FILE_SCRATCH];
 
+    /*
+     * sendfile() writes straight to the socket, so it must not run while the
+     * staged response headers are still partly in the read buffer: the body
+     * would overtake the rest of the header and break the framing. The
+     * pread()+send() path is safe here because it parks bytes behind the
+     * header in the same buffer, so the guard only applies to sendfile.
+     */
+    if (w->static_opts.sendfile && conn->response_pending) {
+        return 0;
+    }
+
     while (conn->file_left > 0) {
         size_t chunk = conn->file_left;
         ssize_t moved;
@@ -608,6 +625,12 @@ static int conn_flush_file(struct dx_worker *w, dx_conn_t *conn)
              * The bytes go through the connection buffer instead, which is
              * free once the headers are out, so a partial send is resumed by
              * the next EPOLLOUT with nothing lost and nothing resent.
+             *
+             * The file cursor must advance as soon as the bytes are copied
+             * out of the file, before the socket is touched. Advancing it only
+             * after a successful send meant that an EAGAIN left the parked
+             * bytes in the buffer *and* the cursor where it was, so the next
+             * attempt read the same region again and duplicated it.
              */
             moved = pread(conn->file_fd, scratch, chunk, (off_t)conn->file_offset);
             if (moved > 0) {
@@ -626,13 +649,14 @@ static int conn_flush_file(struct dx_worker *w, dx_conn_t *conn)
                 memcpy(conn->buf.data + conn->buf.len, scratch, n);
                 conn->buf.len += n;
                 conn->response_pending = true;
+                conn->file_offset += (uint64_t)n;
+                conn->file_left -= (uint64_t)n;
+                conn->bytes_out += (uint64_t)n;
                 if (conn_flush(w, conn) != 0) {
                     return -1;
                 }
-                if (conn->response_pending) {
-                    return 0; /* EAGAIN: the rest is parked in the buffer */
-                }
-                moved = (ssize_t)n;
+                /* Parked or sent: either way this chunk is accounted for. */
+                continue;
             }
         }
 
@@ -1037,16 +1061,16 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
         }
         conn->mem_body_len = body_len;
         conn->mem_body_off = 0;
-        extra_len =
-            (size_t)snprintf(extra, sizeof(extra), "Content-Length: %zu\r\n", head ? 0u : body_len);
-        if (extra_len >= sizeof(extra)) {
-            dx_conn_release_scratch(conn);
-            return conn_finish_error(w, conn, 500, NULL);
-        }
+        /*
+         * dx_http_response_headers() writes Content-Length itself. Adding one
+         * here as well produced two framing headers on every listing, which is
+         * both invalid (RFC 9110 8.6) and a request-smuggling primitive in
+         * front of a proxy. The length is the full body for HEAD too, so the
+         * HEAD response matches its GET twin.
+         */
         access_fill(conn, req, base, 200, head ? 0u : body_len);
-        len = dx_http_response_headers(tmp, sizeof(tmp), 200, extra, "text/html; charset=utf-8",
-                                       head ? 0u : body_len, head, connection,
-                                       w->static_opts.server_tokens);
+        len = dx_http_response_headers(tmp, sizeof(tmp), 200, NULL, "text/html; charset=utf-8",
+                                       body_len, head, connection, w->static_opts.server_tokens);
         if (len == 0) {
             dx_conn_release_scratch(conn);
             return conn_finish_error(w, conn, 500, NULL);
@@ -1348,6 +1372,12 @@ static int conn_after_response(struct dx_worker *w, dx_conn_t *conn)
         dx_conn_release_scratch(conn);
     }
     conn->requests++;
+    /*
+     * Emit the access line now, while this request's record is intact. The
+     * old code logged only in conn_close(), so a keep-alive connection with
+     * four requests produced a single line describing the last one.
+     */
+    dx_worker_emit_access(w, conn);
     if (conn->close_conn || conn->eof) {
         return -1;
     }

@@ -12,6 +12,59 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.4.2] - 2026-10-12
+
+Second audit round. Every defect was reproduced against the running server
+before the fix and is now covered by a test (`test_timer.c`, and new checks in
+`tests/smoke_test.py`).
+
+### Fixed
+
+- **File bodies were corrupted with `--sendfile off`.** The pread()+send()
+  fallback advanced the file cursor only *after* a successful send, so an
+  EAGAIN left the parked bytes in the buffer *and* the cursor unchanged: the
+  next attempt read the same region again and duplicated it. The cursor now
+  advances as soon as the bytes are copied out of the file, so a slow reader
+  receives the file intact.
+- **A sendfile body could overtake a partial response header.** `conn_flush_file()`
+  wrote straight to the socket even when `conn_flush()` had left header bytes
+  pending on EAGAIN. The sendfile path now returns until the header is fully
+  out; the pread() path is inherently safe because it parks behind the header.
+- **Directory listings carried two `Content-Length` headers.** The listing path
+  added one and `dx_http_response_headers()` added another. Framing-header
+  duplication is invalid (RFC 9110 8.6) and a request-smuggling primitive in
+  front of a proxy.
+- **`HEAD` on a listing reported `Content-Length: 0`.** It now reports the same
+  length as the matching GET, as the README requires and the file path already
+  did.
+- **The access log wrote one line per connection, not per request.** The record
+  was overwritten by each request and only emitted in `conn_close()`, so a
+  keep-alive connection with four requests produced a single line for the last
+  one. The line is now written as soon as each response is fully sent, and the
+  record is cleared so a request is logged exactly once (a request that never
+  reaches a response is still logged from `conn_close()`).
+- **A lazy timer refresh could spin the event loop.** Raising the deadline of a
+  bucket's minimum node inside the same second left the cached minimum pointing
+  at the old, now past value, so `next_timeout_ms()` answered 0 and
+  `epoll_wait(0)` spun at 100% CPU until the node was removed. The cache is
+  recomputed when the minimum node moves later, matching `detach()`.
+- **Listing entries with heavy escaping disappeared silently.** The HTML escape
+  buffer was `NAME_MAX + 16` bytes while a single byte can expand to six
+  (`&quot;`); a name of 240 `&` needed ~1440 bytes, `dx_html_escape()` returned
+  0 and the entry was dropped. The buffer is now `NAME_MAX * 6 + 1`.
+- **`dx_fs_open()` left `served_path` empty for redirects and listings**, so the
+  caller had to fall back to another value. It is now filled for every
+  non-error result and the contract is documented.
+- **The connection generation could outgrow its tag field.** `dx_pool_acquire()`
+  incremented a full 32-bit counter while the epoll tag stores only 30 bits
+  (`DX_TAG_GEN_MASK`), so after 2^30 recycles every event for that slot would
+  look stale. The counter now wraps at the mask.
+
+### Changed
+
+- `dx_worker_emit_access()` is public so `conn.c` can log a request when its
+  response completes, instead of only at connection teardown.
+
 ## [0.4.1] - 2026-10-11
 
 Audit release. Every defect below was reproduced before the fix and is now

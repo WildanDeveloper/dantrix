@@ -117,6 +117,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Static files: `sendfile`, MIME, `HEAD`, `ETag`, `Range` | ✅ | v0.3.0 |
 | Keep-alive, pipelining, timer wheel, timeouts | ✅ | v0.4.0 |
 | Defect audit of v0.4.0 (34 defects, regression suite) | ✅ | v0.4.1 |
+| Second audit round (9 defects, regression suite) | ✅ | v0.4.2 |
 | Multi-worker with `SO_REUSEPORT` | 📝 | v0.5.0 |
 | Configuration, CLI, signals, graceful shutdown and reload | 📝 | v0.6.0 |
 | Benchmark suite and optimization | 📝 | v0.7.0 |
@@ -2135,6 +2136,17 @@ Each release has a single capability as its theme. A checked box marks completed
 - [x] `mime.types` overflow at the 1 MiB cap, `--server-tokens`, `304 Content-Length`
 - [x] Build: header dependencies, broken `test-tsan`, stale version, missing `deploy/` files
 - [x] Regression suite: `tests/regression_test.py` plus new unit and smoke checks
+
+### v0.4.2: Second audit round
+
+- [x] `--sendfile off`: file cursor advances on copy, so no duplicated bytes
+- [x] sendfile body can no longer overtake a partially sent header
+- [x] Listings carry a single `Content-Length`; `HEAD` reports the real length
+- [x] Access log writes one line per request, not per connection
+- [x] Timer lazy refresh no longer leaves a stale bucket minimum (CPU spin)
+- [x] Listing entries with heavy escaping are no longer dropped
+- [x] `served_path` contract filled for redirects and listings
+- [x] Connection generation wraps at the tag's 30-bit field
 
 ### v0.5.0: Multi-core
 

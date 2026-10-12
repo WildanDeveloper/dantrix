@@ -298,6 +298,9 @@ dx_open_t dx_fs_open(dx_fs_t *fs, const char *rel_path, bool had_trailing_slash,
                     *location_len = (size_t)w;
                 }
             }
+            if (served_path != NULL && served_cap > 0) {
+                (void)copy_bounded(served_path, served_cap, rel_path);
+            }
             return DX_OPEN_REDIRECT;
         }
         /* Serve the index file when present. */
@@ -322,6 +325,9 @@ dx_open_t dx_fs_open(dx_fs_t *fs, const char *rel_path, bool had_trailing_slash,
         }
         /* No usable index: list the directory when allowed. */
         if (fs->directory_listing) {
+            if (served_path != NULL && served_cap > 0) {
+                (void)copy_bounded(served_path, served_cap, rel_path);
+            }
             return DX_OPEN_LISTING;
         }
         return DX_OPEN_FORBIDDEN;
@@ -516,7 +522,8 @@ size_t dx_fs_list(dx_fs_t *fs, const char *rel_path, char *out, size_t cap)
     }
 
     for (size_t i = 0; i < count && o > 0; i++) {
-        char esc[NAME_MAX + 16u];
+        /* Worst case: every byte expands to six characters (&quot;). */
+        char esc[NAME_MAX * 6u + 1u];
         char url[NAME_MAX * 3u + 2u];
         size_t name_len = strlen(names[i]);
         int is_dir = child_is_dir(fs, rel_path, names[i]);

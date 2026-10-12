@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.4.1
+VERSION := 0.4.2
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)

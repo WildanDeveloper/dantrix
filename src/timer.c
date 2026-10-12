@@ -165,8 +165,21 @@ int dx_timer_wheel_refresh(dx_timer_wheel_t *wheel, dx_timer_node_t *node, uint6
      * and only records the new deadline.
      */
     if (bucket_of(deadline) == node->slot) {
+        /*
+         * Lazy refresh: the node stays where it is and only its deadline is
+         * recorded. The cached minimum must not simply be lowered: raising the
+         * deadline of the bucket's minimum node leaves slot_min pointing at a
+         * value that is now in the past, and next_timeout_ms() answers 0 from
+         * then on, spinning epoll_wait(0) at 100% CPU until the stale value is
+         * removed. Recompute when (and only when) the minimum node moved later;
+         * detach() recomputes for the same reason.
+         */
+        uint64_t previous = node->deadline_ms;
+
         node->deadline_ms = deadline;
-        if (deadline < wheel->slot_min[node->slot]) {
+        if (previous == wheel->slot_min[node->slot] && deadline > previous) {
+            refresh_slot_min(wheel, node->slot);
+        } else if (deadline < wheel->slot_min[node->slot]) {
             wheel->slot_min[node->slot] = deadline;
         }
         return 0;
