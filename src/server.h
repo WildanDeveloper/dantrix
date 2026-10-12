@@ -5,6 +5,7 @@
 #ifndef DX_SERVER_H
 #define DX_SERVER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "file.h"
@@ -17,7 +18,10 @@ typedef struct {
     const char *bind_addr;      /* IP literal; NULL means the built-in default */
     int port;                   /* 1..65535 */
     int backlog;                /* listen() queue; clamped to >= 1 */
-    size_t max_conns;           /* hard connection cap */
+    size_t max_conns;           /* hard connection cap (per worker) */
+    int workers;                /* 1 = main-thread loop; >1 = worker threads */
+    bool reuseport;             /* one SO_REUSEPORT listener per worker */
+    bool cpu_affinity;          /* pin worker i to CPU i */
     dx_http_limits_t limits;    /* HTTP request line / header limits */
     dx_log_t *log;              /* borrowed error logger */
     dx_log_t *access_log;       /* borrowed access logger; NULL disables logging */
@@ -31,9 +35,11 @@ typedef struct {
 } dx_server_config_t;
 
 /*
- * Install signal handlers, create the listener and run the worker until
- * SIGINT or SIGTERM arrives. Returns 0 on graceful shutdown, -1 on a fatal
- * error (errno set).
+ * Run the server until SIGINT or SIGTERM arrives. With workers == 1 the main
+ * thread runs the event loop directly (the v0.1 behaviour); with workers > 1
+ * the main thread spawns one worker thread per configured worker and waits on
+ * sigwait(), waking the workers through their eventfds on shutdown. Returns 0
+ * on a graceful shutdown, -1 on a fatal error (errno set).
  */
 int dx_server_run(const dx_server_config_t *cfg);
 

@@ -2,11 +2,32 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <sched.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+
+int dx_set_affinity(unsigned cpu)
+{
+    cpu_set_t set;
+
+    if (cpu >= (unsigned)CPU_SETSIZE) {
+        errno = EINVAL;
+        return -1;
+    }
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    return sched_setaffinity(0, sizeof(set), &set);
+}
+
+unsigned dx_cpu_count(void)
+{
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+
+    return (n > 0) ? (unsigned)n : 1u;
+}
 
 size_t dx_strlcpy(char *dst, const char *src, size_t size)
 {

@@ -300,6 +300,59 @@ def test_descriptor_exhaustion_backs_off():
               "no accept4 error line")
 
 
+def test_multi_worker_serves_and_shuts_down():
+    """v0.5.0: N worker threads must share the port, answer every request and
+    drain cleanly on SIGTERM, in both listener modes."""
+    for label, extra, port in (("reuseport", [], PORT + 4),
+                               ("shared", ["--no-reuseport"], PORT + 5)):
+        log = tempfile.NamedTemporaryFile(prefix="dantrix-multi-", suffix=".log",
+                                          delete=False)
+        acc = tempfile.NamedTemporaryFile(prefix="dantrix-multi-", suffix=".acc",
+                                          delete=False)
+        proc = subprocess.Popen(
+            [BIN, "-b", "127.0.0.1", "-p", str(port), "--root", ROOT, "-w", "4",
+             "--access-log", acc.name] + extra + ["--error-log", log.name],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            if not wait_ready(proc, port):
+                check(f"multi-worker {label}: server started", False)
+                continue
+            codes = []
+            for _ in range(16):
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                        s.sendall(b"GET /f HTTP/1.1\r\nHost: x\r\n"
+                                  b"Connection: close\r\n\r\n")
+                        data = s.recv(65536)
+                        codes.append(int(data.split(b" ")[1]))
+                except OSError:
+                    codes.append(0)
+            check(f"multi-worker {label}: every request answered 200",
+                  all(c == 200 for c in codes), str(codes))
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=15)
+            check(f"multi-worker {label}: exit code 0 on SIGTERM", proc.returncode == 0,
+                  f"rc={proc.returncode}")
+            text = open(log.name, encoding="utf-8", errors="replace").read()
+            complete = re.search(r"accepted (\d+), rejected (\d+), closed (\d+)\)", text)
+            accepted = int(complete.group(1)) if complete else -1
+            check(f"multi-worker {label}: worker statistics aggregated",
+                  accepted >= 16, f"accepted={accepted}")
+            acc_lines = [ln for ln in open(acc.name, encoding="utf-8",
+                                           errors="replace") if "/f" in ln]
+            check(f"multi-worker {label}: access log has one line per request",
+                  len(acc_lines) == 16, f"{len(acc_lines)} lines")
+        finally:
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGTERM)
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            os.unlink(log.name)
+            os.unlink(acc.name)
+
+
 def main():
     print("regression: timing wheel (BUG-01)")
     test_idle_cpu_after_partial_request()
@@ -309,6 +362,8 @@ def main():
     test_shutdown_drain_reaches_every_connection()
     print("regression: descriptor exhaustion (BUG-14)")
     test_descriptor_exhaustion_backs_off()
+    print("regression: multi-worker (v0.5.0)")
+    test_multi_worker_serves_and_shuts_down()
 
     print()
     if failures:

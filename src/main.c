@@ -99,8 +99,10 @@ static void print_usage(FILE *out)
             "  -b, --bind ADDR          Bind address                       [%s]\n"
             "  -p, --port PORT          TCP port                           [%d]\n"
             "      --backlog N          listen() queue                     [%d]\n"
-            "      --max-conns N        Connection limit                   [%d]\n"
-            "  -w, --workers N          Worker count (only 1 until v0.5)   [1]\n"
+            "      --max-conns N        Connection limit per worker        [%d]\n"
+            "  -w, --workers N          Worker threads (0 = one per CPU)   [1]\n"
+            "      --no-reuseport       Shared listener with EPOLLEXCLUSIVE\n"
+            "      --cpu-affinity       Pin worker i to CPU i\n"
             "\n"
             "Static files:\n"
             "  -r, --root DIR           Document root                       [%s]\n"
@@ -184,6 +186,8 @@ int main(int argc, char **argv)
     bool follow_symlinks = false;
     bool hidden_files = false;
     bool server_tokens = true;
+    bool reuseport = true;
+    bool cpu_affinity = false;
     size_t sendfile_chunk = 1024u * 1024u;
     size_t keepalive_requests = 1000u;
     uint64_t header_timeout_ms = 10000u;
@@ -202,6 +206,7 @@ int main(int argc, char **argv)
     int workers = 1;
     int rc = DX_EXIT_OK;
     dx_log_t log;
+    /* Zeroed so dx_log_destroy() is a no-op when the access log is off. */
     dx_log_t access_logger;
     dx_log_level_t level = DX_LOG_INFO;
     dx_log_format_t log_format = DX_LOG_FMT_COMMON;
@@ -242,13 +247,15 @@ int main(int argc, char **argv)
                                               {"max-header-size", required_argument, NULL, 'H'},
                                               {"max-headers", required_argument, NULL, 'N'},
                                               {"workers", required_argument, NULL, 'w'},
+                                              {"no-reuseport", no_argument, NULL, 'P'},
+                                              {"cpu-affinity", no_argument, NULL, 'J'},
                                               {"access-log", required_argument, NULL, 'A'},
                                               {"log-format", required_argument, NULL, 'F'},
                                               {"error-log", required_argument, NULL, 'E'},
                                               {"log-level", required_argument, NULL, 'L'},
                                               {NULL, 0, NULL, 0}};
 
-    while ((opt = getopt_long(argc, argv, "hVb:p:wr:", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "hVb:p:w:r:PJ", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'h':
             print_usage(stdout);
@@ -301,15 +308,16 @@ int main(int argc, char **argv)
             }
             break;
         case 'w':
-            if (!dx_parse_int(optarg, 1, 1024, &workers)) {
-                fprintf(stderr, "dantrix: invalid --workers '%s'\n", optarg);
+            if (!dx_parse_int(optarg, 0, 1024, &workers)) {
+                fprintf(stderr, "dantrix: invalid --workers '%s' (0 = auto, max 1024)\n", optarg);
                 return DX_EXIT_USAGE;
             }
-            if (workers != 1) {
-                fprintf(stderr, "dantrix: only one worker is supported until v0.5 "
-                                "(multi-worker lands in v0.5)\n");
-                return DX_EXIT_USAGE;
-            }
+            break;
+        case 'P': /* --no-reuseport: shared listener with EPOLLEXCLUSIVE */
+            reuseport = false;
+            break;
+        case 'J': /* --cpu-affinity: pin worker i to CPU i */
+            cpu_affinity = true;
             break;
         case 'r':
             root = optarg;
@@ -458,14 +466,18 @@ int main(int argc, char **argv)
      * The destinations are opened after argument validation, so that an
      * invalid flag never creates an empty log file.
      */
+    memset(&access_logger, 0, sizeof(access_logger));
     log_file = open_log_dest(log_dest);
     if (log_file == NULL) {
         fprintf(stderr, "dantrix: cannot open error log '%s': %s\n", log_dest, dx_strerror(errno));
         return DX_EXIT_FATAL;
     }
 
-    log.out = log_file;
-    log.level = level;
+    /*
+     * dx_log_init() sets up the mutex so the error log is safe to write from
+     * several worker threads at once (v0.5.0).
+     */
+    dx_log_init(&log, log_file, level);
 
     limits.max_request_line = max_request_line;
     limits.max_header_size = max_header_size;
@@ -476,6 +488,16 @@ int main(int argc, char **argv)
     cfg.port = port;
     cfg.backlog = backlog;
     cfg.max_conns = (size_t)max_conns_arg;
+    /*
+     * --workers 0 means "one worker per online CPU"; resolve it here so the
+     * server layer always receives a concrete count.
+     */
+    if (workers == 0) {
+        workers = (int)dx_cpu_count();
+    }
+    cfg.workers = workers;
+    cfg.reuseport = reuseport;
+    cfg.cpu_affinity = cpu_affinity;
     cfg.limits = limits;
     cfg.log = &log;
     cfg.log_format = log_format;
@@ -487,8 +509,7 @@ int main(int argc, char **argv)
                     dx_strerror(errno));
             return DX_EXIT_FATAL;
         }
-        access_logger.out = access_file;
-        access_logger.level = level;
+        dx_log_init(&access_logger, access_file, level);
         cfg.access_log = &access_logger;
     }
 
@@ -546,5 +567,7 @@ int main(int argc, char **argv)
         (void)fclose(access_file);
     }
     (void)fclose(log_file);
+    dx_log_destroy(&access_logger);
+    dx_log_destroy(&log);
     return rc;
 }

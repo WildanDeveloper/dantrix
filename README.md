@@ -118,7 +118,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Keep-alive, pipelining, timer wheel, timeouts | ✅ | v0.4.0 |
 | Defect audit of v0.4.0 (34 defects, regression suite) | ✅ | v0.4.1 |
 | Second audit round (9 defects, regression suite) | ✅ | v0.4.2 |
-| Multi-worker with `SO_REUSEPORT` | 📝 | v0.5.0 |
+| Multi-worker with `SO_REUSEPORT` | ✅ | v0.5.0 |
 | Configuration, CLI, signals, graceful shutdown and reload | 📝 | v0.6.0 |
 | Benchmark suite and optimization | 📝 | v0.7.0 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
@@ -250,6 +250,9 @@ Dantrix uses a **shared-nothing** model:
 **Alternative mode (`reuseport = false`).** All workers share a single listener that is registered with each worker's `epoll` using the `EPOLLEXCLUSIVE` flag (Linux ≥ 4.5) to avoid a *thundering herd*. Useful for older kernels or as a comparison baseline.
 
 **CPU affinity (`cpu_affinity = true`).** The *i*-th worker is pinned to the *i*-th core via `pthread_setaffinity_np`, reducing cross-core migration. Best results when combined with IRQ and RSS settings on the NIC (see [Operating System Tuning](#operating-system-tuning)).
+
+> [!NOTE]
+> Since v0.5.0 the worker count is set on the command line (`-w/--workers N`, `0` = one worker per online CPU) and **defaults to 1**: until the configuration milestone (v0.6) there is no config file, so the multi-threaded path is always opt-in and the single-threaded default behaviour is unchanged. `max_connections` stays a per-worker limit, so the process total is `workers × max_conns`.
 
 > [!NOTE]
 > All sockets using `SO_REUSEPORT` must be created by processes with the same *effective UID*. This kernel rule prevents other processes from hijacking the port.
@@ -398,7 +401,7 @@ If `sendfile()` fails with `EINVAL` or `ENOSYS` (for example on certain filesyst
 
 ### Signals and Graceful Shutdown
 
-Signals are blocked in all threads (`pthread_sigmask`) before the workers are created, and are then read only by the main thread via `signalfd`. This way no code ever runs inside an asynchronous *signal handler*. `SIGPIPE` is ignored (`SIG_IGN`) because `sendfile()` has no `MSG_NOSIGNAL` flag.
+Signals are blocked in all threads (`pthread_sigmask`) before the workers are created, and are then read only by the main thread, which waits in `sigwait()`. This way no code ever runs inside an asynchronous *signal handler*. `SIGPIPE` is ignored (`SIG_IGN`) because `sendfile()` has no `MSG_NOSIGNAL` flag. (`signalfd` arrives with the v0.6 operations milestone; the blocking and the main-thread-only reading are already in place.)
 
 | Signal | Effect |
 |---|---|
@@ -622,7 +625,7 @@ Umum:
 Jaringan:
   -b, --bind ADDR          Alamat bind                         [0.0.0.0]
   -p, --port PORT          Port                                [8080]
-  -w, --workers N          Jumlah worker (0 = auto)            [auto]
+  -w, --workers N          Jumlah worker (0 = satu per CPU)    [1]
       --backlog N          Antrean listen                      [4096]
       --max-conns N        Maks koneksi per worker             [16384]
       --no-reuseport       Satu listener bersama (EPOLLEXCLUSIVE)
@@ -1183,9 +1186,10 @@ dantrix/
 │   │   ├── test_file.c           test_mime.c
 │   │   ├── test_timer.c          test_pool.c
 │   │   ├── test_buffer.c         test_log.c
-│   │   └── test_util.c
+│   │   ├── test_util.c           test_net.c
 │   ├── smoke_test.py             # integrasi end-to-end (mulai server sendiri)
 │   ├── regression_test.py        # regresi yang butuh proses server terpisah
+│   ├── tsan_test.py              # trafik konkuren + deteksi ThreadSanitizer
 │   └── c10k_test.py              # N koneksi bersamaan
 ├── .clang-format
 ├── .clang-tidy
@@ -1252,8 +1256,7 @@ After that, work on `src/` following the [Roadmap](#roadmap-roadmap):
 | Incremental HTTP parser | v0.2 |
 | Static files and `sendfile` | v0.3 |
 | Keep-alive and timers | v0.4 |
-| Multi-thread with `SO_REUSEPORT` | v0.5 |
-| Operations, benchmarks, hardening | v0.6 to v0.8 |
+| Multi-thread with `SO_REUSEPORT` | v0.5 || Operations, benchmarks, hardening | v0.6 to v0.8 |
 
 Compiling the examples:
 
@@ -2150,10 +2153,10 @@ Each release has a single capability as its theme. A checked box marks completed
 
 ### v0.5.0: Multi-core
 
-- [ ] N workers with `SO_REUSEPORT` and an `EPOLLEXCLUSIVE` fallback
-- [ ] `eventfd` for inter-thread communication; per-worker statistics
-- [ ] Optional CPU affinity
-- [ ] Clean TSan test
+- [x] N workers with `SO_REUSEPORT` and an `EPOLLEXCLUSIVE` fallback
+- [x] `eventfd` for inter-thread communication; per-worker statistics
+- [x] Optional CPU affinity
+- [x] Clean TSan test
 
 ### v0.6.0: Operations
 

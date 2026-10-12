@@ -49,7 +49,7 @@ jobs:
               src/*.c -o build/dantrix-asan
       - name: Unit tests under ASan/UBSan
         run: |
-          for t in buffer file http_parser http_range http_response log mime path pool timer util; do
+          for t in buffer file http_parser http_range http_response log mime net path pool timer util; do
             gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wpedantic -Werror \
                 -O1 -g -fsanitize=address,undefined \
                 -fno-sanitize-recover=undefined \
@@ -89,3 +89,13 @@ jobs:
       - name: clang-format check
         run: |
           clang-format --dry-run --Werror src/*.c src/*.h fuzz/*.c tests/unit/*.c
+
+  tsan:
+    name: thread sanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests under TSan
+        run: make test-tsan
+      - name: Multi-worker concurrency under TSan
+        run: python3 tests/tsan_test.py build/tsan/dantrix

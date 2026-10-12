@@ -10,6 +10,7 @@
 #ifndef DX_LOG_H
 #define DX_LOG_H
 
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 
@@ -29,7 +30,19 @@ typedef enum {
 typedef struct {
     FILE *out; /* borrowed: this module never fclose()s it */
     dx_log_level_t level;
+    pthread_mutex_t mutex; /* protects out; only locked when mutex_ready */
+    bool mutex_ready;      /* set by dx_log_init(); hand-built logs stay unlocked */
 } dx_log_t;
+
+/*
+ * Prepare a logger for concurrent use from several worker threads: the mutex
+ * is initialized and every record is serialized. Use it once before the
+ * threads are created; the struct stays owned by the caller.
+ */
+void dx_log_init(dx_log_t *log, FILE *out, dx_log_level_t level);
+
+/* Release the mutex set up by dx_log_init(). No-op for hand-built logs. */
+void dx_log_destroy(dx_log_t *log);
 
 /* Human readable level tag, e.g. "info". Never returns NULL. */
 const char *dx_log_level_name(dx_log_level_t level);

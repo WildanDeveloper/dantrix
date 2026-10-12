@@ -34,6 +34,19 @@ bool dx_parse_int(const char *s, int min, int max, int *out);
 long long dx_now_ms(void);
 
 /*
+ * Pin the calling thread to a single CPU (the "i-th worker to the i-th core"
+ * rule). Returns 0 on success, -1 with errno set (e.g. EINVAL when cpu is not
+ * an online CPU). The caller decides whether a failure is fatal.
+ */
+int dx_set_affinity(unsigned cpu);
+
+/*
+ * Number of CPUs available to this process (>= 1). Used to resolve
+ * "--workers 0" (auto). Never returns 0, so callers can use it directly.
+ */
+unsigned dx_cpu_count(void);
+
+/*
  * Write exactly len bytes to fd, retrying on EINTR and short writes.
  * Returns 0 on success, -1 on error (errno preserved).
  */

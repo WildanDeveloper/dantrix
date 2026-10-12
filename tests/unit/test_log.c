@@ -3,7 +3,9 @@
 
 #include "log.h"
 
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Capture one formatted record in memory instead of a file. */
@@ -53,6 +55,7 @@ static void test_filtering_and_format(void)
 
     dx_test_begin("log/filter");
 
+    memset(&log, 0, sizeof(log));
     log.out = NULL;
     log.level = DX_LOG_INFO;
 
@@ -112,6 +115,7 @@ static void test_access_log(void)
     dx_log_t log;
     char buf[1024];
 
+    memset(&log, 0, sizeof(log));
     log.level = DX_LOG_INFO;
 
     dx_test_begin("log/access_common");
@@ -164,11 +168,102 @@ static void test_access_log(void)
                   NULL);
 }
 
+/*
+ * v0.5.0: worker threads share one logger. Every record must land as a whole
+ * line (the mutex serializes the fprintf/vfprintf/fputc sequence), so the
+ * number of newlines equals the number of records and no line is interleaved.
+ */
+#define LOG_THREADS 4
+#define LOG_RECORDS 250
+
+static dx_log_t g_shared_log;
+
+static void *log_writer(void *arg)
+{
+    long id = (long)arg;
+    int i;
+
+    for (i = 0; i < LOG_RECORDS; i++) {
+        dx_log_write(&g_shared_log, DX_LOG_INFO, "thread %ld record %d", id, i);
+    }
+    return NULL;
+}
+
+static void test_thread_safety(void)
+{
+    FILE *tmp = tmpfile();
+    pthread_t threads[LOG_THREADS];
+    char *buf;
+    long size;
+    long i;
+    long lines = 0;
+    bool all_well_formed = true;
+
+    dx_test_begin("log/thread_safety");
+
+    if (tmp == NULL) {
+        CHECK(false);
+        return;
+    }
+    dx_log_init(&g_shared_log, tmp, DX_LOG_INFO);
+
+    for (i = 0; i < LOG_THREADS; i++) {
+        CHECK(pthread_create(&threads[i], NULL, log_writer, (void *)i) == 0);
+    }
+    for (i = 0; i < LOG_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    /* Read the whole file back. */
+    fflush(tmp);
+    fseek(tmp, 0, SEEK_END);
+    size = ftell(tmp);
+    fseek(tmp, 0, SEEK_SET);
+    buf = (char *)malloc((size_t)size + 1u);
+    if (buf == NULL) {
+        CHECK(false);
+        dx_log_destroy(&g_shared_log);
+        fclose(tmp);
+        return;
+    }
+    if (fread(buf, 1u, (size_t)size, tmp) != (size_t)size) {
+        all_well_formed = false;
+    }
+    buf[size] = '\0';
+
+    /* Every line must be a complete record with a level tag and a newline. */
+    {
+        char *line = buf;
+        char *nl;
+
+        while ((nl = strchr(line, '\n')) != NULL) {
+            *nl = '\0';
+            lines++;
+            if (strstr(line, "[info]") == NULL || strncmp(line, "2", 1) != 0) {
+                all_well_formed = false;
+            }
+            line = nl + 1;
+        }
+        /* No trailing partial record may be left behind. */
+        if (*line != '\0') {
+            all_well_formed = false;
+        }
+    }
+
+    CHECK_EQ(lines, (long)(LOG_THREADS * LOG_RECORDS));
+    CHECK(all_well_formed);
+
+    free(buf);
+    dx_log_destroy(&g_shared_log);
+    fclose(tmp);
+}
+
 int main(void)
 {
     test_levels();
     test_filtering_and_format();
     test_access_log();
+    test_thread_safety();
     printf("test_log: ");
     return dx_test_summary();
 }

@@ -4,6 +4,44 @@
 #include <string.h>
 #include <time.h>
 
+void dx_log_init(dx_log_t *log, FILE *out, dx_log_level_t level)
+{
+    if (log == NULL) {
+        return;
+    }
+    memset(log, 0, sizeof(*log));
+    log->out = out;
+    log->level = level;
+    if (pthread_mutex_init(&log->mutex, NULL) == 0) {
+        log->mutex_ready = true;
+    }
+    /* A failed init leaves mutex_ready false: logging degrades to unlocked. */
+}
+
+void dx_log_destroy(dx_log_t *log)
+{
+    if (log == NULL || !log->mutex_ready) {
+        return;
+    }
+    pthread_mutex_destroy(&log->mutex);
+    log->mutex_ready = false;
+}
+
+/* Serialize one record when the logger was prepared for concurrent use. */
+static void log_lock(const dx_log_t *log)
+{
+    if (log != NULL && log->mutex_ready) {
+        (void)pthread_mutex_lock((pthread_mutex_t *)&log->mutex);
+    }
+}
+
+static void log_unlock(const dx_log_t *log)
+{
+    if (log != NULL && log->mutex_ready) {
+        (void)pthread_mutex_unlock((pthread_mutex_t *)&log->mutex);
+    }
+}
+
 const char *dx_log_level_name(dx_log_level_t level)
 {
     switch (level) {
@@ -77,12 +115,14 @@ void dx_log_write(dx_log_t *log, dx_log_level_t level, const char *fmt, ...)
      * A failed log write is deliberately ignored: the logger must never turn
      * a recoverable problem into a fatal one, and it must not use itself.
      */
+    log_lock(log);
     (void)fprintf(log->out, "%s [%s] ", stamp, dx_log_level_name(level));
     va_start(ap, fmt);
     (void)vfprintf(log->out, fmt, ap);
     va_end(ap);
     (void)fputc('\n', log->out);
     (void)fflush(log->out);
+    log_unlock(log);
 }
 
 /* --------------------------- Access log -------------------------------- */
@@ -193,8 +233,10 @@ void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const c
     if (pos + 2u < sizeof(line)) {
         line[pos++] = '\n';
         line[pos] = '\0';
+        log_lock(log);
         (void)fwrite(line, 1, pos, log->out);
         (void)fflush(log->out);
+        log_unlock(log);
     }
 #undef ACC_APPEND
 }

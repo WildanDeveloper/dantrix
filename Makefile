@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.4.2
+VERSION := 0.5.0
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -175,15 +175,21 @@ $(BUILD)/%_asan_bin: $(TESTS)/test_%.c $(LIB_SRCS)
 	    -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 	    -I$(SRC) -I$(TESTS) $^ -o $@ $(LDFLAGS) -lpthread
 
-test-tsan:
+test-tsan: tsan
+	@mkdir -p $(BUILD)/tsan
 	@fail=0; \
 	for src in $(TEST_SRCS); do \
 	    name=$$(basename $$src .c); \
+	    echo "== build/tsan/$${name#test_}"; \
 	    $(CC) $(STD) $(DEFS) $(WARN) -O1 -g -fsanitize=thread \
 	        -I$(SRC) -I$(TESTS) $(LIB_SRCS) $$src \
-	        -o $(BUILD)/$${name#test_}_tsan -lpthread || exit 1; \
+	        -o $(BUILD)/tsan/$${name#test_} -lpthread || fail=1; \
+	    if [ $$fail -eq 0 ]; then ./$(BUILD)/tsan/$${name#test_} || fail=1; fi; \
 	done; \
-	echo "built $(words $(TEST_SRCS)) TSan test binaries in $(BUILD)"
+	if [ $$fail -ne 0 ]; then echo "tsan unit tests FAILED"; exit 1; fi; \
+	echo "all tsan unit tests passed"
+	@echo "== tests/tsan_test.py (multi-worker concurrency)"
+	@python3 tests/tsan_test.py $(BUILD)/tsan/dantrix
 
 valgrind:
 	@command -v valgrind >/dev/null 2>&1 || { \

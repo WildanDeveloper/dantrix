@@ -16,6 +16,31 @@
  */
 int dx_listen_tcp(const char *addr, int port, int backlog);
 
+/*
+ * Like dx_listen_tcp(), but additionally sets SO_REUSEPORT before bind() so
+ * that several listeners (one per worker) can share the same address and port.
+ * The kernel then spreads incoming connections across them by 4-tuple hash,
+ * which removes the single acceptor as a contention point. Same return
+ * contract as dx_listen_tcp().
+ */
+int dx_listen_tcp_reuseport(const char *addr, int port, int backlog);
+
+/*
+ * Create an eventfd in non-blocking close-on-exec mode. Returns the fd or -1
+ * with errno set. The multi-worker server uses one per worker to wake it out
+ * of epoll_wait() from the main thread.
+ */
+int dx_eventfd(void);
+
+/*
+ * Add 1 to an eventfd's counter. A saturated counter (EAGAIN) is treated as
+ * success: the worker is already flagged to wake up. Returns 0 or -1.
+ */
+int dx_eventfd_signal(int fd);
+
+/* Consume the eventfd's pending counter. 0 also when nothing was pending. */
+int dx_eventfd_drain(int fd);
+
 /* Put an already open fd into non-blocking mode. Returns 0 or -1. */
 int dx_set_nonblock(int fd);
 

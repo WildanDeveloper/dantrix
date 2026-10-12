@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <sched.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -203,6 +204,36 @@ static void test_http_date(void)
     CHECK(strstr(buf, ", ") != NULL);
 }
 
+static void test_affinity(void)
+{
+    cpu_set_t allowed;
+    int cpu;
+    bool found = false;
+
+    dx_test_begin("util/affinity");
+
+    /*
+     * Pinning to a CPU that this process is actually allowed to run on must
+     * succeed. sched_getaffinity() tells us which one to pick so the test is
+     * correct on single-core CI runners too.
+     */
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) == 0) {
+        for (cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+            if (CPU_ISSET((size_t)cpu, &allowed)) {
+                CHECK_EQ(dx_set_affinity((unsigned)cpu), 0);
+                found = true;
+                break;
+            }
+        }
+    }
+    CHECK(found);
+
+    /* Out of range is rejected, not silently clamped. */
+    CHECK_EQ(dx_set_affinity((unsigned)CPU_SETSIZE), -1);
+    CHECK_EQ(errno, EINVAL);
+}
+
 int main(void)
 {
     test_strlcpy();
@@ -212,6 +243,7 @@ int main(void)
     test_parse_ull();
     test_parse_size();
     test_http_date();
+    test_affinity();
     printf("test_util: ");
     return dx_test_summary();
 }

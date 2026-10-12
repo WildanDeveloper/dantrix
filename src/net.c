@@ -6,9 +6,12 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+static int dx_listen_tcp_common(const char *addr, int port, int backlog, bool reuseport);
 
 const char *dx_strerror(int err)
 {
@@ -44,6 +47,16 @@ int dx_set_tcp_nodelay(int fd)
 }
 
 int dx_listen_tcp(const char *addr, int port, int backlog)
+{
+    return dx_listen_tcp_common(addr, port, backlog, false);
+}
+
+int dx_listen_tcp_reuseport(const char *addr, int port, int backlog)
+{
+    return dx_listen_tcp_common(addr, port, backlog, true);
+}
+
+static int dx_listen_tcp_common(const char *addr, int port, int backlog, bool reuseport)
 {
     struct sockaddr_storage ss;
     struct sockaddr_in *sin = (struct sockaddr_in *)&ss;
@@ -94,6 +107,16 @@ int dx_listen_tcp(const char *addr, int port, int backlog)
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) != 0) {
         goto fail;
     }
+    if (reuseport) {
+        /*
+         * SO_REUSEPORT must be set on every listener before bind(); the kernel
+         * then load-balances new connections across the sockets sharing the
+         * 4-tuple. Without it the second bind() would fail with EADDRINUSE.
+         */
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on)) != 0) {
+            goto fail;
+        }
+    }
     if (v6) {
         /* Dual stack: accept IPv4 clients on an IPv6 wildcard listener. */
         int off = 0;
@@ -116,4 +139,44 @@ fail: {
     errno = saved;
     return -1;
 }
+}
+
+int dx_eventfd(void)
+{
+    return eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+}
+
+int dx_eventfd_signal(int fd)
+{
+    uint64_t one = 1;
+
+    if (fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (write(fd, &one, sizeof(one)) == (ssize_t)sizeof(one)) {
+        return 0;
+    }
+    if (errno == EAGAIN) {
+        /* Counter saturated: the wakeup is already pending, so this is fine. */
+        return 0;
+    }
+    return -1;
+}
+
+int dx_eventfd_drain(int fd)
+{
+    uint64_t value = 0;
+
+    if (fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (read(fd, &value, sizeof(value)) == (ssize_t)sizeof(value)) {
+        return 0;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return 0; /* nothing was pending: not an error */
+    }
+    return -1;
 }

@@ -12,6 +12,52 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.5.0] - 2026-10-12
+
+Multi-core: one event loop per thread, no locks in the hot path.
+
+### Added
+
+- **Multi-worker `SO_REUSEPORT` (`-w/--workers N`).** `N > 1` spawns `N` worker
+  threads, each with its own `epoll` instance, connection pool, buffer pool and
+  timer wheel, and its own listener socket bound to the same address with
+  `SO_REUSEPORT`; the kernel then load-balances new connections across the
+  listeners by 4-tuple hash. Nothing is shared in the hot path, so there are no
+  locks there.
+- **Shared-listener fallback (`--reuseport off`).** All workers register one
+  listener in their epoll with `EPOLLEXCLUSIVE` (Linux ≥ 4.5), so a new
+  connection wakes exactly one worker. It is also selected automatically when
+  the kernel rejects `SO_REUSEPORT`, and the listener is then owned by the
+  orchestrator, which closes it exactly once.
+- **`eventfd` shutdown channel.** The main thread no longer runs the event loop
+  when `N > 1`: it blocks `SIGINT`/`SIGTERM` process-wide before the threads
+  exist, waits in `sigwait()`, and on the stop signal writes to every worker's
+  `eventfd`. A worker's wake-up handler drains the counter and enters the same
+  graceful drain as the single-worker path. No state is written cross-thread
+  and no code runs inside a signal handler.
+- **Per-worker statistics.** `dx_worker_stats()` snapshots the accepted,
+  rejected and closed counters; the orchestrator sums them after `join()` and
+  logs the totals.
+- **Optional CPU affinity (`--cpu-affinity on|off`).** Pins worker *i* to core
+  *i*. A failure (fewer cores than workers, restricted mask) is logged as a
+  warning and never fatal.
+- **Thread-safe logging.** `dx_log_init()` attaches a mutex to a logger so
+  error and access records from several workers cannot interleave mid-line;
+  hand-built loggers (the unit tests) keep working unlocked.
+- `tests/tsan_test.py`: drives concurrent traffic through the TSan build in
+  both listener modes and fails on any ThreadSanitizer report; `make test-tsan`
+  now builds **and runs** every unit test under TSan before running it.
+- New `tests/unit/test_net.c` covering listener creation, `SO_REUSEPORT`
+  sharing and the eventfd channel; new unit checks for CPU affinity and for
+  concurrent log writes.
+
+### Fixed
+
+- **`-w/--workers` never accepted its argument.** The short option `'w'` was
+  declared without `:` in the getopt string, so `-w 4` left `optarg` NULL and
+  the flag failed with "invalid --workers '(null)'" while `--workers 4` worked.
+  The declaration now matches the usage text.
+
 ## [0.4.2] - 2026-10-12
 
 Second audit round. Every defect was reproduced against the running server

@@ -22,36 +22,50 @@ dx_log_t *dx_worker_log(dx_worker_t *w)
 }
 
 static int listener_arm(dx_worker_t *w);
+static int wake_arm(dx_worker_t *w);
 
-int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *log,
-                   const volatile sig_atomic_t *stop_flag, const dx_http_limits_t *limits,
-                   dx_log_t *access_log, dx_log_format_t log_format, dx_fs_t *fs, dx_mime_t *mime,
-                   const dx_static_opts_t *static_opts, const dx_lifecycle_opts_t *life)
+int dx_worker_init(dx_worker_t *w, const dx_worker_opts_t *opts)
 {
-    if (w == NULL || listen_fd < 0 || max_conns == 0) {
+    if (w == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    /*
+     * Zero and neutralise the descriptors before any validation: a caller that
+     * runs dx_worker_destroy() after a failed init must never close fd 0, which
+     * a plain calloc()/stack slot would present as an "open" descriptor.
+     */
+    memset(w, 0, sizeof(*w));
+    w->epfd = -1;
+    w->listen_fd = -1;
+    w->wake_fd = -1;
+
+    if (opts == NULL || opts->listen_fd < 0 || opts->max_conns == 0) {
         errno = EINVAL;
         return -1;
     }
 
-    memset(w, 0, sizeof(*w));
-    w->epfd = -1;
-    w->listen_fd = listen_fd;
+    w->listen_fd = opts->listen_fd;
+    w->wake_fd = (opts->wake_fd >= 0) ? opts->wake_fd : -1;
+    w->worker_id = opts->worker_id;
+    w->owns_listen_fd = opts->owns_listen_fd;
+    w->exclusive_listen = opts->exclusive_listen;
     dx_timer_node_reset(&w->accept_timer);
-    w->log = log;
-    w->access_log = access_log;
-    w->log_format = log_format;
-    w->fs = fs;
-    w->mime = mime;
-    if (limits != NULL) {
-        w->limits = *limits;
+    w->log = opts->log;
+    w->access_log = opts->access_log;
+    w->log_format = opts->log_format;
+    w->fs = opts->fs;
+    w->mime = opts->mime;
+    if (opts->limits != NULL) {
+        w->limits = *opts->limits;
     } else {
         dx_http_limits_default(&w->limits);
     }
-    if (static_opts != NULL) {
-        w->static_opts = *static_opts;
+    if (opts->static_opts != NULL) {
+        w->static_opts = *opts->static_opts;
     }
-    if (life != NULL) {
-        w->life = *life;
+    if (opts->life != NULL) {
+        w->life = *opts->life;
     }
     if (w->static_opts.cache_control == NULL) {
         w->static_opts.cache_control = "";
@@ -62,10 +76,10 @@ int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *lo
     if (w->life.keepalive_requests == 0) {
         w->life.keepalive_requests = 1000u;
     }
-    w->max_conns = max_conns;
-    w->stop_flag = stop_flag;
+    w->max_conns = opts->max_conns;
+    w->stop_flag = opts->stop_flag;
 
-    w->pool = dx_pool_create(DX_CONN_CHUNK_SLOTS, max_conns);
+    w->pool = dx_pool_create(DX_CONN_CHUNK_SLOTS, opts->max_conns);
     if (w->pool == NULL) {
         errno = ENOMEM;
         return -1;
@@ -86,6 +100,9 @@ int dx_worker_init(dx_worker_t *w, int listen_fd, size_t max_conns, dx_log_t *lo
         return -1;
     }
 
+    if (wake_arm(w) != 0) {
+        return -1;
+    }
     if (listener_arm(w) != 0) {
         return -1;
     }
@@ -101,10 +118,15 @@ void dx_worker_destroy(dx_worker_t *w)
         (void)close(w->epfd);
         w->epfd = -1;
     }
-    if (w->listen_fd >= 0) {
+    /*
+     * Only a worker that owns its listener closes it. In the shared-listener
+     * fallback the descriptor belongs to the orchestrator and is closed once,
+     * after every worker has joined.
+     */
+    if (w->owns_listen_fd && w->listen_fd >= 0) {
         (void)close(w->listen_fd);
-        w->listen_fd = -1;
     }
+    w->listen_fd = -1;
     dx_timer_wheel_cancel(w->timers, &w->accept_timer);
     dx_pool_destroy(w->pool);
     w->pool = NULL;
@@ -112,6 +134,16 @@ void dx_worker_destroy(dx_worker_t *w)
     w->bufs = NULL;
     dx_timer_wheel_destroy(w->timers);
     w->timers = NULL;
+}
+
+void dx_worker_stats(const dx_worker_t *w, dx_worker_stats_t *out)
+{
+    if (w == NULL || out == NULL) {
+        return;
+    }
+    out->accepted = w->accepted_total;
+    out->rejected = w->rejected_total;
+    out->closed = w->closed_total;
 }
 
 /* Format the peer address for the access log; "-" when unknown. */
@@ -291,14 +323,48 @@ static int conn_update_interest(dx_worker_t *w, dx_conn_t *conn)
 static int listener_arm(dx_worker_t *w)
 {
     struct epoll_event ev;
+    uint32_t events = EPOLLIN;
 
     if (w->epfd < 0 || w->listen_fd < 0) {
         return -1;
     }
+    if (w->exclusive_listen) {
+        /*
+         * Shared-listener mode: without this flag every new connection wakes
+         * the whole worker group (thundering herd).
+         */
+        events |= EPOLLEXCLUSIVE;
+    }
+    memset(&ev, 0, sizeof(ev));
+    ev.events = events;
+    ev.data.u64 = dx_tag_listener();
+    if (epoll_ctl(w->epfd, EPOLL_CTL_ADD, w->listen_fd, &ev) == 0) {
+        return 0;
+    }
+    if (w->exclusive_listen && errno == EINVAL) {
+        /* Kernel too old for EPOLLEXCLUSIVE: accept without it. */
+        w->exclusive_listen = false;
+        ev.events = EPOLLIN;
+        return epoll_ctl(w->epfd, EPOLL_CTL_ADD, w->listen_fd, &ev);
+    }
+    return -1;
+}
+
+/* Register the borrowed wake_fd in the epoll set. Returns 0 or -1. */
+static int wake_arm(dx_worker_t *w)
+{
+    struct epoll_event ev;
+
+    if (w->wake_fd < 0) {
+        return 0; /* single-worker mode stops through the signal flag */
+    }
+    if (w->epfd < 0) {
+        return -1;
+    }
     memset(&ev, 0, sizeof(ev));
     ev.events = EPOLLIN;
-    ev.data.u64 = dx_tag_listener();
-    return epoll_ctl(w->epfd, EPOLL_CTL_ADD, w->listen_fd, &ev);
+    ev.data.u64 = dx_tag_wake();
+    return epoll_ctl(w->epfd, EPOLL_CTL_ADD, w->wake_fd, &ev);
 }
 
 /*
@@ -377,6 +443,15 @@ static void handle_event(dx_worker_t *w, const struct epoll_event *ev)
 
     if (kind == DX_TAG_KIND_LISTENER) {
         accept_loop(w);
+        return;
+    }
+    if (kind == DX_TAG_KIND_WAKE) {
+        /*
+         * A wakeup from the main thread (shutdown). Drain the counter and set
+         * the local stop flag; the loop condition observes it on the next turn.
+         */
+        (void)dx_eventfd_drain(w->wake_fd);
+        w->stop_requested = true;
         return;
     }
     if (kind != DX_TAG_KIND_CONN) {
@@ -573,7 +648,12 @@ int dx_worker_run(dx_worker_t *w)
         int timeout_ms = dx_timer_wheel_next_timeout_ms(w->timers, now);
         int n;
         int i;
-        bool stopping = (w->stop_flag != NULL && *w->stop_flag != 0);
+        /*
+         * Two stop sources: the signal flag of the single-worker mode and the
+         * wake_fd wakeup of the worker-thread mode. Both are only touched by
+         * this thread.
+         */
+        bool stopping = w->stop_requested || (w->stop_flag != NULL && *w->stop_flag != 0);
 
         if (!stopping && !w->draining) {
             /* Normal operation: wait for the nearest timer or an event. */
