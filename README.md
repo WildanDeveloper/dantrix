@@ -264,19 +264,19 @@ Every connection is a small state machine. `epoll` events drive transitions betw
 ```mermaid
 stateDiagram-v2
     [*] --> READ_HEADERS: accept
-    READ_HEADERS --> READ_BODY: header lengkap, ada body
-    READ_HEADERS --> WRITE_HEADERS: header lengkap, tanpa body
-    READ_HEADERS --> CLOSING: timeout, error, atau EOF
-    READ_BODY --> WRITE_HEADERS: body selesai dibaca
-    READ_BODY --> CLOSING: timeout atau terlalu besar
-    WRITE_HEADERS --> SEND_FILE: respons punya body file
-    WRITE_HEADERS --> IDLE: selesai dan keep-alive
-    WRITE_HEADERS --> CLOSING: selesai dan close
-    SEND_FILE --> IDLE: selesai dan keep-alive
-    SEND_FILE --> CLOSING: selesai dan close atau error
-    IDLE --> READ_HEADERS: byte pertama request baru
+    READ_HEADERS --> READ_BODY: header block complete, body present
+    READ_HEADERS --> WRITE_HEADERS: header block complete, no body
+    READ_HEADERS --> CLOSING: timeout, error, or EOF
+    READ_BODY --> WRITE_HEADERS: body fully read
+    READ_BODY --> CLOSING: timeout or too large
+    WRITE_HEADERS --> SEND_FILE: the response has a file body
+    WRITE_HEADERS --> IDLE: done and keep-alive
+    WRITE_HEADERS --> CLOSING: done and close
+    SEND_FILE --> IDLE: done and keep-alive
+    SEND_FILE --> CLOSING: done and close, or error
+    IDLE --> READ_HEADERS: first byte of a new request
     IDLE --> CLOSING: keepalive timeout
-    CLOSING --> [*]: close fd dan kembalikan ke pool
+    CLOSING --> [*]: close fd and return to the pool
 ```
 
 | State | Meaning | `epoll` interest | Timeout that applies |
@@ -324,7 +324,7 @@ for (;;) {
         case DX_TAG_CONN: {
             dx_conn_t *c = pool_lookup(&w->pool, tag);
             if (c == NULL)
-                break;                       /* slot sudah didaur ulang: abaikan event usang */
+                break;                       /* slot recycled: drop the stale event */
             if (ev & (EPOLLERR | EPOLLHUP)) {
                 conn_close(w, c);
                 break;
@@ -477,9 +477,9 @@ sudo apk add build-base git linux-headers
 ```bash
 git clone https://github.com/WildanDeveloper/dantrix.git
 cd dantrix
-make                 # build rilis -> bin/dantrix
-make test            # jalankan unit dan integration test
-sudo make install    # opsional: pasang ke /usr/local
+make                 # release build -> bin/dantrix
+make test            # run the unit and integration tests
+sudo make install    # optional: install to /usr/local
 ```
 
 Verify:
@@ -517,7 +517,7 @@ Verify:
 ```bash
 make CC=clang
 make release PREFIX=/opt/dantrix
-make install DESTDIR=/tmp/pkgroot       # untuk membuat paket
+make install DESTDIR=/tmp/pkgroot       # for packaging
 ```
 
 ### `make install` results
@@ -549,17 +549,17 @@ Dockerfile and Compose details are in the [Deployment](#deployment) section.
 ## Quick Start
 
 ```bash
-# 1. Bangun
+# 1. Build
 make
 
-# 2. Siapkan konten
+# 2. Prepare some content
 mkdir -p public
-echo '<h1>Halo dari Dantrix!</h1>' > public/index.html
+echo '<h1>Hello from Dantrix!</h1>' > public/index.html
 
-# 3. Jalankan
+# 3. Run
 ./bin/dantrix --root ./public --port 8080
 
-# 4. Uji dari terminal lain
+# 4. Test from another terminal
 curl -i http://localhost:8080/
 ```
 
@@ -576,31 +576,31 @@ ETag: "6acafefa-1c"
 Accept-Ranges: bytes
 X-Content-Type-Options: nosniff
 
-<h1>Halo dari Dantrix!</h1>
+<h1>Hello from Dantrix!</h1>
 ```
 
 ### Try the other features
 
 ```bash
-# HEAD: header saja
+# HEAD: headers only
 curl -I http://localhost:8080/
 
-# Range: 4 byte pertama -> 206 Partial Content
+# Range: the first 4 bytes -> 206 Partial Content
 curl -i -H 'Range: bytes=0-3' http://localhost:8080/
 
-# Request kondisional -> 304 Not Modified
+# Conditional request -> 304 Not Modified
 curl -i -H 'If-None-Match: "6acafefa-1c"' http://localhost:8080/
 
-# HTTP/1.0 (tanpa keep-alive secara default)
+# HTTP/1.0 (no keep-alive by default)
 curl -i --http1.0 http://localhost:8080/
 
-# Path traversal harus ditolak (--path-as-is mencegah curl merapikan "..")
+# Path traversal must be rejected (--path-as-is stops curl from tidying "..")
 curl -i --path-as-is http://localhost:8080/../../etc/passwd      # -> 400
 
-# Metode yang tidak didukung -> 405 + header Allow
+# Unsupported method -> 405 + the Allow header
 curl -i -X POST http://localhost:8080/
 
-# Request mentah lewat netcat ("Connection: close" agar nc selesai)
+# A raw request through netcat ("Connection: close" so nc finishes)
 printf 'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' | nc localhost 8080
 ```
 
@@ -609,71 +609,95 @@ printf 'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' | nc loc
 ## Usage
 
 ```text
-Dantrix x.y.z - server HTTP/1.1 berbasis epoll
+Dantrix x.y.z - epoll based HTTP/1.1 server
 
-Penggunaan:
-  dantrix [OPSI]
+Usage:
+  dantrix [OPTION]...
 
-Umum:
-  -c, --config FILE        Path file konfigurasi
-  -t, --test-config        Validasi konfigurasi lalu keluar
-      --print-config       Cetak konfigurasi efektif lalu keluar
-  -o, --option KEY=VALUE   Timpa kunci konfigurasi apa pun (boleh diulang)
-  -h, --help               Tampilkan bantuan ini
-  -V, --version            Tampilkan versi dan fitur yang dikompilasi
+General:
+  -c, --config FILE        Configuration file (INI style)
+  -t, --test-config        Validate the configuration and exit
+      --print-config       Print the effective configuration and exit
+  -o, --option KEY=VALUE   Override any configuration key (repeatable)
+  -h, --help               Show this help
+  -V, --version            Show version and compiled features
 
-Jaringan:
-  -b, --bind ADDR          Alamat bind                         [0.0.0.0]
-  -p, --port PORT          Port                                [8080]
-  -w, --workers N          Jumlah worker (0 = satu per CPU)    [1]
-      --backlog N          Antrean listen                      [4096]
-      --max-conns N        Maks koneksi per worker             [16384]
-      --no-reuseport       Satu listener bersama (EPOLLEXCLUSIVE)
-      --cpu-affinity       Pin tiap worker ke satu core
-      --edge-triggered     Gunakan EPOLLET
+Network:
+  -b, --bind ADDR          Bind address                       [0.0.0.0]
+  -p, --port PORT          TCP port                           [8080]
+  -w, --workers N          Worker threads (0 = one per CPU)   [1]
+      --backlog N          listen() queue                     [4096]
+      --max-conns N        Connection limit per worker        [16384]
+      --no-reuseport       Shared listener with EPOLLEXCLUSIVE
+      --cpu-affinity       Pin worker i to CPU i
 
-File statis:
+Static files:
   -r, --root DIR           Document root                       [./public]
-      --index NAME         Nama file index                     [index.html]
-      --dir-listing        Aktifkan daftar direktori
+      --index NAME         Directory index file               [index.html]
+      --directory-listing  on|off (listing when no index)     [off]
+      --sendfile           on|off (else pread+send)           [on]
+      --sendfile-chunk N   Bytes per sendfile call            [1m]
+      --etag               on|off (send and evaluate ETag)    [on]
+      --follow-symlinks    on|off (links must stay in root)    [off]
+      --hidden-files       on|off (serve dot segments)        [off]
+      --mime-types FILE    Extra mime.types table             [none]
+      --default-type TYPE  Type for unknown extensions        [application/octet-stream]
+      --cache-control VAL  Cache-Control header value         [none]
+      --server-tokens      on|off (Server: Dantrix/ver)       [on]
+
+HTTP limits:
+      --max-request-line N Request line limit in bytes        [8192]
+      --max-header-size N  Whole-request limit in bytes        [16384]
+      --max-headers N      Maximum header count per request   [100]
+      --max-body-size N    Request body read and discarded     [1m]
+
+Connections and timeouts:
+      --keepalive-requests N  Requests before closing       [1000]
+      --header-timeout T   Request header limit (s/ms/m)   [10s]
+      --body-timeout T     Request body limit              [30s]
+      --send-timeout T     Response write limit            [30s]
+      --keepalive-timeout T Idle connection limit          [30s]
+      --shutdown-timeout T Graceful shutdown budget        [10s]
 
 Logging:
-      --access-log DEST    off, stdout, stderr, atau path      [stdout]
-      --error-log DEST     stderr atau path                    [stderr]
-      --log-level LEVEL    error, warn, info, debug            [info]
-      --log-format FMT     common, combined, json              [combined]
+      --error-log DEST     stderr, stdout, or a file path     [stderr]
+      --log-level LEVEL    debug, info, warn, error           [info]
+      --access-log DEST    off, stderr, stdout, or a file     [off]
+      --log-format FMT     common or combined                 [combined]
 
-Proses:
-  -d, --daemon             Jalankan di latar belakang
-      --pid-file FILE      Tulis PID ke FILE
-      --user NAME          Turunkan hak akses ke user ini setelah bind
-      --group NAME         Turunkan hak akses ke group ini setelah bind
-      --status-path PATH   Endpoint status JSON (loopback saja)   [off]
+Process:
+      --daemon             Run in the background
+      --pid-file FILE      Write the PID to this file
+      --user NAME          Drop privileges to this user after bind
+      --group NAME         Drop privileges to this group after bind
+      --status-path PATH   JSON status endpoint (loopback only) [off]
+
+Exit codes: 0 ok, 1 fatal error, 2 invalid arguments.
 ```
 
 ### Examples
 
 ```bash
-# Port 80 sebagai non-root (Linux)
+# Port 80 as a non-root user (Linux)
 sudo setcap 'cap_net_bind_service=+ep' ./bin/dantrix
 ./bin/dantrix -p 80 -r /var/www
 
-# 4 worker, access log dimatikan (untuk benchmark)
+# 4 workers, access log disabled (for benchmarks)
 ./bin/dantrix -w 4 --access-log off
 
-# Pin worker ke core CPU
+# Pin each worker to a CPU core
 ./bin/dantrix -w 4 --cpu-affinity
 
 # IPv6 dual-stack
 ./bin/dantrix -b ::
 
-# Menimpa kunci konfigurasi apa pun
+# Override any configuration key
 ./bin/dantrix -o keepalive_timeout=60 -o max_headers=50
 
-# Validasi file konfigurasi tanpa menjalankan server
+# Validate a configuration file without running the server
 ./bin/dantrix -t -c /etc/dantrix/dantrix.conf
 
-# Lihat konfigurasi efektif setelah semua sumber digabung
+# Print the effective configuration after merging every source
 ./bin/dantrix --print-config -c /etc/dantrix/dantrix.conf -p 9000
 ```
 
@@ -720,31 +744,31 @@ All the values below are the built-in defaults.
 ```ini
 # /etc/dantrix/dantrix.conf
 
-## Jaringan
-bind            = 0.0.0.0        # gunakan :: untuk IPv6 dual-stack
+## Network
+bind            = 0.0.0.0        # use :: for IPv6 dual-stack
 port            = 8080
-workers         = 1              # 0 = satu per core; v0.6 default 1
-backlog         = 4096           # dibatasi oleh net.core.somaxconn
+workers         = 1              # 0 = one per online CPU
+backlog         = 4096           # capped by net.core.somaxconn
 reuseport       = true
 max_connections = 16384          # per worker
 cpu_affinity    = false
 edge_triggered  = false
 
-## Timeout
+## Timeouts (seconds)
 header_timeout    = 10
 body_timeout      = 30
 send_timeout      = 30
 keepalive_timeout = 30
 shutdown_timeout  = 10
 
-## Batas HTTP
+## HTTP limits
 keepalive_requests = 1000
 max_request_line   = 8k
 max_header_size    = 16k
 max_headers        = 100
 max_body_size      = 1m
 
-## File statis
+## Static files
 root              = ./public
 index             = index.html
 directory_listing = false
@@ -760,26 +784,26 @@ server_tokens     = true
 # add_header      = X-Frame-Options: DENY
 # add_header      = Referrer-Policy: no-referrer
 
-## Opsi socket TCP
+## TCP socket options
 tcp_nodelay      = true
-tcp_defer_accept = 0             # detik; 0 = nonaktif
-tcp_fastopen     = 0             # panjang antrean; 0 = nonaktif
-# socket_rcvbuf  = 0             # 0 = biarkan autotuning kernel
+tcp_defer_accept = 0             # seconds; 0 = disabled
+tcp_fastopen     = 0             # queue length; 0 = disabled
+# socket_rcvbuf  = 0             # 0 = leave kernel autotuning alone
 # socket_sndbuf  = 0
 
 ## Logging
-access_log = off                 # off, stdout, stderr, atau path file
+access_log = off                 # off, stdout, stderr, or a file path
 error_log  = stderr
 log_level  = info                # error, warn, info, debug
-log_format = combined            # common, combined, json
+log_format = combined            # common or combined
 
-## Proses dan hak akses
+## Process and privileges
 daemonize = false
 # pid_file = /run/dantrix.pid
 # user     = dantrix
 # group    = dantrix
 
-## Endpoint status (nonaktif jika kosong; hanya dari loopback)
+## Status endpoint (disabled when empty; loopback only)
 # status_path = /__dantrix/status
 ```
 
@@ -1132,18 +1156,18 @@ dantrix/
 │   │   └── feature_request.md
 │   └── PULL_REQUEST_TEMPLATE.md
 ├── bench/
-│   ├── make_files.sh             # membuat berkas uji 1k, 10k, 100k, 1m, 100m
-│   ├── run_wrk.sh                # skenario throughput dan latensi
-│   ├── run_all.sh                # semua skenario (dipanggil `make bench`)
-│   ├── compare_nginx.sh          # perbandingan dengan Nginx
-│   ├── nginx.conf                # konfigurasi Nginx pembanding
-│   ├── mixed.lua                 # skrip wrk: campuran ukuran file
-│   ├── slowloris.py              # uji ketahanan koneksi lambat
+│   ├── make_files.sh             # create the 1k, 10k, 100k, 1m, 100m test files
+│   ├── run_wrk.sh                # throughput and latency scenarios
+│   ├── run_all.sh                # every scenario (called by `make bench`)
+│   ├── compare_nginx.sh          # comparison against Nginx
+│   ├── nginx.conf                # Nginx comparison configuration
+│   ├── mixed.lua                 # wrk script: mixed file sizes
+│   ├── slowloris.py              # slow-connection resilience test
 │   ├── tools/
-│   │   └── idle_conns.c          # menahan N koneksi idle (uji C10K)
-│   └── results/                  # hasil per tanggal dan commit
+│   │   └── idle_conns.c          # hold N idle connections (C10K test)
+│   └── results/                  # results per date and commit
 ├── conf/
-│   ├── dantrix.conf              # contoh konfigurasi lengkap
+│   ├── dantrix.conf              # full example configuration
 │   └── mime.types
 ├── deploy/
 │   ├── Dockerfile
@@ -1157,12 +1181,12 @@ dantrix/
 │   ├── TUNING.md
 │   ├── BENCHMARKING.md
 │   ├── SECURITY_MODEL.md
-│   └── adr/                      # catatan keputusan arsitektur
+│   └── adr/                      # architecture decision records
 │       ├── 0001-epoll-bukan-select-poll.md
 │       ├── 0002-level-triggered-default.md
 │       ├── 0003-reuseport-shared-nothing.md
 │       └── 0004-hashed-timing-wheel.md
-├── examples/                     # materi belajar, satu berkas per tahap
+├── examples/                     # learning material, one file per stage
 │   ├── 01_echo_blocking.c
 │   ├── 02_echo_thread_per_conn.c
 │   ├── 03_echo_epoll.c
@@ -1172,24 +1196,24 @@ dantrix/
 │   ├── fuzz_path.c
 │   └── corpus/                   # seed input
 ├── src/
-│   ├── main.c                    # CLI: flag, durasi, validasi
-│   ├── dantrix.h                 # konstanta, makro, versi
-│   ├── server.c / server.h       # bring-up: listener, sinyal, siklus worker
-│   ├── worker.c / worker.h       # event loop epoll, accept, drain, timeout
-│   ├── conn.c / conn.h           # slot koneksi, pool, alur HTTP per koneksi
+│   ├── main.c                    # CLI: flags, durations, validation
+│   ├── dantrix.h                 # constants, macros, version
+│   ├── server.c / server.h       # bring-up: listener, signals, worker lifecycle
+│   ├── worker.c / worker.h       # epoll event loop, accept, drain, timeouts
+│   ├── conn.c / conn.h           # connection slots, pool, per-connection HTTP flow
 │   ├── http_parser.c / http_parser.h
 │   ├── http_response.c / http_response.h
 │   ├── http_range.c / http_range.h
-│   ├── file.c / file.h           # document root, openat2, listing
+│   ├── file.c / file.h           # document root, openat2, listings
 │   ├── path.c / path.h
 │   ├── mime.c / mime.h
 │   ├── timer.c / timer.h         # hashed timing wheel
-│   ├── buffer.c / buffer.h       # buffer dan slab pool
+│   ├── buffer.c / buffer.h       # buffers and the slab pool
 │   ├── log.c / log.h
 │   ├── net.c / net.h
 │   └── util.c / util.h
 ├── tests/
-│   ├── unit/                     # harness C minimal, tanpa dependensi
+│   ├── unit/                     # minimal C harness, no dependencies
 │   │   ├── testing.h
 │   │   ├── test_http_parser.c    test_http_range.c
 │   │   ├── test_http_response.c  test_path.c
@@ -1199,10 +1223,10 @@ dantrix/
 │   │   ├── test_util.c           test_net.c
 │   │   ├── test_config.c         test_process.c
 │   │   └── test_status.c
-│   ├── smoke_test.py             # integrasi end-to-end (mulai server sendiri)
-│   ├── regression_test.py        # regresi yang butuh proses server terpisah
-│   ├── tsan_test.py              # trafik konkuren + deteksi ThreadSanitizer
-│   └── c10k_test.py              # N koneksi bersamaan
+│   ├── smoke_test.py             # end-to-end integration (starts its own server)
+│   ├── regression_test.py        # regressions that need a separate server process
+│   ├── tsan_test.py              # concurrent traffic + ThreadSanitizer detection
+│   └── c10k_test.py              # N concurrent connections
 ├── .clang-format
 ├── .clang-tidy
 ├── .editorconfig
@@ -1291,9 +1315,9 @@ Linux's default settings are meant for general use. For tens of thousands of con
 Each connection uses one file descriptor (plus one for the file being sent).
 
 ```bash
-# Sesi shell saat ini
-ulimit -n                  # biasanya 1024
-ulimit -n 1048576          # butuh batas hard yang cukup
+# Current shell session
+ulimit -n                  # usually 1024
+ulimit -n 1048576          # needs a high enough hard limit
 ```
 
 Permanent for a specific user, in `/etc/security/limits.d/99-dantrix.conf`:
@@ -1309,7 +1333,7 @@ Verify on the running process:
 
 ```bash
 grep -i 'open files' /proc/$(pidof dantrix)/limits
-ls /proc/$(pidof dantrix)/fd | wc -l      # fd yang sedang terpakai
+ls /proc/$(pidof dantrix)/fd | wc -l      # file descriptors in use
 ```
 
 > [!NOTE]
@@ -1380,10 +1404,10 @@ sudo iptables -t raw -A OUTPUT     -p tcp --sport 8080 -j CT --notrack
 ### 5. CPU and NIC
 
 ```bash
-# Governor kinerja (hindari frekuensi turun saat benchmark)
+# Performance governor (avoid dropping the frequency during a benchmark)
 sudo cpupower frequency-set -g performance
 
-# Jumlah antrean NIC dan pengaturannya
+# NIC queue count and their settings
 ethtool -l eth0
 sudo ethtool -L eth0 combined 4
 ```
@@ -1395,10 +1419,10 @@ sudo ethtool -L eth0 combined 4
 ### 6. Checking the accept queue
 
 ```bash
-# Recv-Q = panjang antrean accept saat ini, Send-Q = backlog maksimum
+# Recv-Q = the current accept queue depth, Send-Q = the backlog maximum
 ss -ltn 'sport = :8080'
 
-# Penghitung overflow antrean accept (naik = backlog kurang besar)
+# Accept queue overflow counter (grows = backlog too small)
 nstat -az TcpExtListenOverflows TcpExtListenDrops
 ```
 
@@ -1448,7 +1472,7 @@ mkdir -p bench/www
 for s in 1K 10K 100K 1M 100M; do
   head -c "$s" /dev/urandom > "bench/www/$(echo "$s" | tr 'A-Z' 'a-z').bin"
 done
-# hasil: 1k.bin, 10k.bin, 100k.bin, 1m.bin, 100m.bin
+# creates: 1k.bin, 10k.bin, 100k.bin, 1m.bin, 100m.bin
 ```
 
 ### Tools
@@ -1478,10 +1502,10 @@ done
 ### Running
 
 ```bash
-# Terminal 1: server di core 0-3, tanpa access log
+# Terminal 1: the server on cores 0-3, without the access log
 taskset -c 0-3 ./bin/dantrix -r bench/www -p 8080 -w 4 --access-log off
 
-# Terminal 2: beban di core 4-7 (naikkan batas fd dulu untuk -c besar)
+# Terminal 2: the load on cores 4-7 (raise the fd limit first for large -c)
 ulimit -n 1048576
 taskset -c 4-7 wrk -t4 -c256 -d30s --latency http://127.0.0.1:8080/1k.bin
 ```
@@ -1491,7 +1515,7 @@ Idle connection test (S5):
 ```bash
 gcc -O2 -o build/idle_conns bench/tools/idle_conns.c
 ./build/idle_conns -h 127.0.0.1 -p 8080 -n 10000 -t 120
-# Opsi -s 127.0.0.2,127.0.0.3 menambah IP sumber agar bisa melewati batas ~28 ribu port
+# The -s 127.0.0.2,127.0.0.3 option adds source IPs to get past the ~28k port limit
 ```
 
 All scenarios at once: `make bench`.
@@ -1515,7 +1539,7 @@ All scenarios at once: `make bench`.
 Run Nginx side by side on a different port with an equivalent configuration (`bench/nginx.conf`):
 
 ```nginx
-worker_processes 4;                  # samakan dengan --workers pada Dantrix
+worker_processes 4;                  # match Dantrix's --workers
 worker_rlimit_nofile 1048576;
 
 events {
@@ -1533,7 +1557,7 @@ http {
 
     server {
         listen 8081 reuseport;
-        root /path/ke/dantrix/bench/www;
+        root /path/to/dantrix/bench/www;
     }
 }
 ```
@@ -1636,7 +1660,7 @@ make fuzz
 ./build/fuzz_http_parser fuzz/corpus/http_parser \
     -max_len=16384 -timeout=5 -jobs=4 -workers=4
 
-# Smoke test 60 detik (dipakai di CI)
+# 60 second smoke test (used in CI)
 ./build/fuzz_http_parser fuzz/corpus/http_parser -max_total_time=60
 ```
 
@@ -1680,11 +1704,11 @@ ASan and TSan **cannot be combined** in a single build; that is why each of them
 
 ```bash
 make lint                # cppcheck + clang-tidy
-make format-check        # gagal bila ada berkas yang belum diformat
+make format-check        # fails when a file is not formatted
 
-# Di balik layar:
+# Under the hood:
 cppcheck --enable=warning,style,performance,portability --std=c11 --error-exitcode=1 -I src src/
-bear -- make debug       # menghasilkan compile_commands.json untuk clang-tidy
+bear -- make debug       # produces compile_commands.json for clang-tidy
 ```
 
 GCC can also be used as an additional analyzer: `make debug CFLAGS_EXTRA=-fanalyzer` (GCC ≥ 10).
@@ -1819,38 +1843,38 @@ CI uses `-Werror`.
 ### More detailed logs
 
 ```bash
-./bin/dantrix -r ./public --log-level debug       # event dan perpindahan state
-make debug && ./bin/dantrix --log-level trace     # sangat rinci (hanya build debug)
+./bin/dantrix -r ./public --log-level debug       # events and state transitions
+make debug && ./bin/dantrix --log-level trace     # very verbose (debug build only)
 ```
 
 ### Inspecting connections and sockets
 
 ```bash
-ss -s                                                   # ringkasan: established, TIME_WAIT, dll.
-ss -tn state established '( sport = :8080 )' | wc -l   # jumlah koneksi aktif (dikurangi 1 baris header)
-ss -ltn 'sport = :8080'                                 # antrean accept (Recv-Q / Send-Q)
-ss -tnp '( sport = :8080 )' | head                      # pemilik koneksi
-grep -i 'open files' /proc/$(pidof dantrix)/limits     # batas fd proses
-ls /proc/$(pidof dantrix)/fd | wc -l                    # fd yang sedang dipakai
-sudo lsof -p $(pidof dantrix) | head -30                # daftar fd
+ss -s                                                   # summary: established, TIME_WAIT, etc.
+ss -tn state established '( sport = :8080 )' | wc -l   # active connections (minus the header line)
+ss -ltn 'sport = :8080'                                 # accept queue (Recv-Q / Send-Q)
+ss -tnp '( sport = :8080 )' | head                      # connection owners
+grep -i 'open files' /proc/$(pidof dantrix)/limits     # process fd limit
+ls /proc/$(pidof dantrix)/fd | wc -l                    # file descriptors in use
+sudo lsof -p $(pidof dantrix) | head -30                # fd list
 ```
 
 ### Viewing raw requests and responses
 
 ```bash
-curl -v http://localhost:8080/                          # header lengkap
-curl --raw -i http://localhost:8080/                    # tanpa pemrosesan transfer-encoding
+curl -v http://localhost:8080/                          # full headers
+curl --raw -i http://localhost:8080/                    # no transfer-encoding handling
 printf 'GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' | nc localhost 8080
-sudo tcpdump -i lo -nn -A port 8080                     # paket di loopback (ASCII)
+sudo tcpdump -i lo -nn -A port 8080                     # loopback packets (ASCII)
 ```
 
 ### `strace`: what the server is doing
 
 ```bash
-# Ringkasan jumlah dan waktu syscall (Ctrl+C untuk mencetak)
+# Syscall count and time summary (Ctrl+C to print)
 sudo strace -c -f -p $(pidof dantrix)
 
-# Jejak syscall jaringan dan epoll dengan cap waktu
+# Network and epoll syscall trace with timestamps
 sudo strace -f -tt -e trace=network,epoll_wait,epoll_ctl,sendfile -p $(pidof dantrix)
 ```
 
@@ -1863,12 +1887,12 @@ sudo timeout -s INT 5 perf trace -s -p $(pidof dantrix)
 ### `gdb` and core dumps
 
 ```bash
-gdb --args ./bin/dantrix -r ./public -p 8080       # (gunakan build `make debug`)
-# di dalam gdb: run, lalu saat crash:  bt   atau   thread apply all bt
+gdb --args ./bin/dantrix -r ./public -p 8080       # (use a `make debug` build)
+# inside gdb: run, then on a crash:  bt   or   thread apply all bt
 
-ulimit -c unlimited                                 # aktifkan core dump di shell ini
+ulimit -c unlimited                                 # enable core dumps in this shell
 gdb ./bin/dantrix core                              # analisis core file
-coredumpctl gdb dantrix                             # jika memakai systemd-coredump
+coredumpctl gdb dantrix                             # when using systemd-coredump
 ```
 
 ### CPU profiling with `perf` and flamegraph
@@ -1877,11 +1901,11 @@ coredumpctl gdb dantrix                             # jika memakai systemd-cored
 make profile                                         # -O2 -g -fno-omit-frame-pointer
 ./bin/dantrix -r bench/www -p 8080 -w 4 --access-log off &
 
-# Beri beban (misalnya wrk) lalu rekam 30 detik
+# Apply a load (wrk, for example), then record for 30 seconds
 sudo perf record -F 999 -g -p $(pidof dantrix) -- sleep 30
 sudo perf report --stdio | head -60
 
-# Flamegraph (skrip dari https://github.com/brendangregg/FlameGraph)
+# Flamegraph (scripts from https://github.com/brendangregg/FlameGraph)
 sudo perf script | ./stackcollapse-perf.pl | ./flamegraph.pl > flame.svg
 ```
 
@@ -1890,7 +1914,7 @@ How to read it: the width of a box = the share of CPU time; look for wide functi
 ### Memory and leaks
 
 ```bash
-# RSS dan jumlah fd harus datar setelah beban selesai
+# RSS and the fd count must stay flat after the load finishes
 watch -n1 'grep VmRSS /proc/$(pidof dantrix)/status; ls /proc/$(pidof dantrix)/fd | wc -l'
 ```
 
@@ -1938,7 +1962,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now dantrix
 systemctl status dantrix
 journalctl -u dantrix -f
-sudo systemctl reload dantrix      # SIGHUP: muat ulang konfigurasi
+sudo systemctl reload dantrix      # SIGHUP: reload the configuration
 ```
 
 `deploy/dantrix.service`:
@@ -1978,7 +2002,7 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 ReadOnlyPaths=/var/www
-# Jika log ditulis ke berkas, buka baris berikut:
+# If the logs are written to files, uncomment the following:
 # ReadWritePaths=/var/log/dantrix
 
 [Install]
@@ -2074,7 +2098,7 @@ Dantrix does not support TLS yet, so HTTPS termination is done by the proxy. Set
 **Caddy** (automatic certificates):
 
 ```text
-contoh.com {
+example.com {
     reverse_proxy 127.0.0.1:8080
 }
 ```
@@ -2335,7 +2359,7 @@ sudo apt install -y build-essential clang clang-format clang-tidy cppcheck \
 
 make debug          # build debug
 make test           # unit + integration test
-make test-asan      # test dengan AddressSanitizer + UBSan
+make test-asan      # test with AddressSanitizer + UBSan
 make format         # rapikan kode sesuai .clang-format
 ```
 
@@ -2376,9 +2400,9 @@ Additional rules:
 Following [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```text
-<tipe>(<cakupan opsional>): <ringkasan singkat dalam bentuk perintah>
+<type>(<optional scope>): <short summary in the imperative mood>
 
-<isi opsional: kenapa perubahan ini perlu>
+<optional body: why this change is needed>
 ```
 
 | Type | Used for |
@@ -2391,7 +2415,7 @@ Following [Conventional Commits](https://www.conventionalcommits.org/):
 | `docs` | Documentation |
 | `build`, `ci`, `chore` | Build system, CI pipeline, routine work |
 
-Example: `fix(parser): tolak Content-Length ganda dengan nilai berbeda`.
+Example: `fix(parser): reject a duplicate Content-Length with a different value`.
 
 ### Pull Request checklist
 
@@ -2437,8 +2461,8 @@ Following the [Keep a Changelog](https://keepachangelog.com/) format and [Semant
 ```markdown
 ## [Unreleased]
 
-### Ditambahkan
-- Rancangan awal arsitektur dan dokumentasi (README).
+### Added
+- Initial architecture and documentation (README).
 ```
 
 ---
