@@ -35,7 +35,9 @@ jobs:
           # One distinct port per matrix cell: the four build jobs run in
           # parallel, and the sanitizers job runs its own copy on 18301.
           DANTRIX_TEST_PORT: ${{ matrix.cc == 'gcc' && (matrix.build == 'debug' && '18111' || '18101') || (matrix.build == 'debug' && '18211' || '18201') }}
-        run: python3 tests/regression_test.py bin/dantrix
+          # The release build lands in bin/, the debug build in build/debug/.
+          DX_TEST_BIN: ${{ matrix.build == 'debug' && 'build/debug/dantrix' || 'bin/dantrix' }}
+        run: python3 tests/regression_test.py "$DX_TEST_BIN"
 
   sanitizers:
     name: sanitizers (asan+ubsan)

@@ -354,6 +354,10 @@ def test_multi_worker_serves_and_shuts_down():
 
 
 def main():
+    if not os.path.exists(BIN):
+        print(f"  [FAIL] binary {BIN} not found - build it first "
+              f"(release: make, debug: make debug)")
+        return 1
     print("regression: timing wheel (BUG-01)")
     test_idle_cpu_after_partial_request()
     print("regression: rejected connections (BUG-05)")
