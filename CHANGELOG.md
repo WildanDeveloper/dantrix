@@ -53,6 +53,14 @@ Multi-core: one event loop per thread, no locks in the hot path.
 
 ### Fixed
 
+- **The CI workflow never ran since v0.4.1.** The build job's port
+  expression was written as `${{ ${{ ... }} }}` (nested expressions), which
+  GitHub rejects when parsing the workflow: every push was marked failed with
+  *zero* jobs, so the "CI green" reported for v0.4.1 and v0.4.2 was never true.
+  The expression is flattened; the four build cells and the sanitizers job now
+  get their own test ports (they run in parallel and used to race for the same
+  one), and the debug cells run the regression suite against
+  `build/debug/dantrix` instead of the non-existent `bin/dantrix`.
 - **`-w/--workers` never accepted its argument.** The short option `'w'` was
   declared without `:` in the getopt string, so `-w 4` left `optarg` NULL and
   the flag failed with "invalid --workers '(null)'" while `--workers 4` worked.
