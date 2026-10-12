@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.6.2
+VERSION := 0.6.3
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -97,6 +97,7 @@ profile: $(BUILD)/profile/dantrix
 # up as wrong counters at runtime instead of a rebuild.
 DEPFLAGS := -MMD -MP
 DEPS := $(LIB_OBJS:.o=.d) $(MAIN_OBJ:.o=.d) $(DBG_OBJS:.o=.d) $(DBG_MAIN:.o=.d)
+DEPS += $(foreach e,$(notdir $(EX_BINS:.o=)),$(BUILD)/$(e).d)
 
 $(BUILD)/release/%.o: $(SRC)/%.c
 	@mkdir -p $(dir $@)
@@ -141,10 +142,14 @@ examples: $(EX_BINS)
 
 $(BUILD)/%: $(EXAMPLES)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(STD) $(DEFS) $(WARN) -O2 $(CFLAGS_EXTRA) $< -o $@ $(LDFLAGS) -lpthread
+	$(CC) $(STD) $(DEFS) $(WARN) -O2 $(CFLAGS_EXTRA) $(DEPFLAGS) -c $< -o $@.o
+	$(CC) $@.o -o $@ $(LDFLAGS) -lpthread
+	@rm -f $@.o
 
 # --- Tests ----------------------------------------------------------------
-$(BUILD)/test_%: $(TESTS)/test_%.c $(LIB_SRCS)
+HDRS := $(wildcard $(SRC)/*.h)
+
+$(BUILD)/test_%: $(TESTS)/test_%.c $(LIB_SRCS) $(HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(DEFS) $(WARN) -O1 -g $(CFLAGS_EXTRA) \
 	    -I$(SRC) -I$(TESTS) $^ -o $@ $(LDFLAGS) -lpthread
@@ -267,12 +272,12 @@ test-c10k: release
 FUZZ_PARSER_SRCS := src/http_parser.c src/http_response.c src/util.c
 FUZZ_PATH_SRCS := src/path.c src/http_range.c src/mime.c
 
-$(BUILD)/fuzz_http_parser: fuzz/fuzz_http_parser.c $(FUZZ_PARSER_SRCS)
+$(BUILD)/fuzz_http_parser: fuzz/fuzz_http_parser.c $(FUZZ_PARSER_SRCS) $(HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(DEFS) $(WARN) -O1 -g -DFUZZ_STANDALONE \
 	    -I$(SRC) $< $(FUZZ_PARSER_SRCS) -o $@ $(LDFLAGS)
 
-$(BUILD)/fuzz_path: fuzz/fuzz_path.c $(FUZZ_PATH_SRCS)
+$(BUILD)/fuzz_path: fuzz/fuzz_path.c $(FUZZ_PATH_SRCS) $(HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(DEFS) $(WARN) -O1 -g -DFUZZ_STANDALONE \
 	    -I$(SRC) $< $(FUZZ_PATH_SRCS) -o $@ $(LDFLAGS)

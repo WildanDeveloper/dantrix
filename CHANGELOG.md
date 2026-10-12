@@ -12,6 +12,52 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.6.3] - 2026-10-12
+
+Re-audit verdict on v0.6.2: 33 of the 40 third-round fixes were correct; the
+pipelining de-recursion had broken two things, and three smaller defects
+remained. All are fixed here.
+
+### Fixed
+
+- **A keep-alive connection was never IDLE, so `keepalive_timeout` was never
+  applied.** The pipelining de-recursion had left an unreachable tail in
+  `conn_after_response()`: every idle connection kept its read buffer and was
+  closed by the *header* timeout instead (reproduced: `--keepalive-timeout 5s
+  --header-timeout 2s` closed at ~1.6 s with "header timeout" in the log). The
+  idle path is reachable again: the buffer goes back to the pool and the
+  keepalive timeout is armed.
+- **Pipelined requests could stall or be answered with a 408 after a partial
+  write.** When `send()` hit EAGAIN the remaining buffered requests were parked
+  in `conn->hold`, and the de-recursion had removed the code that parsed them
+  once the response drained: they sat in the read buffer until the stale header
+  timeout fired (a 408 for a valid request), or the buffer filled from the
+  socket and the connection was killed with an RST. The event loop now parses
+  restored pipelined requests explicitly, and a pipelined burst of 6000 and of
+  20000 requests is answered completely (verified with a client that stops
+  reading for 5 s).
+- `dx_log_access()` read `log->out` outside the mutex (the same reopen race
+  that `dx_log_write()` already fixed). Both loggers hold the mutex across the
+  whole write now.
+- The reload path wrote the shared `Cache-Control` buffer that workers read on
+  the hot path without a lock, so a concurrent SIGHUP could emit a header
+  mixed from old and new content. Two buffers are flipped on reload instead.
+- A **double `close(fd)`** in `tests/unit/test_mime.c` (the audit's own cleanup
+  had added a second one).
+- The Makefile had no header dependencies for the unit-test, example and fuzz
+  binaries, so editing `src/*.h` left them stale. Tests and fuzz binaries now
+  list the headers as prerequisites; examples compile per object with
+  `-MMD -MP`.
+- `bytes_out` was counted twice on the pread() and in-memory-body paths (the
+  park path and `conn_flush()` both counted the same bytes).
+
+### Added
+
+- Regression tests for both regressions: an idle keep-alive connection must be
+  closed by the keepalive timeout where it differs from the header timeout, and
+  a pipelined burst of 1500/6000 requests must be answered completely with no
+  request-buffer exhaustion.
+
 ## [0.6.2] - 2026-10-12
 
 Fourth audit round: all 40 findings verified as real and fixed.

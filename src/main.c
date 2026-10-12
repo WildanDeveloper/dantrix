@@ -46,8 +46,14 @@ typedef struct {
     size_t cli_count;
 } dx_reload_ctx_t;
 
-/* Stable storage for a reloaded Cache-Control value (see reload_cb). */
-static char g_cache_control_buf[DX_CFG_STR_MAX];
+/*
+ * Stable storage for a reloaded Cache-Control value. Two buffers are used and
+ * flipped on every reload: workers copy the pointer (under the reload mutex)
+ * and then read the STRING on the hot path without any lock, so a single
+ * shared buffer could be rewritten mid-response and emit a mixed header.
+ */
+static char g_cache_control_buf[2][DX_CFG_STR_MAX];
+static unsigned g_cache_control_slot;
 
 /* The context the command line flags record into, set up in main(). */
 static dx_reload_ctx_t *g_reload_ctx;
@@ -115,8 +121,11 @@ static int reload_cb(const void *vctx, dx_worker_reload_t *reload)
     reload->static_opts.etag = fresh.etag;
     reload->static_opts.server_tokens = fresh.server_tokens;
     reload->static_opts.hidden_files = fresh.hidden_files;
-    dx_strlcpy(g_cache_control_buf, fresh.cache_control, sizeof(g_cache_control_buf));
-    reload->static_opts.cache_control = g_cache_control_buf;
+    unsigned slot = g_cache_control_slot ^ 1u;
+
+    dx_strlcpy(g_cache_control_buf[slot], fresh.cache_control, sizeof(g_cache_control_buf[slot]));
+    g_cache_control_slot = slot;
+    reload->static_opts.cache_control = g_cache_control_buf[slot];
 
     reload->life.keepalive_requests = fresh.keepalive_requests;
     reload->life.header_timeout_ms = fresh.header_timeout_ms;

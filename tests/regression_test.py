@@ -613,6 +613,104 @@ def test_audit_round3_fixes():
         shutil.rmtree(root, ignore_errors=True)
 
 
+
+def test_audit_round4_regressions():
+    """Fourth audit round: the de-recursion of the pipelining path broke two
+    things that the standard suites did not cover.
+
+    REG-1: a keep-alive connection that has served a request must be closed by
+    the KEEPALIVE timeout (not by the header timeout) and must go IDLE, which
+    also releases its read buffer back to the pool.
+    REG-2: a pipelined burst far larger than the socket buffer must receive a
+    response for every request -- no RST, no 408, no stall.
+    """
+    log = tempfile.NamedTemporaryFile(prefix="dantrix-a4-", suffix=".log",
+                                      delete=False)
+    log.close()
+    port = PORT + 9
+
+    # REG-1: keepalive and header timeouts deliberately far apart.
+    proc = subprocess.Popen(
+        [BIN, "-b", "127.0.0.1", "-p", str(port), "-r", ROOT, "-w", "1",
+         "--keepalive-timeout", "5s", "--header-timeout", "2s",
+         "--access-log", "off", "--error-log", log.name, "--log-level", "debug"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("audit4: idle server started", False)
+            return
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        s.sendall(b"GET /f HTTP/1.1\r\nHost: x\r\n\r\n")
+        time.sleep(0.4)
+        s.recv(65536)
+        start = time.time()
+        s.settimeout(12)
+        elapsed = None
+        try:
+            d = s.recv(65536)
+            if not d:
+                elapsed = time.time() - start
+        except socket.timeout:
+            pass
+        s.close()
+        check("audit4: idle keep-alive closed", elapsed is not None)
+        # 5s keepalive, 2s header: the closure must be the LATER one.
+        check("audit4: closed by the keepalive timeout, not the header timeout",
+              elapsed is not None and 4.0 < elapsed < 8.0,
+              f"elapsed={elapsed}")
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=15)
+        text = open(log.name, encoding="utf-8", errors="replace").read()
+        check("audit4: the timeout that fired was the keepalive one",
+              "keepalive timeout" in text, text[-200:])
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        os.unlink(log.name)
+
+    # REG-2: a pipelined burst far larger than the socket buffer.
+    log2 = tempfile.NamedTemporaryFile(prefix="dantrix-a4b-", suffix=".log",
+                                       delete=False)
+    log2.close()
+    port = PORT + 10
+    proc = subprocess.Popen(
+        [BIN, "-b", "127.0.0.1", "-p", str(port), "-r", ROOT, "-w", "1",
+         "--keepalive-requests", "100000", "--access-log", "off",
+         "--error-log", log2.name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("audit4: burst server started", False)
+            return
+        req = b"GET /f HTTP/1.1\r\nHost: x\r\n\r\n"
+        for n, wait in ((1500, 0.7), (6000, 1.5)):
+            s = socket.create_connection(("127.0.0.1", port), timeout=10)
+            s.sendall(req * n)
+            time.sleep(wait)  # force EAGAIN + hold + unread socket data
+            s.settimeout(20)
+            got = 0
+            try:
+                while got < n:
+                    c = s.recv(1 << 20)
+                    if not c:
+                        break
+                    got += c.count(b"HTTP/1.1 200 OK")
+            except (ConnectionResetError, socket.timeout):
+                pass
+            s.close()
+            check(f"audit4: {n} pipelined requests all answered", got == n,
+                  f"{got}/{n}")
+        text = open(log2.name, encoding="utf-8", errors="replace").read()
+        check("audit4: no request-buffer exhaustion",
+              "request buffer exhausted" not in text)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        os.unlink(log2.name)
+
+
 def main():
     if not os.path.exists(BIN):
         print(f"  [FAIL] binary {BIN} not found - build it first "
@@ -634,6 +732,8 @@ def main():
     test_status_endpoint()
     print("regression: third audit round (UAF, 416, reload, status methods)")
     test_audit_round3_fixes()
+    print("regression: fourth audit round (idle keep-alive, pipelined burst)")
+    test_audit_round4_regressions()
 
     print()
     if failures:

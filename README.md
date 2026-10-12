@@ -122,6 +122,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Configuration, CLI, signals, graceful shutdown and reload | ✅ | v0.6.0 |
 | Third audit round (18 defects, regression suite) | ✅ | v0.6.1 |
 | Fourth audit round (40 defects, regression suite) | ✅ | v0.6.2 |
+| Re-audit: pipelining/keep-alive regressions fixed | ✅ | v0.6.3 |
 | Benchmark suite and optimization | 📝 | v0.7.0 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
@@ -2218,6 +2219,13 @@ Each release has a single capability as its theme. A checked box marks completed
 - [x] Fortify flags, coverage and test-asan Makefile targets
 - [x] Pipelining de-recursed (stack-overflow in sanitizer builds)
 - [x] Deployment, CI, example and unit-test hygiene
+
+### v0.6.3: Re-audit
+
+- [x] The idle keep-alive path is reachable again (`keepalive_timeout` applies)
+- [x] Pipelined requests restored after EAGAIN are parsed (no 408, no RST)
+- [x] Log-reopen race closed for the access logger; Cache-Control reload race
+- [x] Makefile header dependencies; double-counted `bytes_out`
 
 ### v0.7.0: Measurable
 

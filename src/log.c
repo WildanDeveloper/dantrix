@@ -195,11 +195,20 @@ void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const c
     char line[2048];
     size_t pos = 0;
 
-    if (log == NULL || log->out == NULL) {
+    if (log == NULL) {
         return;
     }
-
-    /* CLF timestamp: [11/Oct/2026:10:15:30 +0000] */
+    /*
+     * log->out is read under the mutex for the same reason as in
+     * dx_log_write(): the SIGUSR1 reopen path swaps it and closes the old
+     * stream, so an unlocked read here could race a reopen and write to a
+     * closed FILE*. A NULL out is a documented no-op.
+     */
+    log_lock(log);
+    if (log->out == NULL) {
+        log_unlock(log);
+        return;
+    }
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0 || localtime_r(&ts.tv_sec, &tm_buf) == NULL) {
         stamp[0] = '\0';
     } else if (strftime(stamp, sizeof(stamp), "%d/%b/%Y:%H:%M:%S %z", &tm_buf) == 0) {
@@ -252,7 +261,7 @@ void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const c
     if (pos + 2u < sizeof(line)) {
         line[pos++] = '\n';
         line[pos] = '\0';
-        log_lock(log);
+        /* The mutex is already held (taken at the top of the function). */
         (void)fwrite(line, 1, pos, log->out);
         (void)fflush(log->out);
         log_unlock(log);

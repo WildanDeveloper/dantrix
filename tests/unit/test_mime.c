@@ -127,8 +127,9 @@ static void test_custom_file(void)
     if (fd < 0) {
         return;
     }
-    close(fd); /* the file is re-opened with fopen below */
-    (void)close(fd);
+    /* The file is re-opened with fopen below, so the raw descriptor must be
+     * closed exactly once here. */
+    close(fd);
 
     memcpy(path, dir, sizeof(dir));
     f = fopen(path, "wb");

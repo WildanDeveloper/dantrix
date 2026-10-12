@@ -652,7 +652,8 @@ static int conn_flush_file(struct dx_worker *w, dx_conn_t *conn)
                 conn->response_pending = true;
                 conn->file_offset += (uint64_t)n;
                 conn->file_left -= (uint64_t)n;
-                conn->bytes_out += (uint64_t)n;
+                /* conn_flush() counts these bytes when it actually sends them;
+                 * counting them here as well reported ~2x output. */
                 if (conn_flush(w, conn) != 0) {
                     return -1;
                 }
@@ -720,7 +721,7 @@ static int conn_flush_mem_body(struct dx_worker *w, dx_conn_t *conn)
         conn->buf.len += want;
         conn->mem_body_off += want;
         conn->response_pending = true;
-        conn->bytes_out += want;
+        /* conn_flush() counts these when it sends them (see above). */
 
         if (conn_flush(w, conn) != 0) {
             return -1;
@@ -1442,11 +1443,18 @@ static int conn_after_response(struct dx_worker *w, dx_conn_t *conn)
     /*
      * A pipelined request is now sitting in the buffer. It is parsed by
      * conn_process's own loop (the caller of conn_finish), so returning here
-     * does not stall the connection -- and it removes the recursion that
-     * used to overflow the stack on a long pipelined burst.
+     * with the buffer held does not stall the connection -- and it removes the
+     * recursion that used to overflow the stack on a long pipelined burst.
+     *
+     * With nothing pipelined the connection is idle: the read buffer goes back
+     * to the pool and the KEEPALIVE timeout is armed. Skipping that (as an
+     * earlier rewrite did, by returning unconditionally) left every idle
+     * keep-alive connection holding its buffer and closed by the *header*
+     * timeout instead.
      */
-    return 0;
-
+    if (dx_conn_has_pending(conn)) {
+        return 0; /* a restored pipelined request: the caller's loop parses it */
+    }
     /* Idle: the read buffer goes back to the pool while nothing is pending. */
     dx_conn_release_buffer(conn, w->bufs);
     conn->state = DX_CONN_IDLE;
