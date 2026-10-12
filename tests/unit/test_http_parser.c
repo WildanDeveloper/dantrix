@@ -254,7 +254,10 @@ static void test_error_table(void)
         CHECK_EQ(consumed, 0u);
     }
 
-    /* Equal duplicate Content-Length values are accepted (RFC 9110 11.6). */
+    /* Any duplicate Content-Length is refused, even an identical one. RFC 9110
+     * lets a sender send identical duplicates, but a duplicate framing header
+     * is exactly what a smuggling proxy relies on and this server documents a
+     * strict posture, so it is a 400 like the conflicting case. */
     {
         dx_http_parser_t p;
         size_t consumed = 0;
@@ -263,7 +266,8 @@ static void test_error_table(void)
                              "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
                              "content-length: 5\r\n\r\n",
                              &consumed),
-                 DX_PARSE_OK);
+                 DX_PARSE_ERROR);
+        CHECK_EQ(p.status_code, 400);
     }
 }
 

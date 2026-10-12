@@ -4,7 +4,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./public:/var/www:ro
+      - ./public:/var/www/dantrix:ro
     ulimits:
       nofile:
         soft: 1048576

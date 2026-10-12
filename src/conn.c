@@ -1048,8 +1048,18 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
          * closed and the client received nothing at all. The body is rendered
          * into an owned buffer and streamed through the socket exactly like a
          * file body, so its size no longer caps the listing.
+         *
+         * Only the previous in-memory body is released here. `base` points
+         * into conn->hdr when the request body was drained incrementally, and
+         * access_fill() below still reads through it, so freeing the header
+         * block before that call was a heap-use-after-free (caught by ASan on
+         * a GET with a Content-Length whose body arrived in a later segment).
+         * conn->hdr is released by dx_conn_reset() when the slot is recycled.
          */
-        dx_conn_release_scratch(conn);
+        free(conn->mem_body);
+        conn->mem_body = NULL;
+        conn->mem_body_len = 0;
+        conn->mem_body_off = 0;
         conn->mem_body = (unsigned char *)malloc(DX_LISTING_TMP);
         if (conn->mem_body == NULL) {
             access_fill(conn, req, base, 500, 0);
@@ -1078,7 +1088,10 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
         }
         if (head) {
             /* HEAD sends the headers only, so the rendered body is dead. */
-            dx_conn_release_scratch(conn);
+            free(conn->mem_body);
+            conn->mem_body = NULL;
+            conn->mem_body_len = 0;
+            conn->mem_body_off = 0;
         }
         return conn_finish(w, conn, consumed, tmp, len);
     }
@@ -1112,13 +1125,23 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
                                           "Last-Modified: %s\r\n", last_modified);
         }
         if (etag[0] != '\0') {
-            extra_len += (size_t)snprintf(extra + extra_len, sizeof(extra) - extra_len,
-                                          "ETag: %s\r\n", etag);
+            if (extra_len < sizeof(extra)) {
+                extra_len += (size_t)snprintf(extra + extra_len, sizeof(extra) - extra_len,
+                                              "ETag: %s\r\n", etag);
+            }
         }
-        if (w->static_opts.cache_control != NULL && w->static_opts.cache_control[0] != '\0') {
+        if (extra_len < sizeof(extra) && w->static_opts.cache_control != NULL &&
+            w->static_opts.cache_control[0] != '\0') {
             extra_len += (size_t)snprintf(extra + extra_len, sizeof(extra) - extra_len,
                                           "Cache-Control: %s\r\n", w->static_opts.cache_control);
         }
+        /*
+         * snprintf returns the length it *would* have written, so extra_len can
+         * exceed sizeof(extra) after a truncation. Every append above is
+         * therefore guarded by `extra_len < sizeof(extra)`, and the final check
+         * rejects the request instead of letting the next append compute a
+         * wrapped (huge) size.
+         */
         if (extra_len >= sizeof(extra)) {
             (void)close(opened.fd);
             return conn_finish_error(w, conn, 500, NULL);
@@ -1164,9 +1187,20 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
             }
 
             if (range_result == DX_RANGE_UNSATISFIABLE) {
-                int written = snprintf(extra + extra_len, sizeof(extra) - extra_len,
-                                       "Content-Range: bytes */%llu\r\nAccept-Ranges: bytes\r\n",
-                                       (unsigned long long)size);
+                int written;
+
+                /*
+                 * 416 is an error status: like every other error path it must
+                 * end the connection. keep_alive/connection were computed for a
+                 * 200 before the Range header was read, so they have to be
+                 * overridden here or the client is told to keep the connection
+                 * alive on an error (contradicting response_keeps_alive()).
+                 */
+                connection = "close";
+                conn->close_conn = true;
+                written = snprintf(extra + extra_len, sizeof(extra) - extra_len,
+                                   "Content-Range: bytes */%llu\r\nAccept-Ranges: bytes\r\n",
+                                   (unsigned long long)size);
 
                 access_fill(conn, req, base, 416, 0);
                 (void)close(opened.fd);
@@ -1182,13 +1216,18 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
                 start = range.start;
                 body_len = range.length;
                 partial = true;
-                extra_len += (size_t)snprintf(
-                    extra + extra_len, sizeof(extra) - extra_len,
-                    "Content-Range: bytes %llu-%llu/%llu\r\n", (unsigned long long)range.start,
-                    (unsigned long long)range.end, (unsigned long long)size);
+                if (extra_len < sizeof(extra)) {
+                    extra_len += (size_t)snprintf(
+                        extra + extra_len, sizeof(extra) - extra_len,
+                        "Content-Range: bytes %llu-%llu/%llu\r\n", (unsigned long long)range.start,
+                        (unsigned long long)range.end, (unsigned long long)size);
+                }
             }
-            extra_len += (size_t)snprintf(extra + extra_len, sizeof(extra) - extra_len,
-                                          "Accept-Ranges: bytes\r\n");
+            if (extra_len < sizeof(extra)) {
+                extra_len += (size_t)snprintf(extra + extra_len, sizeof(extra) - extra_len,
+                                              "Accept-Ranges: bytes\r\n");
+            }
+            /* Same truncation guard as above: extra_len can exceed the buffer. */
             if (extra_len >= sizeof(extra)) {
                 (void)close(opened.fd);
                 return conn_finish_error(w, conn, 500, NULL);
@@ -1505,8 +1544,11 @@ static int conn_dispatch(struct dx_worker *w, dx_conn_t *conn)
         /*
          * The JSON status endpoint is answered before the static handler so it
          * works even without a document root, and only for loopback clients.
+         * It is read-only: any method other than GET or HEAD is rejected with
+         * 405, so a POST to the metrics path cannot pretend to have changed
+         * anything and still learn the snapshot.
          */
-        if (w->status_path != NULL && w->status_path[0] != '\0' && !is_options &&
+        if (w->status_path != NULL && w->status_path[0] != '\0' &&
             target_equals(req, base, w->status_path)) {
             if (!peer_is_loopback(conn->peer)) {
                 /* Not disclosed to non-loopback clients. */
@@ -1524,7 +1566,23 @@ static int conn_dispatch(struct dx_worker *w, dx_conn_t *conn)
                 }
                 return conn_finish(w, conn, consumed, tmp, len);
             }
-            return conn_serve_status(w, conn, req, base, head, consumed);
+            if (head || method_is(req, base, "GET")) {
+                return conn_serve_status(w, conn, req, base, head, consumed);
+            }
+            /* 405 for every other method, with the supported list. */
+            status = 405;
+            extra = "Allow: GET, HEAD\r\n";
+            access_fill(conn, req, base, 405, 0);
+            conn->close_conn = true;
+            len = dx_http_response_error_ex(tmp, sizeof(tmp), 405, extra, "close",
+                                            w->static_opts.server_tokens);
+            if (len == 0) {
+                dx_log_write(dx_worker_log(w), DX_LOG_ERROR,
+                             "conn %llu: response did not fit the staging buffer",
+                             (unsigned long long)conn->id);
+                return -1;
+            }
+            return conn_finish(w, conn, consumed, tmp, len);
         }
 
         if (action == DX_DISPATCH_SERVE) {

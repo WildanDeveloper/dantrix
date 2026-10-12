@@ -222,8 +222,14 @@ static int parse_header_line(dx_http_parser_t *p, const unsigned char *data, siz
             p->status_code = 400; /* non-numeric or overflowing Content-Length */
             return -1;
         }
-        if (p->content_length_seen && p->content_length != v) {
-            p->status_code = 400; /* conflicting duplicates */
+        if (p->content_length_seen) {
+            /*
+             * Any duplicate is rejected, not only the conflicting ones. RFC
+             * 9110 lets a sender send identical duplicates, but a duplicate
+             * framing header is exactly what a smuggling proxy relies on and
+             * this server documents a strict posture, so it is refused.
+             */
+            p->status_code = 400;
             return -1;
         }
         p->content_length_seen = true;

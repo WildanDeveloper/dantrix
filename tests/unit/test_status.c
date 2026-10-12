@@ -38,6 +38,20 @@ static void test_counters(void)
     dx_status_conn_closed(NULL);
     dx_status_conn_rejected(NULL);
     dx_status_response(NULL, 200, 1);
+
+    /*
+     * A close must never push the unsigned counter below zero: clamp at zero
+     * instead of wrapping to a huge value.
+     */
+    dx_status_init(&st);
+    dx_status_conn_closed(&st);
+    dx_status_conn_closed(&st);
+    dx_status_conn_closed(&st);
+    CHECK_EQ((long long)atomic_load(&st.active_connections), 0);
+    dx_status_conn_accepted(&st);
+    dx_status_conn_accepted(&st);
+    dx_status_conn_closed(&st);
+    CHECK_EQ((long long)atomic_load(&st.active_connections), 1);
 }
 
 static void test_json(void)

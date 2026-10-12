@@ -12,8 +12,8 @@ Environment=DANTRIX_ROOT=/var/www/dantrix
 Environment=DANTRIX_BIND=0.0.0.0
 Environment=DANTRIX_PORT=8080
 ExecStart=/usr/local/bin/dantrix
-# Reload and reopen are v0.6 features; SIGTERM is the supported stop signal.
-KillSignal=SIGTERM
+# SIGHUP reloads the reloadable configuration; SIGTERM is the stop signal.
+ExecReload=/bin/kill -HUP $MAINPID
 # Larger than shutdown_timeout so the graceful drain finishes before SIGKILL.
 TimeoutStopSec=20
 Restart=on-failure

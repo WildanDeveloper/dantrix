@@ -189,6 +189,20 @@ static void test_dates(void)
     CHECK(dx_http_parse_date("Thu, 01 Jan 1970 00:00:00 GMT", 29u, &t));
     CHECK_EQ(t, 0LL);
 
+    /*
+     * One second before the epoch: timegm() returns (time_t)-1 for it, which
+     * used to be confused with an error and rejected. It is a valid instant.
+     */
+    CHECK(dx_http_parse_date("Wed, 31 Dec 1969 23:59:59 GMT", 29u, &t));
+    CHECK_EQ(t, -1LL);
+
+    /*
+     * Leap seconds are refused: second 60 is ambiguous (two different instants
+     * can carry it), so the bound is < 60, not <= 60.
+     */
+    CHECK(!dx_http_parse_date("Mon, 30 Jun 2025 23:59:60 GMT", 29u, &t));
+    CHECK(dx_http_parse_date("Mon, 30 Jun 2025 23:59:59 GMT", 29u, &t));
+
     /* Invalid shapes are rejected, never guessed. */
     CHECK(!dx_http_parse_date("", 0u, &t));
     CHECK(!dx_http_parse_date("Sun", 3u, &t));

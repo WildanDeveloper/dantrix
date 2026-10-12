@@ -35,8 +35,23 @@ void dx_status_conn_rejected(dx_status_t *st)
 
 void dx_status_conn_closed(dx_status_t *st)
 {
-    if (st != NULL) {
-        atomic_fetch_sub_explicit(&st->active_connections, 1, memory_order_relaxed);
+    if (st == NULL) {
+        return;
+    }
+    /*
+     * The counter is unsigned, so a close that is ever not paired with an
+     * accept would wrap it to a huge value and poison the metrics. Clamp at
+     * zero with a compare-exchange instead of a blind decrement.
+     */
+    {
+        uint64_t cur = atomic_load_explicit(&st->active_connections, memory_order_relaxed);
+
+        while (cur > 0) {
+            if (atomic_compare_exchange_weak_explicit(&st->active_connections, &cur, cur - 1,
+                                                      memory_order_relaxed, memory_order_relaxed)) {
+                return;
+            }
+        }
     }
 }
 

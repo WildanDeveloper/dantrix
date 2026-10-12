@@ -43,4 +43,7 @@ compile_commands.json
 
 # Local scratch directories
 /tmp/
-/public/
+# Keep the example document root out of version control, but not the small
+# sample index the Quick Start writes there.
+/public/*
+!/public/index.html

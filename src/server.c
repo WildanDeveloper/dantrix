@@ -404,6 +404,20 @@ static int server_run_multi(const dx_server_config_t *cfg, dx_logs_t *logs, int 
         return -1;
     }
 
+    /*
+     * The reload snapshot is initialised before the first `goto out`: several
+     * early failures (allocation, sigmask, signalfd, bind) jump past the
+     * set-up below, and the cleanup runs pthread_mutex_destroy() on the struct
+     * unconditionally. Destroying an uninitialised mutex is undefined
+     * behaviour, so the mutex must exist from the very first failure path on.
+     */
+    memset(&reload, 0, sizeof(reload));
+    if (pthread_mutex_init(&reload.mu, NULL) != 0) {
+        errno = ENOMEM;
+        dx_log_write(&logs->log, DX_LOG_ERROR, "cannot initialise the reload mutex");
+        return -1;
+    }
+
     ctxs = (dx_worker_ctx_t *)calloc(count, sizeof(*ctxs));
     threads = (pthread_t *)calloc(count, sizeof(*threads));
     if (ctxs == NULL || threads == NULL) {
@@ -456,8 +470,6 @@ static int server_run_multi(const dx_server_config_t *cfg, dx_logs_t *logs, int 
         goto out;
     }
 
-    memset(&reload, 0, sizeof(reload));
-    pthread_mutex_init(&reload.mu, NULL);
     reload.static_opts = cfg->static_opts;
     reload.life = cfg->life;
     reload.limits = cfg->limits;
@@ -657,7 +669,14 @@ int dx_server_run(const dx_server_config_t *cfg)
 
     dx_status_init(&status);
 
-    if (cfg == NULL || cfg->error_log_path == NULL || cfg->port < 1 || cfg->port > 65535) {
+    /*
+     * Both log destinations are dereferenced unconditionally in the paths
+     * below (strcmp against "off" and "stderr"), so neither may be NULL. The
+     * error log is a hard requirement, the access log defaults to "off" when
+     * it is omitted.
+     */
+    if (cfg == NULL || cfg->error_log_path == NULL || cfg->access_log_path == NULL ||
+        cfg->port < 1 || cfg->port > 65535) {
         errno = EINVAL;
         return -1;
     }

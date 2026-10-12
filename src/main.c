@@ -311,8 +311,29 @@ int main(int argc, char **argv)
             print_config = true;
             break;
         case 'o':
-            if (dx_config_override(&set, optarg, msg) != 0) {
-                return DX_EXIT_USAGE;
+            /*
+             * -o is the highest-priority source, so it has to be recorded for
+             * the SIGHUP replay exactly like the other flags. Parse it into
+             * key and value and record the pair, then apply it.
+             */
+            {
+                char kv[DX_CFG_STR_MAX * 2u];
+                char *eq;
+
+                if (dx_strlcpy(kv, optarg, sizeof(kv)) >= sizeof(kv)) {
+                    fprintf(stderr, "dantrix: -o: assignment too long\n");
+                    return DX_EXIT_USAGE;
+                }
+                eq = strchr(kv, '=');
+                if (eq == NULL) {
+                    fprintf(stderr, "dantrix: -o: expected key=value, got '%s'\n", optarg);
+                    return DX_EXIT_USAGE;
+                }
+                *eq = '\0';
+                reload_record(g_reload_ctx, kv, eq + 1);
+                if (dx_config_override(&set, optarg, msg) != 0) {
+                    return DX_EXIT_USAGE;
+                }
             }
             break;
         case 'b':

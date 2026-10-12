@@ -252,8 +252,10 @@ bool dx_http_parse_date(const char *s, size_t len, long long *out_sec)
         left--;
     }
 
-    /* Four digit year. */
-    if (!read_fixed(&p, &left, 4u, &value) || value < 1970) {
+    /* Four digit year. HTTP dates are IMF-fixdate; 1969 is still a valid
+     * instant (the epoch is 1970-01-01T00:00:00Z), so only reject what
+     * timegm() cannot represent rather than clamping the year here. */
+    if (!read_fixed(&p, &left, 4u, &value)) {
         return false;
     }
     tm.tm_year = value - 1900;
@@ -285,7 +287,7 @@ bool dx_http_parse_date(const char *s, size_t len, long long *out_sec)
     }
     p++;
     left--;
-    if (!read_fixed(&p, &left, 2u, &value) || value > 60) {
+    if (!read_fixed(&p, &left, 2u, &value) || value > 59) {
         return false; /* leap seconds are not accepted: they are ambiguous */
     }
     tm.tm_sec = value;
@@ -310,8 +312,23 @@ bool dx_http_parse_date(const char *s, size_t len, long long *out_sec)
     {
         time_t when = timegm(&tm);
 
+        /*
+         * timegm() returns (time_t)-1 both on failure and for the legitimate
+         * instant 1969-12-31T23:59:59Z, one second before the epoch. Round
+         * the value back through gmtime_r() to tell the two apart, so a valid
+         * date is not rejected while a genuinely unrepresentable one still is.
+         */
         if (when == (time_t)-1) {
-            return false;
+            struct tm round;
+
+            if (gmtime_r(&when, &round) == NULL) {
+                return false;
+            }
+            if (round.tm_year != tm.tm_year || round.tm_mon != tm.tm_mon ||
+                round.tm_mday != tm.tm_mday || round.tm_hour != tm.tm_hour ||
+                round.tm_min != tm.tm_min || round.tm_sec != tm.tm_sec) {
+                return false; /* timegm really failed */
+            }
         }
         *out_sec = (long long)when;
     }

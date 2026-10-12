@@ -24,13 +24,13 @@ int dx_pid_file_write(const char *path);
 void dx_pid_file_remove(const char *path);
 
 /*
- * Fork into the background: the parent forks, the child calls setsid() and
- * reparents, and the parent exits when the child reports readiness through a
- * pipe. ready_fd, when not NULL, receives the descriptor the caller must close
- * once it is serving (passing NULL skips the handshake).
+ * Fork into the background. The child calls setsid() and then forks a second
+ * time so the final process is a session leader with no controlling terminal;
+ * the parent exits once the daemon reports readiness through a pipe (a byte)
+ * or when the pipe closes early because a fork step failed.
  *
- * Returns 0 in the continuing (child) process, 1 in the parent once the child
- * is ready, or -1 on error.
+ * Returns 0 in the final (grandchild) process, 1 in the original parent once
+ * the daemon is ready, or -1 on error.
  */
 int dx_daemonize(int *ready_fd);
 

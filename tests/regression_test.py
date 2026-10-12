@@ -15,6 +15,7 @@ Usage: python3 tests/regression_test.py [path-to-binary]
 
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -467,6 +468,151 @@ def test_status_endpoint():
         os.unlink(log.name)
 
 
+def test_audit_round3_fixes():
+    """Third audit round: the use-after-free on a directory listing, the 416
+    that stayed keep-alive, the status endpoint accepting every method and the
+    -o overrides lost on SIGHUP.
+
+    BUG-A1 use-after-free: a listing must not free the header block before
+    access_fill() reads through it. Requires a GET with a Content-Length whose
+    body arrives in a later segment (so the header block is parked in
+    conn->hdr) and a target that resolves to a directory listing.
+    """
+    log = tempfile.NamedTemporaryFile(prefix="dantrix-a3-", suffix=".log", delete=False)
+    log.close()
+    root = tempfile.mkdtemp(prefix="dantrix-a3-")
+    with open(os.path.join(root, "index.html"), "w") as f:
+        f.write("hi")
+    os.makedirs(os.path.join(root, "subdir"), exist_ok=True)
+    with open(os.path.join(root, "subdir", "child.txt"), "w") as f:
+        f.write("x")
+    port = PORT + 8
+    proc = subprocess.Popen(
+        [BIN, "-b", "127.0.0.1", "-p", str(port), "-r", root, "-w", "1",
+         "--directory-listing", "on", "--access-log", "off", "--error-log", log.name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("audit3: server started", False)
+            return
+
+        # BUG-A1: split arrival -> conn->hdr is parked -> the listing path must
+        # not free it before access_fill() has read through it.
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        s.sendall(b"GET /subdir/ HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n")
+        time.sleep(0.4)
+        s.sendall(b"hello")
+        time.sleep(0.6)
+        data = b""
+        s.settimeout(3)
+        try:
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        except OSError:
+            pass
+        s.close()
+        check("audit3: listing with a drained body answers 200",
+              data.startswith(b"HTTP/1.1 200 OK"), data[:40])
+        check("audit3: listing body contains the child entry", b"child.txt" in data)
+
+        # BUG-A3: 416 is an error status, so the connection must close.
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        s.sendall(b"GET /index.html HTTP/1.1\r\nHost: x\r\n"
+                  b"Range: bytes=999999999-\r\n\r\n")
+        time.sleep(0.4)
+        first = s.recv(65536)
+        s.sendall(b"GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n")
+        time.sleep(0.4)
+        second = b""
+        s.settimeout(2)
+        try:
+            second = s.recv(65536)
+        except OSError:
+            pass
+        s.close()
+        check("audit3: 416 carries Connection: close",
+              first.startswith(b"HTTP/1.1 416") and b"Connection: close" in first,
+              first[:60])
+        check("audit3: 416 closed the connection", second == b"", second[:40])
+
+        # BUG-A4: -o must survive a SIGHUP reload.
+        cfg = os.path.join(root, "a3.conf")
+        with open(cfg, "w") as f:
+            f.write(f"root = {root}\nserver_tokens = true\n")
+        acc = os.path.join(root, "a3.acc")
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=15)
+        proc2 = subprocess.Popen(
+            [BIN, "-b", "127.0.0.1", "-p", str(port), "-c", cfg, "-w", "1",
+             "-o", "server_tokens=off", "--access-log", "off",
+             "--error-log", log.name],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            if not wait_ready(proc2, port):
+                check("audit3: reload server started", False)
+                return
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                s.sendall(b"GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n")
+                time.sleep(0.4)
+                before = s.recv(65536)
+            check("audit3: -o server_tokens=off hides the Server header",
+                  b"Server:" not in before, before[:60])
+            proc2.send_signal(signal.SIGHUP)
+            time.sleep(0.6)
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                s.sendall(b"GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n")
+                time.sleep(0.4)
+                after = s.recv(65536)
+            check("audit3: -o overrides survive the SIGHUP reload",
+                  b"Server:" not in after, after[:60])
+
+            # BUG-A6: the status endpoint is read-only (GET/HEAD only).
+            proc2.send_signal(signal.SIGTERM)
+            proc2.wait(timeout=15)
+            proc3 = subprocess.Popen(
+                [BIN, "-b", "127.0.0.1", "-p", str(port), "-r", root, "-w", "1",
+                 "--status-path", "/__status", "--access-log", "off",
+                 "--error-log", log.name],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                if not wait_ready(proc3, port):
+                    check("audit3: status server started", False)
+                    return
+                codes = []
+                for method in (b"GET", b"HEAD", b"POST", b"PUT"):
+                    with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                        s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                        time.sleep(0.3)
+                        s.recv(65536)
+                    s2 = socket.create_connection(("127.0.0.1", port), timeout=5)
+                    s2.sendall(method + b" /__status HTTP/1.1\r\nHost: x\r\n"
+                               b"Connection: close\r\n\r\n")
+                    time.sleep(0.3)
+                    codes.append(int(s2.recv(64).split(b" ")[1]))
+                    s2.close()
+                check("audit3: status endpoint GET/HEAD -> 200", codes[0] == 200 and codes[1] == 200,
+                      str(codes))
+                check("audit3: status endpoint POST/PUT -> 405", codes[2] == 405 and codes[3] == 405,
+                      str(codes))
+            finally:
+                if proc3.poll() is None:
+                    proc3.kill()
+                    proc3.wait()
+        finally:
+            if proc2.poll() is None:
+                proc2.kill()
+                proc2.wait()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        os.unlink(log.name)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     if not os.path.exists(BIN):
         print(f"  [FAIL] binary {BIN} not found - build it first "
@@ -486,6 +632,8 @@ def main():
     test_signals_reload_reopen_stats()
     print("regression: JSON status endpoint (v0.6.0)")
     test_status_endpoint()
+    print("regression: third audit round (UAF, 416, reload, status methods)")
+    test_audit_round3_fixes()
 
     print()
     if failures:

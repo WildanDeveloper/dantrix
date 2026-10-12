@@ -65,9 +65,10 @@ int dx_daemonize(int *ready_fd)
     }
     if (pid > 0) {
         /*
-         * Parent: wait for the child to signal readiness so a bind failure is
-         * reported with the right exit code instead of silently backgrounding.
-         * A byte means "ready"; EOF means the child died before it was.
+         * Original parent: wait for the grandchild to signal readiness so a
+         * bind failure is reported with the right exit code instead of
+         * silently backgrounding. A byte means "ready"; EOF means a fork step
+         * failed or the server died before it was ready.
          */
         if (ready_fd != NULL) {
             char c = 0;
@@ -79,16 +80,40 @@ int dx_daemonize(int *ready_fd)
             } while (n < 0 && errno == EINTR);
             (void)close(pipefd[0]);
             if (n != 1) {
-                return -1; /* the child failed during start-up */
+                return -1; /* the daemon failed during start-up */
             }
         }
         return 1;
     }
 
-    /* Child: become a session leader and detach from the controlling tty. */
+    /*
+     * First child: become a session leader, then fork again and exit. The
+     * second fork is what actually detaches the process: a session leader can
+     * reacquire a controlling terminal, so the final process must not be one.
+     */
     if (setsid() < 0) {
-        return -1;
+        if (ready_fd != NULL) {
+            (void)close(pipefd[1]);
+        }
+        _exit(1);
     }
+    pid = fork();
+    if (pid < 0) {
+        if (ready_fd != NULL) {
+            (void)close(pipefd[1]);
+        }
+        _exit(1);
+    }
+    if (pid > 0) {
+        /* The intermediate child exits so the grandchild is reparented to init
+         * and can never reacquire a controlling terminal. */
+        if (ready_fd != NULL) {
+            (void)close(pipefd[1]);
+        }
+        _exit(0);
+    }
+
+    /* Grandchild: fully detached. */
     /* chdir("/") is best effort: a failure only leaves the cwd inherited. */
     if (chdir("/") != 0) {
         /* nothing to do: the process is still usable */

@@ -190,8 +190,12 @@ static int join_path(char *buf, size_t cap, const char *dir, const char *name)
 /* Copy src into dst, truncating safely. Returns the copied length. */
 static size_t copy_bounded(char *dst, size_t cap, const char *src)
 {
-    size_t n = strlen(src);
+    size_t n;
 
+    if (cap == 0u) {
+        return 0; /* `cap - 1u` would wrap: nothing can be written anyway */
+    }
+    n = strlen(src);
     if (n >= cap) {
         n = cap - 1u;
     }

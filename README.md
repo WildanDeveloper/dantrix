@@ -120,6 +120,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Second audit round (9 defects, regression suite) | ✅ | v0.4.2 |
 | Multi-worker with `SO_REUSEPORT` | ✅ | v0.5.0 |
 | Configuration, CLI, signals, graceful shutdown and reload | ✅ | v0.6.0 |
+| Third audit round (18 defects, regression suite) | ✅ | v0.6.1 |
 | Benchmark suite and optimization | 📝 | v0.7.0 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
@@ -982,7 +983,7 @@ Error responses caused by parsing failures are always followed by **closing the 
 |---|---|
 | `Host` | Required on HTTP/1.1. Missing, empty, or duplicate produces `400` |
 | `Connection` | `close` and `keep-alive` are honored |
-| `Content-Length` | Must be a decimal number only; two different values produce `400`. The body is read and then discarded (max `max_body_size`) |
+| `Content-Length` | Must be a decimal number only; **any duplicate** (even an identical one) and any conflicting pair produce `400`. The body is read and then discarded (max `max_body_size`) |
 | `Transfer-Encoding` | **Rejected** with `501` (reduces the risk of request smuggling). Combined with `Content-Length` it produces `400` |
 | `Range`, `If-Range` | Single range only. Multi-range is ignored (a full `200` response) |
 | `If-None-Match`, `If-Modified-Since` | Produces `304` when they match. `If-None-Match` takes precedence; if present, `If-Modified-Since` is ignored |
@@ -1067,7 +1068,7 @@ The following are rejected with `400` (or another appropriate code) and the conn
 - Space or tab between the header name and the `:` (RFC 9112 §5.1).
 - *Line folding* (`obs-fold`): continuation header lines starting with a space.
 - Header names containing characters outside a *token*; header values containing stray `NUL`, `CR`, or `LF`.
-- A duplicate `Host`, or a duplicate `Content-Length` with different values, or a non-numeric/overflowing `Content-Length`.
+- A duplicate `Host`, or a duplicate `Content-Length` (identical or conflicting), or a non-numeric/overflowing `Content-Length`.
 - `Content-Length` and `Transfer-Encoding` together.
 - A request-target containing control characters or `%00`.
 - A request line that does not follow `METHOD SP target SP version`.
@@ -2201,6 +2202,14 @@ Each release has a single capability as its theme. A checked box marks completed
 - [x] Privilege drop, pid file, daemonize
 - [x] JSON status endpoint
 - [x] systemd unit, Dockerfile, logrotate
+
+### v0.6.1: Third audit round
+
+- [x] Fix the directory-listing heap-use-after-free
+- [x] Fix the uninitialised-mutex destroy in the orchestrator
+- [x] `416` closes the connection; the status endpoint is read-only
+- [x] `-o` overrides survive `SIGHUP`
+- [x] Date, counter and buffer hardening; repo hygiene
 
 ### v0.7.0: Measurable
 

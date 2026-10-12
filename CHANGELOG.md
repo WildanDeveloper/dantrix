@@ -12,6 +12,99 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.6.1] - 2026-10-12
+
+Third audit round: 18 of 19 findings were real and are fixed here. The one
+false positive (an empty `Location:` header on a truncated redirect) is
+documented below, because proving it impossible is part of the value.
+
+### Fixed
+
+- **A directory listing read freed memory (heap-use-after-free, remote).**
+  When a GET carried a `Content-Length` body that arrived in a later TCP
+  segment, the header block was parked in `conn->hdr` and `base` pointed into
+  it. The listing path called `dx_conn_release_scratch()` — which frees
+  `conn->hdr` — and then `access_fill()` read the method, target, `Referer`
+  and `User-Agent` through `base`. ASan reproduces it deterministically on
+  `GET /subdir/` with a split body. Only the in-memory body is released now;
+  the header block stays alive until the slot is recycled.
+- **`pthread_mutex_destroy()` on an uninitialised mutex.** Several early
+  failures in the multi-worker orchestrator (allocation, `pthread_sigmask`,
+  `signalfd`, `bind`) jumped to the cleanup label before the reload snapshot
+  was initialised, and the cleanup destroyed the mutex unconditionally. The
+  mutex is now initialised before the first `goto out`, and the return of
+  `pthread_mutex_init()` is checked.
+- **A `416` response kept the connection alive.** `keep_alive` was computed
+  from the status before the `Range` header was evaluated (so it assumed
+  200/301), and the 416 branch used that value without setting
+  `Connection: close`. Every other error path closes the connection; the 416
+  now does too.
+- **`-o key=value` overrides disappeared on `SIGHUP`.** The reload path
+  replays the recorded command line, but only assignments made through the
+  flag helpers were recorded — the `-o` case applied the value directly. The
+  pair is recorded now, so an `-o` override survives a reload like any other
+  flag.
+- **The JSON status endpoint answered every method but OPTIONS.** A `POST` to
+  the metrics path was served a 200 with the snapshot. The endpoint is
+  read-only: `GET`/`HEAD` return 200 and every other method returns 405 with
+  `Allow: GET, HEAD`.
+- **`timegm()` conflated an error with 1969-12-31T23:59:59Z.** The parser
+  rejected that legitimate instant because `timegm()` returns `(time_t)-1`
+  for it (and the year guard rejected 1969 outright). The result is now
+  round-tripped through `gmtime_r()` to tell the two apart.
+- **A leap second was accepted.** The seconds bound was `value > 60`, which
+  accepted `:60` while the in-code comment said leap seconds are refused. The
+  bound is now `< 60`.
+- **`active_connections` could underflow.** A close decremented the unsigned
+  counter unconditionally; it is clamped at zero with a compare-exchange now.
+- **`copy_bounded()` underflowed when `cap == 0`.** `cap - 1u` wraps to
+  `SIZE_MAX`. No caller passes 0 today, but both copies of the helper guard
+  it now.
+- **`dx_daemonize()` used a single fork.** A session leader can reacquire a
+  controlling terminal, so the process was not fully detached. The classic
+  second fork is added; the intermediate child exits so the daemon is
+  reparented to init.
+- **`extra_len` could underflow the remaining header size.** `snprintf`
+  returns the length it *would* have written, so a truncated append made
+  `sizeof(extra) - extra_len` wrap. Every append is guarded now and the final
+  check rejects the request instead of writing past the buffer.
+- **`dx_server_run()` did not validate `access_log_path`**, which the log
+  paths dereference unconditionally (`strcmp` against `"off"`). Both
+  destinations are validated now.
+- **Any duplicate `Content-Length` is refused**, including an identical one.
+  RFC 9110 allows identical duplicates, but a duplicate framing header is what
+  a smuggling proxy relies on and the server documents a strict posture.
+  (This is a deliberate posture change, not a defect.)
+- **Repository hygiene.** `public/index.html` is no longer swallowed by
+  `.gitignore` (it ships as the example document root), the Dockerfile and the
+  systemd unit now agree on `/var/www/dantrix`, the logrotate `postrotate`
+  hook actually sends `SIGUSR1` (the stale comment claimed the feature did not
+  exist yet), the systemd unit gained `ExecReload` and a trailing newline, and
+  `conf/dantrix.conf` documents which values differ from the compiled
+  defaults.
+
+### Not a bug
+
+- **An empty `Location:` header on a truncated redirect was reported but is
+  unreachable.** `dx_fs_open()` encodes the path into a buffer of
+  `DX_LOCATION_MAX` bytes with a cap of `DX_LOCATION_MAX - 2`, so the longest
+  value `url_encode()` can return is `DX_LOCATION_MAX - 3`; the surrounding
+  slashes bring the worst case to `DX_LOCATION_MAX - 1`, which still fits the
+  caller's buffer. The `*location_len` guard is therefore never skipped.
+
+### Remaining (documented, not fixed)
+
+- `conn_serve_static()` and `dx_path_resolve()` together use roughly 23 KiB of
+  stack per request. That is comfortable on the 8 MiB default stacks and the
+  stacks are never reduced, but it is worth knowing before a port to a
+  thread-pool design with smaller stacks.
+
+### Added
+
+- Regression checks for the four externally visible fixes (the listing with a
+  drained body, the 416 close, the `-o`/SIGHUP interaction and the status
+  endpoint methods), unit checks for the pre-epoch date and the counter clamp.
+
 ## [0.6.0] - 2026-10-12
 
 Operations: configuration sources, signal driven lifecycle, privileges and a
