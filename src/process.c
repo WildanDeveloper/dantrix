@@ -114,7 +114,12 @@ int dx_daemonize(int *ready_fd)
     }
 
     /* Grandchild: fully detached. */
-    /* chdir("/") is best effort: a failure only leaves the cwd inherited. */
+    /*
+     * chdir("/") is best effort: a failure only leaves the cwd inherited. The
+     * caller must therefore resolve any relative path (pid_file, document
+     * root, log destination) BEFORE calling this function, otherwise the file
+     * ends up under / instead of the directory the operator ran from.
+     */
     if (chdir("/") != 0) {
         /* nothing to do: the process is still usable */
     }

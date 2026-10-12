@@ -121,6 +121,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Multi-worker with `SO_REUSEPORT` | ✅ | v0.5.0 |
 | Configuration, CLI, signals, graceful shutdown and reload | ✅ | v0.6.0 |
 | Third audit round (18 defects, regression suite) | ✅ | v0.6.1 |
+| Fourth audit round (40 defects, regression suite) | ✅ | v0.6.2 |
 | Benchmark suite and optimization | 📝 | v0.7.0 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
@@ -2210,6 +2211,13 @@ Each release has a single capability as its theme. A checked box marks completed
 - [x] `416` closes the connection; the status endpoint is read-only
 - [x] `-o` overrides survive `SIGHUP`
 - [x] Date, counter and buffer hardening; repo hygiene
+
+### v0.6.2: Fourth audit round
+
+- [x] SIGPIPE ignored process-wide; `log_level` actually wired through
+- [x] Fortify flags, coverage and test-asan Makefile targets
+- [x] Pipelining de-recursed (stack-overflow in sanitizer builds)
+- [x] Deployment, CI, example and unit-test hygiene
 
 ### v0.7.0: Measurable
 

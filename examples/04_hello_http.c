@@ -27,7 +27,7 @@
 static const char RESPONSE[] = "HTTP/1.1 200 OK\r\n"
                                "Server: dx-example\r\n"
                                "Content-Type: text/plain; charset=utf-8\r\n"
-                               "Content-Length: 15\r\n"
+                               "Content-Length: 14\r\n"
                                "Connection: close\r\n"
                                "\r\n"
                                "hello, HTTP!\r\n";
@@ -76,6 +76,13 @@ static void handle(int fd)
         }
         len += (size_t)n;
 
+        /*
+         * NUL-terminate before strstr: buf is a plain stack frame that recv()
+         * does not terminate, so strstr would scan past len into uninitialised
+         * bytes (and past the array if none of them is a NUL).
+         */
+        buf[len] = '\0';
+
         /* The request ends at the first empty line. */
         end = strstr(buf, "\r\n\r\n");
         if (end != NULL) {
@@ -123,7 +130,10 @@ int main(void)
         int conn_fd = accept(listen_fd, NULL, NULL);
 
         if (conn_fd < 0) {
-            if (errno == EINTR) {
+            /* Transient failures (ECONNABORTED, EMFILE, EPROTO) drop one
+             * connection instead of taking the example down. */
+            if (errno == EINTR || errno == ECONNABORTED || errno == EPROTO ||
+                errno == EMFILE || errno == ENFILE) {
                 continue;
             }
             perror("accept");

@@ -50,6 +50,13 @@ void dx_fs_destroy(dx_fs_t *fs);
 bool dx_fs_has_openat2(void);
 
 /*
+ * True when openat2() is present but blocked by policy (EPERM). In that case
+ * every real openat2 fails and the manual walk is never tried, so the caller
+ * should warn instead of silently serving 403s.
+ */
+bool dx_fs_openat2_blocked(void);
+
+/*
  * Open rel_path (already normalized, relative to the root, no leading slash;
  * "." is the root itself).
  *

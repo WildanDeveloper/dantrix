@@ -68,10 +68,23 @@ def main():
         soft, hard = __import__("resource").getrlimit(__import__("resource").RLIMIT_NOFILE)
     except Exception:
         pass
-    if hard is not None and hard < COUNT + 100:
-        print(f"  [skip] file descriptor limit is {hard}, need {COUNT + 100}")
-        proc.kill()
-        return 0
+    # The SOFT limit is what accept()/socket() are actually measured against.
+    if soft is not None and soft < COUNT + 100:
+        # Raise the soft limit up to the hard limit where possible: a default
+        # of 1024 would otherwise make the run fail after ~1020 connections
+        # and look like a server bug.
+        if hard is not None and hard >= COUNT + 100:
+            try:
+                __import__("resource").setrlimit(
+                    __import__("resource").RLIMIT_NOFILE, (COUNT + 100, hard))
+                soft = COUNT + 100
+                print(f"  raised the soft nofile limit to {soft}")
+            except (OSError, ValueError):
+                pass
+        if soft is not None and soft < COUNT + 100:
+            print(f"  [skip] soft nofile limit is {soft}, need {COUNT + 100}")
+            proc.kill()
+            return 0
 
     print(f"opening {COUNT} connections")
     socks = []
@@ -86,7 +99,7 @@ def main():
             failed += 1
             if failed < 5:
                 print(f"    connection {i} failed: {e}")
-            break
+            continue
     opened = len(socks)
     elapsed = time.time() - start
     print(f"opened {opened}/{COUNT} in {elapsed:.1f}s")

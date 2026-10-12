@@ -278,7 +278,12 @@ dx_mime_t *dx_mime_create(const char *custom_file, const char *default_type)
                         continue;
                     }
                     if (cap >= 1024u * 1024u) {
-                        break; /* refuse pathological files */
+                        /* Entries past the cap are dropped. The custom table
+                         * only ever *adds* mappings, so truncation degrades
+                         * gracefully, but it must not be silent. */
+                        fprintf(stderr, "dantrix: mime.types larger than 1 MiB; "
+                                        "entries past the cap are ignored\n");
+                        break;
                     }
                     cap *= 2u;
                     bigger = (char *)realloc(buf, cap + 1u);

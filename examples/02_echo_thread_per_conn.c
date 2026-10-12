@@ -11,7 +11,7 @@
  *   ./build/02_echo_thread_per_conn &
  *   # from another shell, hold connections open:
  *   for i in $(seq 1 2000); do nc 127.0.0.1 9001 </dev/null & done
- *   grep -c . /proc/$(pidof 02_echo_thread_per_conn)/task/task 2>/dev/null
+ *   grep -c . /proc/$(pidof 02_echo_thread_per_conn)/task
  *   grep VmRSS /proc/$(pidof 02_echo_thread_per_conn)/status
  */
 #include <arpa/inet.h>
@@ -97,7 +97,10 @@ int main(void)
         int conn_fd = accept(listen_fd, NULL, NULL);
 
         if (conn_fd < 0) {
-            if (errno == EINTR) {
+            /* Transient failures (ECONNABORTED, EMFILE, EPROTO) drop one
+             * connection instead of taking the example down. */
+            if (errno == EINTR || errno == ECONNABORTED || errno == EPROTO ||
+                errno == EMFILE || errno == ENFILE) {
                 continue;
             }
             perror("accept");

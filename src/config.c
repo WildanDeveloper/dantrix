@@ -59,7 +59,7 @@ static const dx_key_t dx_keys[] = {
     K("header_timeout", K_DUR, header_timeout_ms, 1, 86400000),
     K("body_timeout", K_DUR, body_timeout_ms, 1, 86400000),
     K("send_timeout", K_DUR, send_timeout_ms, 1, 86400000),
-    K("keepalive_timeout", K_DUR, keepalive_timeout_ms, 0, 86400000),
+    K("keepalive_timeout", K_DUR, keepalive_timeout_ms, 1, 86400000),
     K("shutdown_timeout", K_DUR, shutdown_timeout_ms, 0, 86400000),
 
     K("keepalive_requests", K_SIZE, keepalive_requests, 1, 10000000),

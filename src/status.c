@@ -61,6 +61,14 @@ void dx_status_response(dx_status_t *st, int status, uint64_t body_bytes)
         return;
     }
     atomic_fetch_add_explicit(&st->requests_total, 1, memory_order_relaxed);
+    /*
+     * A 1xx is informational and carries no body, so it is counted in the
+     * total but deliberately in no response class: the class buckets are
+     * "final" statuses. (Dantrix never emits 1xx today.)
+     */
+    if (status >= 100 && status < 200) {
+        return;
+    }
     if (status >= 200 && status < 300) {
         atomic_fetch_add_explicit(&st->resp_2xx, 1, memory_order_relaxed);
     } else if (status >= 300 && status < 400) {

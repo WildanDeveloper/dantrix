@@ -23,6 +23,7 @@ typedef struct {
     bool cpu_affinity;          /* pin worker i to CPU i */
     dx_http_limits_t limits;    /* HTTP request line / header limits */
     dx_log_format_t log_format; /* common or combined */
+    dx_log_level_t log_level;   /* error, warn, info, debug */
     /*
      * Log destinations: "stderr", "stdout", "off" or a file path. The server
      * owns the streams and the loggers, so SIGUSR1 can reopen them in place.

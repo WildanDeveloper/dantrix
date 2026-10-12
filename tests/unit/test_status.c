@@ -78,6 +78,7 @@ static void test_json(void)
 
     /* The buffer ends with a newline and the length matches strlen. */
     CHECK_EQ((long long)n, (long long)strlen(buf));
+    CHECK(n > 0u);
     CHECK(buf[n - 1] == '\n');
 
     /* A buffer that is too small is refused, not truncated. */

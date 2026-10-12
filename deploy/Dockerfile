@@ -7,7 +7,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN make release
+RUN make clean && make release
 
 # --- Runtime stage ---
 FROM debian:bookworm-slim

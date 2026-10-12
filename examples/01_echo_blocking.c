@@ -63,7 +63,13 @@ int main(void)
         /* Blocks until a client connects. Nothing else can happen meanwhile. */
         conn_fd = accept(listen_fd, NULL, NULL);
         if (conn_fd < 0) {
-            if (errno == EINTR) {
+            /*
+             * ECONNABORTED (the client reset between SYN and accept),
+             * EMFILE/ENFILE and EPROTO are transient: dropping one connection
+             * is better than taking the whole example down.
+             */
+            if (errno == EINTR || errno == ECONNABORTED || errno == EPROTO ||
+                errno == EMFILE || errno == ENFILE) {
                 continue;
             }
             perror("accept");
@@ -83,6 +89,11 @@ int main(void)
                         continue;
                     }
                     perror("write");
+                    /* The connection is dead: stop reading it too, or the
+                     * outer loop would service a peer that can never be
+                     * answered. */
+                    close(conn_fd);
+                    conn_fd = -1;
                     break;
                 }
                 if (sent == 0) {
@@ -95,7 +106,9 @@ int main(void)
         if (n < 0 && errno != ECONNRESET) {
             perror("read");
         }
-        close(conn_fd);
+        if (conn_fd >= 0) {
+            close(conn_fd);
+        }
         printf("client disconnected\n");
     }
 }

@@ -33,7 +33,7 @@ jobs:
       - name: Regression test (separate server processes)
         env:
           # One distinct port per matrix cell: the four build jobs run in
-          # parallel, and the sanitizers job runs its own copy on 18301.
+          # parallel, and the sanitizers job runs its own copy on 18401.
           DANTRIX_TEST_PORT: ${{ matrix.cc == 'gcc' && (matrix.build == 'debug' && '18111' || '18101') || (matrix.build == 'debug' && '18211' || '18201') }}
           # The release build lands in bin/, the debug build in build/debug/.
           DX_TEST_BIN: ${{ matrix.build == 'debug' && 'build/debug/dantrix' || 'bin/dantrix' }}
@@ -57,7 +57,15 @@ jobs:
               src/*.c -o build/dantrix-asan
       - name: Unit tests under ASan/UBSan
         run: |
-          for t in buffer config file http_parser http_range http_response log mime net path pool process status timer util; do
+          # The list is checked against the Makefile's wildcard so a newly
+          # added unit test cannot silently miss this job.
+          expected=$(ls tests/unit/test_*.c | sed 's#.*/test_##; s#\.c$##' | sort | tr '\n' ' ')
+          got="buffer config file http_parser http_range http_response log mime net path pool process status timer util"
+          if [ "$expected" != "$got " ]; then
+            echo "::error::ASan unit-test list out of date. Expected: $expected"
+            exit 1
+          fi
+          for t in $got; do
             gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wpedantic -Werror \
                 -O1 -g -fsanitize=address,undefined \
                 -fno-sanitize-recover=undefined \
@@ -75,8 +83,14 @@ jobs:
         env:
           DANTRIX_TEST_PORT: "18401"
         run: python3 tests/regression_test.py build/dantrix-asan
-      - name: Parser fuzz harness (deterministic standalone driver)
-        run: make fuzz
+      - name: Parser fuzz harness (built with ASan+UBSan, not the plain Makefile rule)
+        run: |
+          mkdir -p build
+          clang -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wpedantic -Werror -O1 -g \
+              -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+              -DFUZZ_STANDALONE -Isrc fuzz/fuzz_http_parser.c \
+              src/http_parser.c src/http_response.c src/util.c -o build/fuzz_asan
+          ./build/fuzz_asan
       - name: C10K check (2000 held connections)
         run: make test-c10k N=2000
 

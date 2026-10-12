@@ -260,6 +260,12 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
     if (epoll_ctl(w->epfd, EPOLL_CTL_ADD, fd, &ev) != 0) {
         int saved = errno;
 
+        /*
+         * The timer was armed before epoll_ctl. Cancelling it here keeps the
+         * dead node out of its bucket (on_timer_expired would ignore it, but
+         * the node would still occupy the slot until it fired).
+         */
+        dx_timer_wheel_cancel(w->timers, &conn->timer);
         (void)close(fd);
         /* Buffer first: the slot must be given back while it still knows
          * whether its memory came from the pool. */

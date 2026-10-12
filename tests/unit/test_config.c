@@ -26,6 +26,8 @@ static void write_file(char *out, size_t cap, const char *text)
     if (f != NULL) {
         fputs(text, f);
         fclose(f);
+    } else {
+        close(fd); /* fdopen failed: the raw descriptor would leak */
     }
 }
 

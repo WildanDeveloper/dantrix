@@ -112,7 +112,10 @@ static void test_custom_file(void)
                           "\n"
                           "text/x-dantrix dxt dxt2;\n"
                           "application/x-custom   cst   cst2 # trailing comment\n"
-                          "text/plain txt;\n" /* overrides a built-in */
+                          /* Overrides a built-in: the mapping must change to
+                           * text/x-override, NOT stay at the built-in value
+                           * (which would make the assertion pass either way). */
+                          "text/x-override txt;\n"
                           "text/html html;\n" /* same value, still fine */
                           "bogus-line-without-type;\n"
                           "text/x-noext;\n";
@@ -124,6 +127,7 @@ static void test_custom_file(void)
     if (fd < 0) {
         return;
     }
+    close(fd); /* the file is re-opened with fopen below */
     (void)close(fd);
 
     memcpy(path, dir, sizeof(dir));
@@ -150,7 +154,7 @@ static void test_custom_file(void)
     CHECK(strcmp(dx_mime_type_for(m, "/a.cst"), "application/x-custom") == 0);
     CHECK(strcmp(dx_mime_type_for(m, "/a.cst2"), "application/x-custom") == 0);
     /* The custom entry overrides the built-in text/plain. */
-    CHECK(strcmp(dx_mime_type_for(m, "/a.txt"), "text/plain") == 0);
+    CHECK(strcmp(dx_mime_type_for(m, "/a.txt"), "text/x-override") == 0);
     /* Unrelated extensions keep the built-in table. */
     CHECK(strcmp(dx_mime_type_for(m, "/a.html"), "text/html") == 0);
     CHECK(strcmp(dx_mime_type_for(m, "/a.png"), "image/png") == 0);

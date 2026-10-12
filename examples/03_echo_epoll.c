@@ -207,6 +207,14 @@ int main(void)
                 if ((events[e].events & (EPOLLIN | EPOLLRDHUP)) != 0) {
                     /* Read until EAGAIN or EOF: level-triggered demands it. */
                     for (;;) {
+                        /*
+                         * A full buffer must not be read again: read() with a
+                         * zero count returns 0 even when data is pending, and
+                         * that 0 would be mistaken for a peer FIN.
+                         */
+                        if (c->len == sizeof(c->buf)) {
+                            break;
+                        }
                         ssize_t nread = read(c->fd, c->buf + c->len, sizeof(c->buf) - c->len);
 
                         if (nread > 0) {

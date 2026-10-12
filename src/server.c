@@ -96,7 +96,7 @@ static int logs_open(dx_logs_t *logs, const dx_server_config_t *cfg)
     memset(logs, 0, sizeof(*logs));
     logs->log_path = cfg->error_log_path;
     logs->access_path = cfg->access_log_path;
-    logs->level = DX_LOG_INFO;
+    logs->level = cfg->log_level;
 
     logs->log_file = open_dest(logs->log_path);
     if (logs->log_file == NULL && strcmp(logs->log_path, "off") != 0) {
@@ -110,6 +110,10 @@ static int logs_open(dx_logs_t *logs, const dx_server_config_t *cfg)
         logs->access_file = open_dest(logs->access_path);
         if (logs->access_file == NULL) {
             fprintf(stderr, "dantrix: cannot open access log '%s'\n", logs->access_path);
+            /* The error log is already open: release it, or the failed
+             * start-up leaks one fd and one FILE*. */
+            close_dest(logs->log_file);
+            logs->log_file = NULL;
             return -1;
         }
         dx_log_reopen(&logs->access, logs->access_file);
@@ -452,17 +456,7 @@ static int server_run_multi(const dx_server_config_t *cfg, dx_logs_t *logs, int 
         goto out;
     }
 
-    /* sendfile() has no MSG_NOSIGNAL, so SIGPIPE must be ignored process-wide. */
-    {
-        struct sigaction ign;
-        memset(&ign, 0, sizeof(ign));
-        ign.sa_handler = SIG_IGN;
-        sigemptyset(&ign.sa_mask);
-        if (sigaction(SIGPIPE, &ign, NULL) != 0) {
-            dx_log_write(&logs->log, DX_LOG_ERROR, "sigaction(SIGPIPE): %s", dx_strerror(errno));
-            goto out;
-        }
-    }
+    /* SIGPIPE is already ignored process-wide (see dx_server_run). */
 
     if (setup_listeners(cfg, logs, ctxs, count, &shared_fd) != 0) {
         dx_log_write(&logs->log, DX_LOG_ERROR, "cannot listen on %s:%d: %s", cfg->bind_addr,
@@ -679,6 +673,25 @@ int dx_server_run(const dx_server_config_t *cfg)
         cfg->port < 1 || cfg->port > 65535) {
         errno = EINVAL;
         return -1;
+    }
+
+    /*
+     * SIGPIPE must be ignored process-wide, in every mode, before anything can
+     * write to a socket or a stdio stream: sendfile() has no MSG_NOSIGNAL, and
+     * a log destination whose reader has exited (a pipe fed to `head`, for
+     * example) kills the whole server on the next log line. This used to be
+     * installed only in server_run_multi(), so single-worker mode -- the
+     * default -- was unprotected.
+     */
+    {
+        struct sigaction ign;
+        memset(&ign, 0, sizeof(ign));
+        ign.sa_handler = SIG_IGN;
+        sigemptyset(&ign.sa_mask);
+        if (sigaction(SIGPIPE, &ign, NULL) != 0) {
+            fprintf(stderr, "dantrix: sigaction(SIGPIPE): %s\n", dx_strerror(errno));
+            return -1;
+        }
     }
 
     /*

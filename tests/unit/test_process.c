@@ -17,7 +17,15 @@ static void test_pid_file(void)
     dx_test_begin("process/pid_file");
 
     snprintf(path, sizeof(path), "/tmp/dantrix-pid-XXXXXX");
-    if (mkstemp(path) >= 0) {
+    {
+        int tmp_fd = mkstemp(path);
+
+        if (tmp_fd >= 0) {
+            close(tmp_fd); /* dx_pid_file_write() re-opens it; mkstemp's fd
+                            * would leak otherwise (LSan does not track fds). */
+        }
+    }
+    if (access(path, F_OK) == 0) {
         char buf[32];
         FILE *f;
 

@@ -41,8 +41,10 @@ def tsan_report(text):
     return "ThreadSanitizer" in text or "SUMMARY: ThreadSanitizer" in text
 
 
-def wait_ready(port, tries=120):
+def wait_ready(port, proc=None, tries=120):
     for _ in range(tries):
+        if proc is not None and proc.poll() is not None:
+            return False  # the server died: no point waiting the full timeout
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.2):
                 return True
@@ -65,7 +67,10 @@ def fetch(port, path, expect_status=200):
                 chunks.append(data)
             raw = b"".join(chunks)
             head, _, body = raw.partition(b"\r\n\r\n")
-            status = int(head.split(b" ")[1]) if b" " in head else 0
+            try:
+                status = int(head.split(b" ")[1]) if b" " in head else 0
+            except (IndexError, ValueError):
+                status = 0
             return status, body
     except OSError as exc:
         return 0, str(exc).encode()
@@ -73,6 +78,8 @@ def fetch(port, path, expect_status=200):
 
 results = []
 results_lock = threading.Lock()
+done_lock = threading.Lock()
+done_count = [0]
 
 
 def worker_thread(port, path, count):
@@ -81,6 +88,8 @@ def worker_thread(port, path, count):
         local.append(fetch(port, path))
     with results_lock:
         results.extend(local)
+    with done_lock:
+        done_count[0] += 1
 
 
 def run_mode(proc_args, label, port):
@@ -106,7 +115,7 @@ def run_mode(proc_args, label, port):
                      "--error-log", err_path, "--log-format", "combined"],
         stdout=err_file, stderr=err_file)
     try:
-        if not wait_ready(port):
+        if not wait_ready(port, proc):
             check(f"{label}: server became ready", False,
                   f"exit={proc.poll()}")
             return
@@ -121,10 +130,20 @@ def run_mode(proc_args, label, port):
             threading.Thread(target=worker_thread, args=(port, "/big.bin", 10))
             for _ in range(2)
         ]
+        done_count[0] = 0
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=120)
+        # join(timeout=) does not guarantee the thread finished: a straggler
+        # would extend the module-global list after run_mode resets it and
+        # contaminate the next mode's count.
+        if done_count[0] != len(threads):
+            check(f"{label}: every worker thread finished", False,
+                  f"{done_count[0]}/{len(threads)}")
+            proc.kill()
+            proc.wait()
+            return
 
         ok = sum(1 for status, _ in results if status == 200)
         expected = REQUESTS_PER_THREAD * WORKERS + 20

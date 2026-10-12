@@ -13,6 +13,7 @@
     delaycompress
     missingok
     notifempty
+    su dantrix dantrix
     create 0640 dantrix dantrix
     sharedscripts
     postrotate

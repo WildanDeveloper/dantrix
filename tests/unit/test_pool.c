@@ -191,6 +191,7 @@ static void test_recycled_slot_is_clean(void)
 {
     dx_pool_t *pool = dx_pool_create(4u, 4u);
     dx_conn_t *c;
+    dx_conn_t *first_slot;
     uint32_t first_generation;
 
     dx_test_begin("pool/recycled_slot_is_clean");
@@ -206,6 +207,7 @@ static void test_recycled_slot_is_clean(void)
         return;
     }
     first_generation = c->generation;
+    first_slot = c; /* remember it so the recycle can be proven below */
 
     /* Dirty every field the connection flow writes. */
     c->eof = true;
@@ -233,7 +235,7 @@ static void test_recycled_slot_is_clean(void)
         dx_pool_destroy(pool);
         return;
     }
-    CHECK(c == c); /* same slot, recycled */
+    CHECK(c == first_slot); /* the SAME slot was handed out again */
     CHECK_EQ(c->generation, first_generation + 1u);
     CHECK_EQ(c->state, DX_CONN_READING);
     CHECK_EQ(c->eof, false);

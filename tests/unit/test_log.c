@@ -74,7 +74,10 @@ static void test_filtering_and_format(void)
     CHECK(strstr(buf, "[error]") != NULL);
     CHECK(strstr(buf, "urgent") != NULL);
 
-    /* The record is one line ending in a newline. */
+    /* The record is one line ending in a newline. The length guard keeps the
+     * check safe when the capture produced nothing (CHECK does not stop
+     * execution, so an unchecked buf[-1] would be a real OOB read). */
+    CHECK(strlen(buf) > 0u);
     CHECK(buf[strlen(buf) - 1] == '\n');
     CHECK(strchr(buf, '\n') == buf + strlen(buf) - 1);
 
@@ -128,7 +131,8 @@ static void test_access_log(void)
     CHECK(strstr(buf, "] \"GET /x HTTP/1.1\" 200 39") != NULL);
     /* Common format has no referer/agent. */
     CHECK(strchr(buf, '"') == buf + strlen(buf) - 1u - 0u || strstr(buf, "\" \"") == NULL);
-    /* One line. */
+    /* One line (guarded: CHECK does not stop on a previous failure). */
+    CHECK(strlen(buf) > 0u);
     CHECK(buf[strlen(buf) - 1u] == '\n');
 
     dx_test_begin("log/access_combined");
@@ -207,11 +211,21 @@ static void test_thread_safety(void)
     }
     dx_log_init(&g_shared_log, tmp, DX_LOG_INFO);
 
-    for (i = 0; i < LOG_THREADS; i++) {
-        CHECK(pthread_create(&threads[i], NULL, log_writer, (void *)i) == 0);
-    }
-    for (i = 0; i < LOG_THREADS; i++) {
-        pthread_join(threads[i], NULL);
+    {
+        bool created[LOG_THREADS] = {false};
+
+        for (i = 0; i < LOG_THREADS; i++) {
+            created[i] = (pthread_create(&threads[i], NULL, log_writer, (void *)i) == 0);
+            CHECK(created[i]); /* recorded, not fatal */
+        }
+        for (i = 0; i < LOG_THREADS; i++) {
+            /* Only join the threads that were actually created: joining an
+             * uninitialised pthread_t is undefined behaviour, and CHECK does
+             * not stop execution. */
+            if (created[i]) {
+                pthread_join(threads[i], NULL);
+            }
+        }
     }
 
     /* Read the whole file back. */

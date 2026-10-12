@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.6.1
+VERSION := 0.6.2
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -41,15 +41,18 @@ WARN      := -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wconversion \
              -Wstrict-prototypes -Wmissing-prototypes -Wnull-dereference \
              -Wundef
 HARDEN_C  := -fstack-protector-strong -fstack-clash-protection $(ARCH_HARDEN) \
-             -D_FORTIFY_SOURCE=2 -fPIE -U_FORTIFY_SOURCE
+             -D_FORTIFY_SOURCE=2 -fPIE
 HARDEN_LD := -pie -Wl,-z,relro,-z,now,-z,noexecstack
 
 REL_CFLAGS := -O2 -DNDEBUG
 DBG_CFLAGS := -O0 -g3 -fno-omit-frame-pointer
 PRF_CFLAGS := -O2 -g -fno-omit-frame-pointer
 
-CFLAGS ?= $(REL_CFLAGS)
-ALL_CFLAGS := $(STD) $(DEFS) $(WARN) $(HARDEN_C) $(CFLAGS) $(CFLAGS_EXTRA)
+# An exported CFLAGS replaces the optimisation level silently (a packaging
+# default of "-g -O0" would ship a debug build as a release). Append REL_CFLAGS
+# so the release profile always applies on top of whatever was asked for.
+CFLAGS ?=
+ALL_CFLAGS := $(STD) $(DEFS) $(WARN) $(HARDEN_C) $(CFLAGS) $(REL_CFLAGS) $(CFLAGS_EXTRA)
 LDFLAGS ?=
 ALL_LDFLAGS := $(HARDEN_LD) $(LDFLAGS)
 LDLIBS ?=
@@ -162,12 +165,18 @@ $(BUILD)/test_%_asan: $(TESTS)/test_%.c $(LIB_SRCS)
 	    -I$(SRC) -I$(TESTS) $^ -o $@ $(LDFLAGS) -lpthread
 
 test-asan:
+	@mkdir -p $(BUILD)
 	@fail=0; \
 	for src in $(TEST_SRCS); do \
 	    name=$$(basename $$src .c); \
-	    $(MAKE) --no-print-directory $(BUILD)/$${name#test_}_asan_bin; \
+	    $(MAKE) --no-print-directory $(BUILD)/$${name#test_}_asan_bin || fail=1; \
+	    if [ $$fail -eq 0 ]; then \
+	        echo "== ASan: build/$${name#test_}_asan_bin"; \
+	        ./$(BUILD)/$${name#test_}_asan_bin || fail=1; \
+	    fi; \
 	done; \
-	echo "build ASan test binaries with: make test-asan"
+	if [ $$fail -ne 0 ]; then echo "asan unit tests FAILED"; exit 1; fi; \
+	echo "all asan unit tests passed"
 
 $(BUILD)/%_asan_bin: $(TESTS)/test_%.c $(LIB_SRCS)
 	@mkdir -p $(dir $@)
@@ -228,7 +237,7 @@ coverage:
 	for src in $(TEST_SRCS); do \
 	    name=$$(basename $$src .c); \
 	    $(CC) $(STD) $(DEFS) $(WARN) -O0 -g --coverage \
-	        -I$(SRC) -I$(TESTS) $(LIB_SRCS) $(TESTS)/$$src \
+	        -I$(SRC) -I$(TESTS) $(LIB_SRCS) $$src \
 	        -o $(BUILD)/$${name#test_}_cov || exit 1; \
 	    ./$(BUILD)/$${name#test_}_cov || fail=1; \
 	done; \

@@ -35,8 +35,14 @@ static void test_buffer_window(void)
     CHECK_EQ(b.len, 0);
     CHECK_EQ(dx_buffer_writable(&b), 16);
 
-    /* Filling the buffer rejects an append that does not fit. */
-    CHECK(dx_buffer_append(&b, mem, 16));
+    /* Filling the buffer rejects an append that does not fit. The source is a
+     * separate array: passing b.data itself would be a degenerate-overlap
+     * memcpy (C11 7.24.4.1) and could never fail. */
+    {
+        static const unsigned char fill[16] = {'0', '1', '2', '3', '4', '5', '6', '7',
+                                               '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+        CHECK(dx_buffer_append(&b, fill, sizeof(fill)));
+    }
     CHECK(!dx_buffer_append(&b, "x", 1));
     CHECK_EQ(dx_buffer_readable(&b), 16);
 

@@ -95,11 +95,21 @@ void dx_log_write(dx_log_t *log, dx_log_level_t level, const char *fmt, ...)
     char stamp[40];
     va_list ap;
 
-    if (log == NULL || log->out == NULL || fmt == NULL) {
+    if (log == NULL || fmt == NULL) {
         return;
     }
-    /* Records below the configured level are dropped before formatting. */
+    /*
+     * log->out is read under the mutex: the SIGUSR1 reopen path swaps it and
+     * closes the old stream, so an unlocked read here could race a reopen and
+     * write to a closed FILE*. Records below the configured level are dropped
+     * first -- log->level is set once before the threads exist.
+     */
     if (level < log->level) {
+        return;
+    }
+    log_lock(log);
+    if (log->out == NULL) {
+        log_unlock(log);
         return;
     }
 
@@ -125,7 +135,6 @@ void dx_log_write(dx_log_t *log, dx_log_level_t level, const char *fmt, ...)
      * A failed log write is deliberately ignored: the logger must never turn
      * a recoverable problem into a fatal one, and it must not use itself.
      */
-    log_lock(log);
     (void)fprintf(log->out, "%s [%s] ", stamp, dx_log_level_name(level));
     va_start(ap, fmt);
     (void)vfprintf(log->out, fmt, ap);

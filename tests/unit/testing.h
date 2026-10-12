@@ -56,8 +56,8 @@ static int dx_test_summary(void)
         dx_test_count++;                                                     \
         if (va_ == vb_) {                                                    \
             dx_test_failed++;                                                \
-            fprintf(stderr, "FAIL [%s] %s:%d: %s != %s (%lld)\n",            \
-                    dx_test_group, __FILE__, __LINE__, #a, va_);             \
+            fprintf(stderr, "FAIL [%s] %s:%d: %s != %s (%lld != %lld)\n",    \
+                    dx_test_group, __FILE__, __LINE__, #a, #b, va_, vb_);    \
         }                                                                    \
     } while (0)
 

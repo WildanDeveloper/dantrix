@@ -73,12 +73,8 @@ typedef struct {
     bool prev_cr; /* last examined byte was CR */
 
     /* Request line assembly. */
-    bool have_method; /* first SP seen */
-    bool have_target; /* second SP seen */
 
     /* Header accumulation. */
-    bool in_name; /* still inside the header name */
-    bool after_colon;
 
     /* Validation state. */
     bool host_seen;

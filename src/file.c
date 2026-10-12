@@ -51,6 +51,19 @@ bool dx_fs_has_openat2(void)
     return errno != ENOSYS;
 }
 
+bool dx_fs_openat2_blocked(void)
+{
+    struct open_how how;
+
+    memset(&how, 0, sizeof(how));
+    how.flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
+    how.resolve = RESOLVE_BENEATH;
+    if (sys_openat2(AT_FDCWD, ".", &how, sizeof(how)) >= 0) {
+        return false; /* it actually works */
+    }
+    return errno == EPERM;
+}
+
 /* Percent-encode a file name or path for use in a URI; defined further down. */
 static size_t url_encode(const char *src, size_t len, char *out, size_t cap);
 

@@ -1167,6 +1167,7 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
         /* 4. Range handling (GET only; HEAD always describes the full file). */
         {
             char content_type[160];
+            int written;
             dx_range_t range;
             dx_range_result_t range_result = DX_RANGE_NONE;
             uint64_t start = 0;
@@ -1187,8 +1188,6 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
             }
 
             if (range_result == DX_RANGE_UNSATISFIABLE) {
-                int written;
-
                 /*
                  * 416 is an error status: like every other error path it must
                  * end the connection. keep_alive/connection were computed for a
@@ -1216,12 +1215,21 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
                 start = range.start;
                 body_len = range.length;
                 partial = true;
-                if (extra_len < sizeof(extra)) {
-                    extra_len += (size_t)snprintf(
-                        extra + extra_len, sizeof(extra) - extra_len,
-                        "Content-Range: bytes %llu-%llu/%llu\r\n", (unsigned long long)range.start,
-                        (unsigned long long)range.end, (unsigned long long)size);
+                /*
+                 * Content-Range is mandatory on a 206 (RFC 9110 15.3.7). If it
+                 * does not fit the buffer the request must fail with 500:
+                 * silently skipping the header would emit a 206 with no way
+                 * for the client to tell which bytes it received.
+                 */
+                written = snprintf(extra + extra_len, sizeof(extra) - extra_len,
+                                   "Content-Range: bytes %llu-%llu/%llu\r\n",
+                                   (unsigned long long)range.start, (unsigned long long)range.end,
+                                   (unsigned long long)size);
+                if (written < 0 || (size_t)written >= sizeof(extra) - extra_len) {
+                    (void)close(opened.fd);
+                    return conn_finish_error(w, conn, 500, NULL);
                 }
+                extra_len += (size_t)written;
             }
             if (extra_len < sizeof(extra)) {
                 extra_len += (size_t)snprintf(extra + extra_len, sizeof(extra) - extra_len,
@@ -1431,10 +1439,13 @@ static int conn_after_response(struct dx_worker *w, dx_conn_t *conn)
     if (conn_restore_pipelined(w, conn) != 0) {
         return -1;
     }
-    if (dx_conn_has_pending(conn)) {
-        /* Pipelined request: answer it before waiting for more bytes. */
-        return conn_process(w, conn);
-    }
+    /*
+     * A pipelined request is now sitting in the buffer. It is parsed by
+     * conn_process's own loop (the caller of conn_finish), so returning here
+     * does not stall the connection -- and it removes the recursion that
+     * used to overflow the stack on a long pipelined burst.
+     */
+    return 0;
 
     /* Idle: the read buffer goes back to the pool while nothing is pending. */
     dx_conn_release_buffer(conn, w->bufs);
@@ -1460,6 +1471,13 @@ static bool peer_is_loopback(const char *peer)
         return false;
     }
     if (strcmp(peer, "::1") == 0) {
+        return true;
+    }
+    /*
+     * ::ffff:127.0.0.1 is the same loopback address seen through a dual-stack
+     * listener (INET6_ADDRSTRLEN formatting of a v4-mapped v6 peer).
+     */
+    if (strncmp(peer, "::ffff:127.", 11) == 0) {
         return true;
     }
     /* 127.0.0.0/8 */
@@ -1675,80 +1693,104 @@ static int conn_park_headers(dx_conn_t *conn, size_t header_len)
 static int conn_process(struct dx_worker *w, dx_conn_t *conn)
 {
     size_t consumed = 0;
-    dx_parse_result_t r;
-    const unsigned char *base;
-    const dx_http_request_t *req;
 
     if (conn->buf.data == NULL) {
         return -1; /* unreachable: a live connection owns a buffer */
     }
-    r = dx_http_parser_feed(&conn->parser, conn->buf.data + conn->buf.off,
-                            dx_buffer_readable(&conn->buf), &consumed);
-    if (r == DX_PARSE_NEED_DATA) {
-        return 0; /* wait for more bytes */
-    }
-
-    if (r == DX_PARSE_ERROR) {
-        /* The request is rejected before any method is known. */
-        int status = conn->parser.status_code;
-
-        access_fill(conn, NULL, NULL, status, 0);
-        conn->close_conn = true;
-        /*
-         * The client may still be sending the oversized or malformed
-         * request; discard what is already in flight so the error response
-         * is read instead of lost to an RST.
-         */
-        conn_discard_input(conn);
-        return conn_finish_error(w, conn, status, NULL);
-    }
-
-    base = conn->buf.data + conn->buf.off;
-    req = &conn->parser.req;
 
     /*
-     * A request body is read and discarded before the response goes out, so
-     * the next request on a kept-alive connection starts at a clean boundary.
+     * One iteration per pipelined request. The loop replaces the previous
+     * tail call chain (conn_finish -> conn_after_response -> conn_process),
+     * which recursed once per buffered request: with the large staging
+     * buffers of conn_dispatch on every frame, a few hundred pipelined
+     * requests exhausted the stack in the non-optimised and sanitizer builds
+     * (measured: stack-overflow at ~10 frames with a 256 KiB stack).
      */
-    if (req->has_content_length && req->content_length > 0) {
-        if (req->content_length > w->life.max_body_size) {
-            access_fill(conn, req, base, 413, 0);
-            conn_discard_input(conn);
-            return conn_finish_error(w, conn, 413, NULL);
+    for (;;) {
+        dx_parse_result_t r;
+        const unsigned char *base;
+        const dx_http_request_t *req;
+
+        r = dx_http_parser_feed(&conn->parser, conn->buf.data + conn->buf.off,
+                                dx_buffer_readable(&conn->buf), &consumed);
+        if (r == DX_PARSE_NEED_DATA) {
+            return 0; /* wait for more bytes */
         }
-        conn->body_left = req->content_length;
-        conn->body_offset = consumed;
-        conn->state = DX_CONN_READING;
+
+        if (r == DX_PARSE_ERROR) {
+            /* The request is rejected before any method is known. */
+            int status = conn->parser.status_code;
+
+            access_fill(conn, NULL, NULL, status, 0);
+            conn->close_conn = true;
+            /*
+             * The client may still be sending the oversized or malformed
+             * request; discard what is already in flight so the error response
+             * is read instead of lost to an RST.
+             */
+            conn_discard_input(conn);
+            return conn_finish_error(w, conn, status, NULL);
+        }
+
+        base = conn->buf.data + conn->buf.off;
+        req = &conn->parser.req;
+
         /*
+         * A request body is read and discarded before the response goes out, so
+         * the next request on a kept-alive connection starts at a clean boundary.
+         */
+        if (req->has_content_length && req->content_length > 0) {
+            if (req->content_length > w->life.max_body_size) {
+                access_fill(conn, req, base, 413, 0);
+                conn_discard_input(conn);
+                return conn_finish_error(w, conn, 413, NULL);
+            }
+            conn->body_left = req->content_length;
+            conn->body_offset = consumed;
+            conn->state = DX_CONN_READING;
+            /*
          * Dispatch still reads method, target and header values through the
          * offsets the parser produced, so the header block must survive until
          * the body is complete. It is moved into an owned copy (conn->hdr) and
          * the read buffer is recycled for body bytes, which is what keeps a
          * body larger than the buffer from dead-ending the connection.
          */
-        {
-            size_t available = dx_buffer_readable(&conn->buf) - consumed;
+            {
+                size_t available = dx_buffer_readable(&conn->buf) - consumed;
 
-            if (available >= conn->body_left) {
-                /* The body was already here (pipelined or eager client). */
-                conn->body_left = 0;
-            } else {
-                if (conn_park_headers(conn, consumed) != 0) {
-                    return -1;
+                if (available >= conn->body_left) {
+                    /* The body was already here (pipelined or eager client). */
+                    conn->body_left = 0;
+                } else {
+                    if (conn_park_headers(conn, consumed) != 0) {
+                        return -1;
+                    }
+                    /* The body bytes now sit at offset 0 and are all uncounted. */
+                    available = dx_buffer_readable(&conn->buf);
+                    conn->body_left -= available;
+                    dx_buffer_consume(&conn->buf, available);
+                    conn->body_offset = 0;
+                    dx_conn_arm_timer(w, conn);
+                    return 0; /* the rest of the body arrives with later reads */
                 }
-                /* The body bytes now sit at offset 0 and are all uncounted. */
-                available = dx_buffer_readable(&conn->buf);
-                conn->body_left -= available;
-                dx_buffer_consume(&conn->buf, available);
-                conn->body_offset = 0;
-                dx_conn_arm_timer(w, conn);
-                return 0; /* the rest of the body arrives with later reads */
             }
         }
+        conn->body_offset = consumed;
+        dx_conn_release_scratch(conn); /* no saved header block for this request */
+        if (conn_dispatch(w, conn) != 0) {
+            return -1;
+        }
+        /*
+         * The response is out. When a pipelined request is already sitting in
+         * the buffer, loop and parse it here instead of recursing through
+         * conn_after_response (which conn_finish calls). Anything else --
+         * closing, idle, a partially sent response -- is left to the caller.
+         */
+        if (conn->state != DX_CONN_READING || !dx_conn_has_pending(conn) ||
+            dx_conn_has_work(conn)) {
+            return 0;
+        }
     }
-    conn->body_offset = consumed;
-    dx_conn_release_scratch(conn); /* no saved header block for this request */
-    return conn_dispatch(w, conn);
 }
 
 /*
@@ -1902,12 +1944,31 @@ int dx_conn_on_readable(struct dx_worker *w, dx_conn_t *conn)
             } else if (conn_process(w, conn) != 0) {
                 return -1;
             }
-            if (dx_conn_has_work(conn) || conn->state == DX_CONN_IDLE) {
-                /* Response staged, or everything answered: yield. */
+            if (dx_conn_has_work(conn)) {
+                /* Response staged, or a body still in flight: yield. */
                 dx_conn_arm_timer(w, conn);
                 return 0;
             }
-            continue; /* pipelined data may still be waiting in the buffer */
+            /*
+             * A pipelined request restored by conn_after_response is already
+             * sitting in the buffer (not in the socket), so reading more would
+             * only hit EAGAIN. Parse it here: this is one level deep, not the
+             * recursion the old tail call used to build.
+             */
+            if (conn->state == DX_CONN_READING && dx_conn_has_pending(conn)) {
+                if (conn_process(w, conn) != 0) {
+                    return -1;
+                }
+                if (dx_conn_has_work(conn)) {
+                    dx_conn_arm_timer(w, conn);
+                    return 0;
+                }
+                if (conn->state == DX_CONN_READING && dx_conn_has_pending(conn)) {
+                    continue; /* more pipelined requests in the buffer */
+                }
+            }
+            dx_conn_arm_timer(w, conn);
+            return 0;
         }
         if (n == 0) {
             /*

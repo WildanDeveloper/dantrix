@@ -328,7 +328,7 @@ static void test_limit_errors(void)
 
     /* Whole request one byte past max_header_size -> 431. */
     {
-        size_t n = 33u; /* strlen("GET / HTTP/1.1\r\nHost: x\r\nX-Pad: ") */
+        size_t n = 32u; /* strlen("GET / HTTP/1.1\r\nHost: x\r\nX-Pad: ") */
         size_t pad = limits.max_header_size;
 
         big = (char *)malloc(n + pad + 96u);

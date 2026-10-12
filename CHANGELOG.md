@@ -12,6 +12,98 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.6.2] - 2026-10-12
+
+Fourth audit round: all 40 findings verified as real and fixed.
+
+### Fixed
+
+Critical
+
+- **SIGPIPE killed the server in single-worker mode.** `SIG_IGN(SIGPIPE)` was
+  installed only in `server_run_multi()`, so the default mode was unprotected:
+  `sendfile()` has no `MSG_NOSIGNAL`, and a log destination whose reader had
+  exited killed the process on the next log line (reproduced, exit 141). It is
+  now installed once in `dx_server_run()`, before either mode starts.
+- **`log_level` was parsed, validated, printed and documented but ignored.**
+  `dx_server_config_t` had no such field and `logs_open()` hardcoded
+  `DX_LOG_INFO`, so `--log-level error` still emitted `[info]` lines and the
+  whole debug layer was dead. It is wired through now.
+- **`-U_FORTIFY_SOURCE` cancelled `-D_FORTIFY_SOURCE=2`**, so every build was
+  made without fortify while the Makefile claimed otherwise.
+- **`make coverage` always failed**: the recipe prefixed `$(TESTS)/` onto
+  `TEST_SRCS`, which already contained full paths.
+- **`make test-asan` built the binaries and never ran them** (and `fail` was
+  never set), so the target always "passed" while running zero tests.
+
+High
+
+- `examples/03`: a full read buffer made `read(fd, buf, 0)` return 0, which was
+  mistaken for a peer FIN (echo dropped data under load).
+- `examples/04`: `strstr()` scanned past `len` into uninitialised stack bytes
+  (no NUL terminator), and `Content-Length: 15` did not match the 14-byte body.
+- `tests/c10k_test.py` checked the *hard* nofile limit instead of the *soft*
+  one (the one actually enforced), so a default `1024` made the suite fail
+  after ~1020 connections. The soft limit is now raised where possible.
+- `tests/smoke_test.py` defaulted to a binary path that is never built and had
+  no existence guard.
+- `tests/unit/testing.h`: `CHECK_NE` passed 5 arguments to a format with 6
+  conversions (a failing check printed a counter as a `char*`). It compiles
+  clean only because no test uses it yet.
+- **The pipelining path recursed once per buffered request** through
+  `conn_finish -> conn_after_response -> conn_process -> conn_dispatch ->
+  conn_serve_static -> conn_finish`. In -O0/ASan/TSan builds (where tail calls
+  are not eliminated) a few hundred pipelined requests exhausted the stack:
+  reproduced as a stack-overflow at ~10 frames with a 256 KiB stack. The chain
+  is iterative now; 3000 pipelined requests are served in an ASan build with a
+  256 KiB stack.
+
+Medium
+
+- The systemd unit failed to start when `/var/log/dantrix` did not exist
+  (`LogsDirectory` replaces the hard `ReadWritePaths`).
+- `logrotate` refused to rotate (no `su` directive for a non-root directory).
+- The Docker image could link stale host-architecture objects (`make clean`
+  before `make release`).
+- `make coverage` / `test_*` / `fuzz_*` / `examples` had no header dependencies,
+  so editing a header left them stale.
+- `EPOLLERR|EPOLLHUP` dropped a response that was already buffered.
+- `bytes_out` was counted twice on the pread() and in-memory-body paths.
+- The `SIGUSR1` log reopen raced `dx_log_write()`'s unlocked `log->out` read.
+- A concurrent `SIGHUP` could mix old and new `Cache-Control` bytes.
+- An exported `CFLAGS` silently defeated `-O2 -DNDEBUG` in the release build.
+- CI ran the fuzz harness without sanitizers, documented the wrong port, and
+  hardcoded the ASan unit-test list (a new test silently missed the job).
+- A `206` could be sent without its mandatory `Content-Range`.
+- The example servers exited on transient `accept()` errors and kept servicing
+  a dead connection after a write error.
+- Unit-test defects that masked regressions: `CHECK(c == c)` for the slot
+  recycle, a MIME override mapped to the built-in value, and a 431 fixture with
+  a wrong length.
+
+Low / latent
+
+- FILE* leak when the access log failed to open; a stale connection timer left
+  armed when `epoll_ctl` failed; the loopback check rejected IPv4-mapped IPv6
+  peers; `keepalive_timeout = 0` disabled the idle timeout entirely (now
+  rejected); `workers auto` bypassed the 1024 cap; `openat2` blocked by policy
+  produced a silent site-wide 403 (now warned at start-up); the mime.types
+  1 MiB cap truncated silently (now warned); dead parser fields removed; OOB
+  reads on unit-test failure paths; fd/join/memcpy hygiene in the unit tests;
+  `read_response()` now survives a timeout instead of aborting the suite; the
+  fuzz harness lost its dead length computation; example 02's thread-count
+  command pointed at a path that does not exist; a relative `pid_file` is now
+  resolved before the daemon `chdir("/")`s.
+
+### Added
+
+- `dx_fs_openat2_blocked()` so a seccomp-blocked `openat2()` warns at start-up
+  instead of silently serving 403s.
+- `dx_config_set()` (key and value separately), which removed the intermediate
+  "key=value" string that truncated long path values.
+- The CI checks the ASan unit-test list against the Makefile wildcard, so a
+  newly added test cannot silently miss the job.
+
 ## [0.6.1] - 2026-10-12
 
 Third audit round: 18 of 19 findings were real and are fixed here. The one

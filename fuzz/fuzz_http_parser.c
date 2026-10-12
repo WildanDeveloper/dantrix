@@ -119,11 +119,7 @@ int main(void)
     }
 
     for (long it = 0; it < iterations; it++) {
-        size_t len = (size_t)(rng_next() % 4096u);
-
-        if (len > sizeof(buf)) {
-            len = sizeof(buf);
-        }
+        size_t len;
         /* Start from a random seed and mutate. */
         {
             const char *seed = seeds[rng_next() % n_seeds];

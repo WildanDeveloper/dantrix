@@ -587,6 +587,22 @@ int main(int argc, char **argv)
     }
 
     /*
+     * A relative pid_file would be written under / after the daemon
+     * chdir("/")s, so it is made absolute here while the cwd is still the
+     * one the operator ran from.
+     */
+    if (set.pid_file[0] != '\0' && set.pid_file[0] != '/') {
+        char cwd[DX_CFG_PATH_MAX];
+        char abs[DX_CFG_PATH_MAX];
+
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            if (snprintf(abs, sizeof(abs), "%s/%s", cwd, set.pid_file) < (int)sizeof(abs)) {
+                dx_strlcpy(set.pid_file, abs, sizeof(set.pid_file));
+            }
+        }
+    }
+
+    /*
      * The document root is opened before the listener so that a bad root is a
      * start-up error rather than a stream of 404s.
      */
@@ -601,8 +617,19 @@ int main(int argc, char **argv)
      * exist but was never called, so the operator had no way to tell whether
      * RESOLVE_BENEATH or the manual walk was enforcing the root.
      */
-    fprintf(stderr, "dantrix: path resolution: %s\n",
-            dx_fs_has_openat2() ? "openat2(RESOLVE_BENEATH)" : "manual walk (openat2 unavailable)");
+    if (!dx_fs_has_openat2()) {
+        fprintf(stderr, "dantrix: path resolution: manual walk (openat2 unavailable)\n");
+    } else if (dx_fs_openat2_blocked()) {
+        /*
+         * The probe succeeded but a real openat2 fails with EPERM: a seccomp
+         * policy. Without the warning every request would 403 with no hint
+         * why, because the manual walk is never tried in this case.
+         */
+        fprintf(stderr, "dantrix: WARNING: openat2() is blocked by policy (EPERM); "
+                        "every request will be refused with 403\n");
+    } else {
+        fprintf(stderr, "dantrix: path resolution: openat2(RESOLVE_BENEATH)\n");
+    }
     mime = dx_mime_create(set.mime_types, set.default_type);
     if (mime == NULL) {
         fprintf(stderr, "dantrix: cannot build the MIME table\n");
@@ -623,6 +650,15 @@ int main(int argc, char **argv)
     if (workers == 0) {
         workers = (int)dx_cpu_count();
     }
+    /*
+     * The registry caps "workers" at 1024, but "auto" bypasses it because it
+     * is resolved here. Clamp with an explanation instead of letting
+     * server_run_multi() fail with a bare EINVAL on a 2048-core machine.
+     */
+    if (workers > 1024) {
+        fprintf(stderr, "dantrix: --workers %d exceeds the maximum of 1024\n", workers);
+        return DX_EXIT_USAGE;
+    }
     cfg.workers = workers;
     cfg.reuseport = set.reuseport;
     cfg.cpu_affinity = set.cpu_affinity;
@@ -630,6 +666,7 @@ int main(int argc, char **argv)
     cfg.limits.max_header_size = set.max_header_size;
     cfg.limits.max_headers = set.max_headers;
     cfg.log_format = set.log_format;
+    cfg.log_level = set.log_level;
     cfg.error_log_path = set.error_log;
     cfg.access_log_path = set.access_log;
     cfg.daemonize = set.daemonize;

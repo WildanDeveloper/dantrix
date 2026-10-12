@@ -73,7 +73,6 @@ typedef struct {
     size_t mem_body_len;
     size_t mem_body_off;
     uint64_t body_left; /* request body bytes still to be discarded */
-    uint64_t body_seen; /* body bytes already accounted for in body_left */
     size_t body_offset; /* where the body starts inside the read buffer */
     /*
      * Header block moved out of the read buffer while a request body is
