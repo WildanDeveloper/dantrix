@@ -89,12 +89,17 @@ int dx_daemonize(int *ready_fd)
     if (setsid() < 0) {
         return -1;
     }
-    (void)chdir("/");
+    /* chdir("/") is best effort: a failure only leaves the cwd inherited. */
+    if (chdir("/") != 0) {
+        /* nothing to do: the process is still usable */
+    }
     {
         int devnull = open("/dev/null", O_RDWR | O_CLOEXEC);
 
         if (devnull >= 0) {
-            (void)dup2(devnull, STDIN_FILENO);
+            if (dup2(devnull, STDIN_FILENO) < 0) {
+                /* best effort */
+            }
             if (devnull > STDERR_FILENO) {
                 (void)close(devnull);
             }
@@ -110,8 +115,10 @@ void dx_daemon_ready(int ready_fd)
 {
     if (ready_fd >= 0) {
         char c = '1';
+        ssize_t written = write(ready_fd, &c, 1);
 
-        (void)write(ready_fd, &c, 1);
+        /* The parent already handles a failed handshake as EOF. */
+        (void)written;
         (void)close(ready_fd);
     }
 }
@@ -134,12 +141,11 @@ int dx_drop_privileges(const char *user, const char *group, dx_log_t *log)
     if ((user == NULL || user[0] == '\0') && (group == NULL || group[0] == '\0')) {
         return 0; /* nothing requested */
     }
-    if (!as_root) {
-        dx_log_write(log, DX_LOG_WARN,
-                     "user/group requested but the process is not root; privileges not dropped");
-        return 0;
-    }
-
+    /*
+     * Validate the names first, unconditionally: a typo in the configuration
+     * must be a start-up error even when the process is not root, otherwise
+     * the server would silently keep running as the invoking user.
+     */
     if (group != NULL && group[0] != '\0') {
         gr = getgrnam(group);
         if (gr == NULL) {
@@ -160,6 +166,11 @@ int dx_drop_privileges(const char *user, const char *group, dx_log_t *log)
         if (gid == (gid_t)-1) {
             gid = pw->pw_gid; /* default to the user's primary group */
         }
+    }
+    if (!as_root) {
+        dx_log_write(log, DX_LOG_WARN,
+                     "user/group requested but the process is not root; privileges not dropped");
+        return 0;
     }
 
     /* Group first: after setuid() the process may no longer be allowed to. */
