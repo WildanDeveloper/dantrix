@@ -42,6 +42,16 @@ static void log_unlock(const dx_log_t *log)
     }
 }
 
+void dx_log_reopen(dx_log_t *log, FILE *new_out)
+{
+    if (log == NULL) {
+        return;
+    }
+    log_lock(log);
+    log->out = new_out;
+    log_unlock(log);
+}
+
 const char *dx_log_level_name(dx_log_level_t level)
 {
     switch (level) {

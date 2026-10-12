@@ -5,129 +5,259 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/signalfd.h>
 #include <unistd.h>
 
 #include "dantrix.h"
 #include "net.h"
+#include "process.h"
+#include "status.h"
 #include "util.h"
 #include "worker.h"
 
 /*
- * The flag is written from a signal handler and read from the event loop. Only
- * sig_atomic_t writes of 0/1 are used, which is the exact contract the C
- * standard guarantees for this pattern. It is only used by the single-worker
- * path, where handler and loop share one thread.
+ * Log destinations. The orchestrator owns the FILE streams and the logger
+ * structs, and can reopen them in place on SIGUSR1 (logrotate). A worker only
+ * borrows the logger pointers, so a reopen never races with logging.
  */
-static volatile sig_atomic_t g_stop = 0;
+typedef struct {
+    dx_log_t log;
+    dx_log_t access;
+    FILE *log_file;
+    FILE *access_file;
+    const char *log_path;
+    const char *access_path;
+    dx_log_level_t level;
+} dx_logs_t;
 
-static void on_stop_signal(int signo)
+/* Open a log destination: "stdout", "stderr", "off" or a file path. */
+static FILE *open_dest(const char *dest)
 {
-    (void)signo;
-    g_stop = 1;
+    FILE *f;
+
+    if (dest == NULL || strcmp(dest, "stderr") == 0) {
+        return stderr;
+    }
+    if (strcmp(dest, "stdout") == 0) {
+        return stdout;
+    }
+    if (strcmp(dest, "off") == 0) {
+        return NULL;
+    }
+    f = fopen(dest, "a");
+    if (f != NULL) {
+        setvbuf(f, NULL, _IOLBF, 0);
+    }
+    return f;
 }
 
-int dx_server_stopping(void)
+/* Close a stream the orchestrator opened (never stdout/stderr). */
+static void close_dest(FILE *f)
 {
-    return g_stop != 0;
+    if (f != NULL && f != stdout && f != stderr) {
+        (void)fclose(f);
+    }
 }
 
-/* Install the v0.1 signal set for the single-worker path. Returns 0 or -1. */
-static int install_signals(void)
+/*
+ * Reopen both log files. For a path destination the old stream is closed only
+ * after the new one is open, so a failed reopen keeps the previous file. The
+ * logger's mutex is held only for the pointer swap, never across fopen().
+ */
+static void logs_reopen(dx_logs_t *logs)
 {
-    struct sigaction sa;
-    struct sigaction ignore;
+    if (logs->log_path != NULL) {
+        FILE *nf = open_dest(logs->log_path);
 
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = on_stop_signal;
-    /*
-     * No SA_RESTART: a signal must interrupt epoll_wait so that the loop can
-     * observe the stop flag promptly instead of waiting for the next event.
-     */
-    sa.sa_flags = 0;
-    sigemptyset(&sa.sa_mask);
+        if (nf != NULL) {
+            FILE *old = logs->log_file;
 
-    if (sigaction(SIGINT, &sa, NULL) != 0) {
+            dx_log_reopen(&logs->log, nf);
+            logs->log_file = nf;
+            close_dest(old);
+        }
+    }
+    if (logs->access_path != NULL) {
+        FILE *nf = open_dest(logs->access_path);
+
+        if (nf != NULL) {
+            FILE *old = logs->access_file;
+
+            dx_log_reopen(&logs->access, nf);
+            logs->access_file = nf;
+            close_dest(old);
+        }
+    }
+}
+
+/* Open both destinations and initialise the loggers. Returns 0 or -1. */
+static int logs_open(dx_logs_t *logs, const dx_server_config_t *cfg)
+{
+    memset(logs, 0, sizeof(*logs));
+    logs->log_path = cfg->error_log_path;
+    logs->access_path = cfg->access_log_path;
+    logs->level = DX_LOG_INFO;
+
+    logs->log_file = open_dest(logs->log_path);
+    if (logs->log_file == NULL && strcmp(logs->log_path, "off") != 0) {
+        fprintf(stderr, "dantrix: cannot open error log '%s'\n", logs->log_path);
         return -1;
     }
-    if (sigaction(SIGTERM, &sa, NULL) != 0) {
-        return -1;
-    }
+    dx_log_init(&logs->log, logs->log_file, logs->level);
+    dx_log_init(&logs->access, NULL, logs->level);
 
-    memset(&ignore, 0, sizeof(ignore));
-    ignore.sa_handler = SIG_IGN;
-    ignore.sa_flags = 0;
-    sigemptyset(&ignore.sa_mask);
-    if (sigaction(SIGPIPE, &ignore, NULL) != 0) {
-        return -1;
+    if (strcmp(logs->access_path, "off") != 0) {
+        logs->access_file = open_dest(logs->access_path);
+        if (logs->access_file == NULL) {
+            fprintf(stderr, "dantrix: cannot open access log '%s'\n", logs->access_path);
+            return -1;
+        }
+        dx_log_reopen(&logs->access, logs->access_file);
     }
     return 0;
 }
 
+static void logs_close(dx_logs_t *logs)
+{
+    close_dest(logs->access_file);
+    close_dest(logs->log_file);
+    dx_log_destroy(&logs->access);
+    dx_log_destroy(&logs->log);
+    logs->log_file = NULL;
+    logs->access_file = NULL;
+}
+
+/* Small context so the single-worker reopen hook can reach the log set. */
+typedef struct {
+    dx_logs_t *logs;
+} dx_reopen_ctx_t;
+
+static void single_reopen_hook(void *ctx)
+{
+    dx_reopen_ctx_t *c = (dx_reopen_ctx_t *)ctx;
+
+    if (c != NULL && c->logs != NULL) {
+        logs_reopen(c->logs);
+        dx_log_write(&c->logs->log, DX_LOG_INFO, "log files reopened (SIGUSR1)");
+    }
+}
+
+/* Build the full signal mask handled by signalfd in either mode. */
+static void control_signal_set(sigset_t *set)
+{
+    sigemptyset(set);
+    sigaddset(set, SIGTERM);
+    sigaddset(set, SIGINT);
+    sigaddset(set, SIGQUIT);
+    sigaddset(set, SIGHUP);
+    sigaddset(set, SIGUSR1);
+    sigaddset(set, SIGUSR2);
+}
+
 /* ------------------------------------------------------------------ */
-/* Single-worker path (unchanged since v0.1): main thread runs the loop */
+/* Single-worker path: the main thread runs the event loop              */
 /* ------------------------------------------------------------------ */
 
-static int server_run_single(const dx_server_config_t *cfg)
+static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int ready_fd,
+                             dx_status_t *status, uint64_t start_ms)
 {
     dx_worker_t worker;
     dx_worker_opts_t opts;
+    dx_worker_reload_t reload;
+    dx_reopen_ctx_t reopen_ctx;
+    sigset_t mask;
+    int sig_fd;
     int listen_fd;
-    int rc = 0;
+    int rc;
 
-    if (install_signals() != 0) {
-        dx_log_write(cfg->log, DX_LOG_ERROR, "sigaction: %s", dx_strerror(errno));
+    /*
+     * Block every control signal process-wide and read them through a
+     * signalfd registered in the worker's epoll set: no asynchronous handler
+     * runs anywhere, and the loop wakes on epoll like for any other event.
+     */
+    control_signal_set(&mask);
+    if (pthread_sigmask(SIG_BLOCK, &mask, NULL) != 0) {
+        dx_log_write(&logs->log, DX_LOG_ERROR, "pthread_sigmask: %s", dx_strerror(errno));
+        return -1;
+    }
+    sig_fd = dx_signalfd_create(&mask, false);
+    if (sig_fd < 0) {
+        dx_log_write(&logs->log, DX_LOG_ERROR, "signalfd: %s", dx_strerror(errno));
         return -1;
     }
 
     listen_fd = dx_listen_tcp(cfg->bind_addr, cfg->port, cfg->backlog);
     if (listen_fd < 0) {
-        dx_log_write(cfg->log, DX_LOG_ERROR, "cannot listen on %s:%d: %s", cfg->bind_addr,
+        dx_log_write(&logs->log, DX_LOG_ERROR, "cannot listen on %s:%d: %s", cfg->bind_addr,
                      cfg->port, dx_strerror(errno));
+        (void)close(sig_fd);
         return -1;
     }
 
-    /*
-     * The worker takes ownership of listen_fd: dx_worker_destroy closes it, so
-     * every failure path from here on must go through destroy and never close
-     * the descriptor directly (double close could hand the fd to a new
-     * connection).
-     */
+    memset(&reload, 0, sizeof(reload));
+    pthread_mutex_init(&reload.mu, NULL);
+    reload.static_opts = cfg->static_opts;
+    reload.life = cfg->life;
+    reload.limits = cfg->limits;
+    reopen_ctx.logs = logs;
+
     memset(&opts, 0, sizeof(opts));
     opts.listen_fd = listen_fd;
-    opts.wake_fd = -1;
+    opts.ctl_fd = sig_fd;
+    opts.ctl_is_signal = true;
     opts.max_conns = cfg->max_conns;
     opts.owns_listen_fd = true;
-    opts.log = cfg->log;
-    opts.access_log = cfg->access_log;
+    opts.log = &logs->log;
+    opts.access_log = (cfg->access_log_path[0] != '\0' && strcmp(cfg->access_log_path, "off") != 0)
+                          ? &logs->access
+                          : NULL;
     opts.log_format = cfg->log_format;
-    opts.stop_flag = &g_stop;
+    opts.stop_flag = NULL; /* the signalfd drives the stop */
     opts.limits = &cfg->limits;
     opts.fs = cfg->fs;
     opts.mime = cfg->mime;
     opts.static_opts = &cfg->static_opts;
     opts.life = &cfg->life;
+    opts.reload = &reload;
+    opts.reopen_cb = single_reopen_hook;
+    opts.reopen_ctx = &reopen_ctx;
+    opts.reload_cb = cfg->reload_cb;
+    opts.reload_ctx = cfg->reload_ctx;
+    opts.status = status;
+    opts.status_path =
+        (cfg->status_path != NULL && cfg->status_path[0] != '\0') ? cfg->status_path : NULL;
+    opts.start_ms = start_ms;
+    opts.total_workers = 1;
 
     if (dx_worker_init(&worker, &opts) != 0) {
-        dx_log_write(cfg->log, DX_LOG_ERROR, "worker init failed: %s", dx_strerror(errno));
+        dx_log_write(&logs->log, DX_LOG_ERROR, "worker init failed: %s", dx_strerror(errno));
         dx_worker_destroy(&worker);
+        (void)close(sig_fd);
+        pthread_mutex_destroy(&reload.mu);
         return -1;
     }
 
-    dx_log_write(cfg->log, DX_LOG_INFO, "%s %s listening on %s:%d (max %zu connections)",
+    dx_log_write(&logs->log, DX_LOG_INFO, "%s %s listening on %s:%d (max %zu connections)",
                  DX_PROGRAM_NAME, DX_VERSION_STRING, cfg->bind_addr, cfg->port, cfg->max_conns);
+
+    /* The listener is bound and the worker is running: the parent may exit. */
+    dx_daemon_ready(ready_fd);
 
     rc = dx_worker_run(&worker);
 
     if (rc == 0) {
-        dx_log_write(
-            cfg->log, DX_LOG_INFO, "shutdown complete (accepted %llu, rejected %llu, closed %llu)",
-            (unsigned long long)worker.accepted_total, (unsigned long long)worker.rejected_total,
-            (unsigned long long)worker.closed_total);
+        dx_log_write(&logs->log, DX_LOG_INFO,
+                     "shutdown complete (accepted %llu, rejected %llu, closed %llu)",
+                     (unsigned long long)worker.accepted_total,
+                     (unsigned long long)worker.rejected_total,
+                     (unsigned long long)worker.closed_total);
     } else {
-        dx_log_write(cfg->log, DX_LOG_ERROR, "worker stopped with an error");
+        dx_log_write(&logs->log, DX_LOG_ERROR, "worker stopped with an error");
     }
 
     dx_worker_destroy(&worker);
+    (void)close(sig_fd);
+    pthread_mutex_destroy(&reload.mu);
     return rc;
 }
 
@@ -135,17 +265,12 @@ static int server_run_single(const dx_server_config_t *cfg)
 /* Multi-worker path (v0.5.0)                                          */
 /* ------------------------------------------------------------------ */
 
-/*
- * Per-thread context. The worker struct lives in a server-owned array: the
- * main thread needs it after join() to aggregate the statistics, so it cannot
- * be a local of the thread function.
- */
 typedef struct {
     dx_worker_t worker;
     dx_worker_opts_t opts;
     unsigned worker_id;
     int listen_fd; /* the worker's own listener, or the shared one */
-    int wake_fd;   /* borrowed from the orchestrator, never closed here */
+    int ctl_fd;    /* borrowed from the orchestrator, never closed here */
     bool cpu_affinity;
     bool started; /* pthread_create() succeeded */
     int init_rc;
@@ -179,13 +304,11 @@ static void *worker_thread_main(void *arg)
  * registered in every worker's epoll with EPOLLEXCLUSIVE so a new connection
  * wakes exactly one worker.
  *
- * Returns 0, or -1 with errno set. On success *shared_fd is -1 in reuseport
- * mode (each ctxs[i].listen_fd is a distinct, valid descriptor) or the single
- * shared descriptor in shared mode. The orchestrator owns every listener: a
+ * Returns 0, or -1 with errno set. The orchestrator owns every listener: a
  * worker borrows its descriptor and never closes it.
  */
-static int setup_listeners(const dx_server_config_t *cfg, dx_worker_ctx_t *ctxs, unsigned count,
-                           int *shared_fd)
+static int setup_listeners(const dx_server_config_t *cfg, dx_logs_t *logs, dx_worker_ctx_t *ctxs,
+                           unsigned count, int *shared_fd)
 {
     unsigned i;
 
@@ -221,7 +344,7 @@ static int setup_listeners(const dx_server_config_t *cfg, dx_worker_ctx_t *ctxs,
                 (void)close(ctxs[i].listen_fd);
                 ctxs[i].listen_fd = -1;
             }
-            dx_log_write(cfg->log, DX_LOG_WARN,
+            dx_log_write(&logs->log, DX_LOG_WARN,
                          "SO_REUSEPORT listeners failed (%s), falling back to a shared listener",
                          dx_strerror(saved));
         }
@@ -240,17 +363,41 @@ static int setup_listeners(const dx_server_config_t *cfg, dx_worker_ctx_t *ctxs,
     return 0;
 }
 
-static int server_run_multi(const dx_server_config_t *cfg)
+/* Write the aggregated statistics to the error log (after the workers join). */
+static void log_stats(dx_logs_t *logs, const dx_worker_ctx_t *ctxs, unsigned count)
+{
+    dx_worker_stats_t st;
+    uint64_t accepted = 0;
+    uint64_t rejected = 0;
+    uint64_t closed = 0;
+    unsigned i;
+
+    for (i = 0; i < count; i++) {
+        dx_worker_stats(&ctxs[i].worker, &st);
+        accepted += st.accepted;
+        rejected += st.rejected;
+        closed += st.closed;
+    }
+    dx_log_write(&logs->log, DX_LOG_INFO,
+                 "statistics: workers %u, accepted %llu, rejected %llu, closed %llu", count,
+                 (unsigned long long)accepted, (unsigned long long)rejected,
+                 (unsigned long long)closed);
+}
+
+static int server_run_multi(const dx_server_config_t *cfg, dx_logs_t *logs, int ready_fd,
+                            dx_status_t *status, uint64_t start_ms)
 {
     const unsigned count = (unsigned)cfg->workers;
     dx_worker_ctx_t *ctxs = NULL;
     pthread_t *threads = NULL;
+    dx_worker_reload_t reload;
+    sigset_t mask;
+    int sig_fd = -1;
     int shared_fd = -1;
     unsigned i;
-    sigset_t stop_sigs;
-    sigset_t old_mask;
-    bool mask_changed = false;
+    unsigned started_count = 0;
     int rc = -1;
+    bool stopping = false;
 
     if (count == 0 || count > 1024u) {
         errno = EINVAL;
@@ -260,7 +407,7 @@ static int server_run_multi(const dx_server_config_t *cfg)
     ctxs = (dx_worker_ctx_t *)calloc(count, sizeof(*ctxs));
     threads = (pthread_t *)calloc(count, sizeof(*threads));
     if (ctxs == NULL || threads == NULL) {
-        dx_log_write(cfg->log, DX_LOG_ERROR, "cannot allocate the worker table");
+        dx_log_write(&logs->log, DX_LOG_ERROR, "cannot allocate the worker table");
         goto out;
     }
     /*
@@ -270,25 +417,26 @@ static int server_run_multi(const dx_server_config_t *cfg)
     for (i = 0; i < count; i++) {
         ctxs[i].worker_id = i;
         ctxs[i].listen_fd = -1;
-        ctxs[i].wake_fd = -1;
+        ctxs[i].ctl_fd = -1;
         ctxs[i].opts.listen_fd = -1;
-        ctxs[i].opts.wake_fd = -1;
+        ctxs[i].opts.ctl_fd = -1;
     }
 
     /*
-     * Block the stop signals process-wide before the threads exist: every
-     * thread inherits the mask, so the signal can never interrupt a worker
-     * mid-loop. The main thread alone catches them with sigwait(), which
-     * removes the signal-handler-to-thread delivery problem entirely.
+     * Block the control signals process-wide before the threads exist: every
+     * thread inherits the mask, so a signal can never interrupt a worker
+     * mid-loop. The main thread alone reads them from its signalfd.
      */
-    sigemptyset(&stop_sigs);
-    sigaddset(&stop_sigs, SIGINT);
-    sigaddset(&stop_sigs, SIGTERM);
-    if (pthread_sigmask(SIG_BLOCK, &stop_sigs, &old_mask) != 0) {
-        dx_log_write(cfg->log, DX_LOG_ERROR, "pthread_sigmask: %s", dx_strerror(errno));
+    control_signal_set(&mask);
+    if (pthread_sigmask(SIG_BLOCK, &mask, NULL) != 0) {
+        dx_log_write(&logs->log, DX_LOG_ERROR, "pthread_sigmask: %s", dx_strerror(errno));
         goto out;
     }
-    mask_changed = true;
+    sig_fd = dx_signalfd_create(&mask, true);
+    if (sig_fd < 0) {
+        dx_log_write(&logs->log, DX_LOG_ERROR, "signalfd: %s", dx_strerror(errno));
+        goto out;
+    }
 
     /* sendfile() has no MSG_NOSIGNAL, so SIGPIPE must be ignored process-wide. */
     {
@@ -297,51 +445,64 @@ static int server_run_multi(const dx_server_config_t *cfg)
         ign.sa_handler = SIG_IGN;
         sigemptyset(&ign.sa_mask);
         if (sigaction(SIGPIPE, &ign, NULL) != 0) {
-            dx_log_write(cfg->log, DX_LOG_ERROR, "sigaction(SIGPIPE): %s", dx_strerror(errno));
+            dx_log_write(&logs->log, DX_LOG_ERROR, "sigaction(SIGPIPE): %s", dx_strerror(errno));
             goto out;
         }
     }
 
-    if (setup_listeners(cfg, ctxs, count, &shared_fd) != 0) {
-        dx_log_write(cfg->log, DX_LOG_ERROR, "cannot listen on %s:%d: %s", cfg->bind_addr,
+    if (setup_listeners(cfg, logs, ctxs, count, &shared_fd) != 0) {
+        dx_log_write(&logs->log, DX_LOG_ERROR, "cannot listen on %s:%d: %s", cfg->bind_addr,
                      cfg->port, dx_strerror(errno));
         goto out;
     }
 
-    /* One wakeup channel per worker, created up front so a stop can always be
+    memset(&reload, 0, sizeof(reload));
+    pthread_mutex_init(&reload.mu, NULL);
+    reload.static_opts = cfg->static_opts;
+    reload.life = cfg->life;
+    reload.limits = cfg->limits;
+
+    /* One control channel per worker, created up front so a stop can always be
      * delivered, even while a worker is still starting up or already gone. */
     for (i = 0; i < count; i++) {
         int wfd = dx_eventfd();
 
         if (wfd < 0) {
-            dx_log_write(cfg->log, DX_LOG_ERROR, "eventfd: %s", dx_strerror(errno));
+            dx_log_write(&logs->log, DX_LOG_ERROR, "eventfd: %s", dx_strerror(errno));
             goto out;
         }
-        ctxs[i].wake_fd = wfd;
-        ctxs[i].opts.wake_fd = wfd;
+        ctxs[i].ctl_fd = wfd;
+        ctxs[i].opts.ctl_fd = wfd;
+        ctxs[i].opts.ctl_is_signal = false;
         ctxs[i].opts.worker_id = i;
         ctxs[i].opts.max_conns = cfg->max_conns;
-        ctxs[i].opts.log = cfg->log;
-        ctxs[i].opts.access_log = cfg->access_log;
+        ctxs[i].opts.log = &logs->log;
+        ctxs[i].opts.access_log = (strcmp(cfg->access_log_path, "off") != 0) ? &logs->access : NULL;
         ctxs[i].opts.log_format = cfg->log_format;
-        ctxs[i].opts.stop_flag = NULL; /* worker threads stop through the wake_fd */
+        ctxs[i].opts.stop_flag = NULL; /* worker threads stop through the eventfd */
         ctxs[i].opts.limits = &cfg->limits;
         ctxs[i].opts.fs = cfg->fs;
         ctxs[i].opts.mime = cfg->mime;
         ctxs[i].opts.static_opts = &cfg->static_opts;
         ctxs[i].opts.life = &cfg->life;
+        ctxs[i].opts.reload = &reload;
+        ctxs[i].opts.reload_cb = NULL; /* the orchestrator refreshes it */
+        ctxs[i].opts.status = status;
+        ctxs[i].opts.status_path =
+            (cfg->status_path != NULL && cfg->status_path[0] != '\0') ? cfg->status_path : NULL;
+        ctxs[i].opts.start_ms = start_ms;
+        ctxs[i].opts.total_workers = count;
         ctxs[i].cpu_affinity = cfg->cpu_affinity;
     }
 
-    dx_log_write(cfg->log, DX_LOG_INFO,
+    dx_log_write(&logs->log, DX_LOG_INFO,
                  "%s %s listening on %s:%d (%u workers%s, max %zu connections each)",
                  DX_PROGRAM_NAME, DX_VERSION_STRING, cfg->bind_addr, cfg->port, count,
                  (shared_fd >= 0) ? ", shared listener" : ", SO_REUSEPORT", cfg->max_conns);
 
-    unsigned started_count = 0;
     for (i = 0; i < count; i++) {
         if (pthread_create(&threads[i], NULL, worker_thread_main, &ctxs[i]) != 0) {
-            dx_log_write(cfg->log, DX_LOG_ERROR, "pthread_create: %s", dx_strerror(errno));
+            dx_log_write(&logs->log, DX_LOG_ERROR, "pthread_create: %s", dx_strerror(errno));
             break;
         }
         ctxs[i].started = true;
@@ -349,33 +510,90 @@ static int server_run_multi(const dx_server_config_t *cfg)
     }
 
     if (started_count == 0) {
-        /* No worker could be created: the process must not hang on sigwait. */
+        /* No worker could be created: the process must not hang on the signal. */
         rc = -1;
         goto out;
     }
     if (started_count < count) {
-        dx_log_write(cfg->log, DX_LOG_WARN, "only %u of %u workers could be started", started_count,
-                     count);
+        dx_log_write(&logs->log, DX_LOG_WARN, "only %u of %u workers could be started",
+                     started_count, count);
     }
 
-    /* The main thread waits for the stop signal; it never serves requests. */
-    {
-        int sig = 0;
-        int swrc;
+    /* Listeners bound and the workers running: the parent may exit. */
+    dx_daemon_ready(ready_fd);
 
-        do {
-            swrc = sigwait(&stop_sigs, &sig);
-        } while (swrc == EINTR);
-        if (swrc == 0) {
-            dx_log_write(cfg->log, DX_LOG_INFO, "%s received, shutting down %u worker(s)",
-                         (sig == SIGINT) ? "SIGINT" : "SIGTERM", count);
-        } else {
-            dx_log_write(cfg->log, DX_LOG_ERROR, "sigwait: %s", dx_strerror(swrc));
+    /*
+     * The main thread owns the signalfd and forwards commands to the workers
+     * through their eventfds. It never serves requests.
+     */
+    while (!stopping) {
+        struct signalfd_siginfo info;
+        unsigned cmd;
+
+        if (read(sig_fd, &info, sizeof(info)) != (ssize_t)sizeof(info)) {
+            if (errno == EINTR) {
+                continue;
+            }
+            dx_log_write(&logs->log, DX_LOG_ERROR, "signalfd read: %s", dx_strerror(errno));
+            break;
         }
-    }
 
-    for (i = 0; i < count; i++) {
-        (void)dx_eventfd_signal(ctxs[i].wake_fd);
+        switch (info.ssi_signo) {
+        case SIGTERM:
+        case SIGINT:
+            dx_log_write(&logs->log, DX_LOG_INFO, "%s received, shutting down %u worker(s)",
+                         (info.ssi_signo == SIGINT) ? "SIGINT" : "SIGTERM", count);
+            cmd = DX_CMD_SHUTDOWN;
+            stopping = true;
+            break;
+        case SIGQUIT:
+            dx_log_write(&logs->log, DX_LOG_INFO, "SIGQUIT received, immediate shutdown");
+            cmd = DX_CMD_FORCE;
+            stopping = true;
+            break;
+        case SIGHUP:
+            dx_log_write(&logs->log, DX_LOG_INFO, "SIGHUP received, reloading");
+            /*
+             * Refresh the snapshot first (without the lock: the callback may do
+             * file I/O), then fan the RELOAD command out. Each worker copies
+             * the snapshot under the mutex, so a partially written snapshot is
+             * never visible to them.
+             */
+            if (cfg->reload_cb != NULL && cfg->reload_cb(cfg->reload_ctx, &reload) != 0) {
+                dx_log_write(&logs->log, DX_LOG_ERROR,
+                             "reload failed, keeping the previous settings");
+                continue;
+            }
+            cmd = DX_CMD_RELOAD;
+            break;
+        case SIGUSR1:
+            logs_reopen(logs);
+            dx_log_write(&logs->log, DX_LOG_INFO, "log files reopened (SIGUSR1)");
+            continue; /* nothing to forward: only the orchestrator owns streams */
+        case SIGUSR2:
+            /*
+             * Every worker logs its own counters from its own thread. Reading
+             * them from here while the workers run would be a data race.
+             */
+            cmd = DX_CMD_STATS;
+            break;
+        default:
+            continue;
+        }
+
+        /*
+         * The eventfd payload IS the command bitmask. Writing 1 first (the
+         * generic "signal a wakeup" helper) would also set the SHUTDOWN bit,
+         * so the command value is written directly, once per worker.
+         */
+        for (i = 0; i < count; i++) {
+            if (ctxs[i].ctl_fd >= 0) {
+                uint64_t value = cmd;
+                ssize_t written = write(ctxs[i].ctl_fd, &value, sizeof(value));
+
+                (void)written; /* a failing fd is reported at join time */
+            }
+        }
     }
 
     rc = 0;
@@ -385,35 +603,21 @@ static int server_run_multi(const dx_server_config_t *cfg)
         }
     }
 
-    {
-        dx_worker_stats_t st;
-        uint64_t accepted = 0;
-        uint64_t rejected = 0;
-        uint64_t closed = 0;
-
-        for (i = 0; i < count; i++) {
-            dx_worker_stats(&ctxs[i].worker, &st);
-            accepted += st.accepted;
-            rejected += st.rejected;
-            closed += st.closed;
-            if (ctxs[i].started && (ctxs[i].init_rc != 0 || ctxs[i].run_rc != 0)) {
-                dx_log_write(cfg->log, DX_LOG_ERROR, "worker %u stopped with an error", i);
-                rc = -1;
-            }
+    for (i = 0; i < count; i++) {
+        if (ctxs[i].started && (ctxs[i].init_rc != 0 || ctxs[i].run_rc != 0)) {
+            dx_log_write(&logs->log, DX_LOG_ERROR, "worker %u stopped with an error", i);
+            rc = -1;
         }
-        if (rc == 0) {
-            dx_log_write(cfg->log, DX_LOG_INFO,
-                         "shutdown complete (accepted %llu, rejected %llu, closed %llu)",
-                         (unsigned long long)accepted, (unsigned long long)rejected,
-                         (unsigned long long)closed);
-        }
+    }
+    if (rc == 0) {
+        log_stats(logs, ctxs, count);
     }
 
 out:
     /*
      * The orchestrator owns exactly what no thread could own: the shared
-     * listener, every wake fd, and every reuseport listener (workers borrow
-     * theirs). Joined workers destroyed their own state inside the thread.
+     * listener, every reuseport listener (workers borrow theirs), every control
+     * eventfd and the signalfd.
      */
     if (ctxs != NULL && shared_fd < 0) {
         for (i = 0; i < count; i++) {
@@ -428,28 +632,93 @@ out:
     }
     if (ctxs != NULL) {
         for (i = 0; i < count; i++) {
-            if (ctxs[i].wake_fd >= 0) {
-                (void)close(ctxs[i].wake_fd);
+            if (ctxs[i].ctl_fd >= 0) {
+                (void)close(ctxs[i].ctl_fd);
             }
         }
     }
+    if (sig_fd >= 0) {
+        (void)close(sig_fd);
+    }
+    pthread_mutex_destroy(&reload.mu);
     free(threads);
     free(ctxs);
-    if (mask_changed) {
-        (void)pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
-    }
     return rc;
 }
 
 int dx_server_run(const dx_server_config_t *cfg)
 {
-    if (cfg == NULL || cfg->log == NULL || cfg->port < 1 || cfg->port > 65535) {
+    dx_logs_t logs;
+    dx_status_t status;
+    uint64_t start_ms = (uint64_t)dx_now_ms();
+    int rc;
+    int ready_fd = -1;
+    bool wrote_pid = false;
+
+    dx_status_init(&status);
+
+    if (cfg == NULL || cfg->error_log_path == NULL || cfg->port < 1 || cfg->port > 65535) {
         errno = EINVAL;
         return -1;
     }
 
-    if (cfg->workers > 1) {
-        return server_run_multi(cfg);
+    /*
+     * Daemonize first: the parent blocks until the child reports readiness, so
+     * a start-up failure (bind, bad root) is still reported with exit code 1
+     * instead of silently returning success.
+     */
+    if (cfg->daemonize) {
+        int drc = dx_daemonize(&ready_fd);
+
+        if (drc < 0) {
+            fprintf(stderr, "dantrix: cannot daemonize: %s\n", dx_strerror(errno));
+            return -1;
+        }
+        if (drc == 1) {
+            return 0; /* parent: the child owns the server now */
+        }
     }
-    return server_run_single(cfg);
+
+    if (logs_open(&logs, cfg) != 0) {
+        dx_daemon_fail(ready_fd);
+        return -1;
+    }
+
+    if (cfg->pid_file != NULL && cfg->pid_file[0] != '\0') {
+        if (dx_pid_file_write(cfg->pid_file) != 0) {
+            dx_log_write(&logs.log, DX_LOG_ERROR, "cannot write pid file '%s': %s", cfg->pid_file,
+                         dx_strerror(errno));
+            logs_close(&logs);
+            dx_daemon_fail(ready_fd);
+            return -1;
+        }
+        wrote_pid = true;
+    }
+
+    /*
+     * Drop privileges before the first request is served. The document root
+     * and the log files were opened by the (possibly privileged) parent, and
+     * bind() happens inside the worker setup: dropping here means a port below
+     * 1024 still binds, and every request afterwards runs unprivileged.
+     */
+    if (dx_drop_privileges(cfg->user, cfg->group, &logs.log) != 0) {
+        if (wrote_pid) {
+            dx_pid_file_remove(cfg->pid_file);
+        }
+        logs_close(&logs);
+        dx_daemon_fail(ready_fd);
+        return -1;
+    }
+
+    if (cfg->workers > 1) {
+        rc = server_run_multi(cfg, &logs, ready_fd, &status, start_ms);
+    } else {
+        rc = server_run_single(cfg, &logs, ready_fd, &status, start_ms);
+    }
+
+    if (wrote_pid) {
+        dx_pid_file_remove(cfg->pid_file);
+    }
+    logs_close(&logs);
+    return rc;
 }

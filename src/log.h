@@ -44,6 +44,13 @@ void dx_log_init(dx_log_t *log, FILE *out, dx_log_level_t level);
 /* Release the mutex set up by dx_log_init(). No-op for hand-built logs. */
 void dx_log_destroy(dx_log_t *log);
 
+/*
+ * Swap the destination stream under the logger's mutex (used by the SIGUSR1
+ * log-reopen path). new_out is borrowed, exactly like out. Safe to call while
+ * other threads are logging.
+ */
+void dx_log_reopen(dx_log_t *log, FILE *new_out);
+
 /* Human readable level tag, e.g. "info". Never returns NULL. */
 const char *dx_log_level_name(dx_log_level_t level);
 

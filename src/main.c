@@ -1,22 +1,22 @@
 /*
- * main.c - Entry point: command line parsing and startup.
+ * main.c - Entry point: configuration merge, command line parsing, start-up.
  *
- * v0.2 adds the HTTP core: strict request parsing with configurable header
- * limits and the access log. Flags that belong to later milestones are still
- * accepted with an explicit warning so scripts written against the final CLI
- * do not break, but their behaviour is documented as not implemented yet.
+ * Sources, highest priority first: command line flags (including -o), then
+ * DANTRIX_<KEY> environment variables, then the configuration file, then the
+ * built-in defaults. Every value goes through the same key registry in
+ * config.c, so a flag, a file line and an override cannot drift apart.
  */
 #include <errno.h>
 #include <getopt.h>
-#include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "dantrix.h"
 #include "file.h"
-#include "http_parser.h"
 #include "log.h"
 #include "net.h"
 #include "server.h"
@@ -27,55 +27,100 @@
 #define DX_EXIT_USAGE 2
 
 /*
- * Parse a duration into milliseconds: plain seconds ("30"), seconds with a
- * suffix ("30s", "2m") or milliseconds ("250ms"). Returns 0 when unknown.
+ * Reload context: what is needed to rebuild the settings from scratch on
+ * SIGHUP. The command line has the highest priority, so every flag is recorded
+ * as a "key=value" assignment and replayed in order after the file and the
+ * environment. The list grows once at start-up and is read-only afterwards.
  */
-static int parse_duration_ms(const char *value, uint64_t *out_ms)
-{
-    unsigned long long v = 0;
-    size_t len = strlen(value);
-    size_t i = 0;
-    unsigned long long mult;
+#define DX_MAX_CLI_ASSIGN 128
+typedef struct {
+    const char *config_path; /* may be NULL */
+    char cli[DX_MAX_CLI_ASSIGN][DX_CFG_STR_MAX * 2u];
+    size_t cli_count;
+} dx_reload_ctx_t;
 
-    if (len == 0) {
-        return 0;
-    }
-    while (i < len && value[i] >= '0' && value[i] <= '9') {
-        if (v > (ULLONG_MAX - 9ULL) / 10ULL) {
-            return 0; /* overflow: the suffix can only make it worse */
-        }
-        v = v * 10ULL + (unsigned long long)(value[i] - '0');
-        i++;
-    }
-    if (i == 0) {
-        return 0; /* no digits */
-    }
-    if (strcmp(value + i, "") == 0 || strcmp(value + i, "s") == 0) {
-        mult = 1000ULL;
-    } else if (strcmp(value + i, "ms") == 0) {
-        mult = 1ULL;
-    } else if (strcmp(value + i, "m") == 0) {
-        mult = 60000ULL;
-    } else {
-        return 0;
-    }
-    if (v > UINT64_MAX / mult) {
-        return 0;
-    }
-    *out_ms = (uint64_t)v * mult;
-    return 1;
-}
-/* Parse an on/off flag. Returns 1 when parsed, 0 when the word is unknown. */
-static int parse_on_off(const char *value, bool *out)
+/* Stable storage for a reloaded Cache-Control value (see reload_cb). */
+static char g_cache_control_buf[DX_CFG_STR_MAX];
+
+/* The context the command line flags record into, set up in main(). */
+static dx_reload_ctx_t *g_reload_ctx;
+
+static void reload_record(dx_reload_ctx_t *ctx, const char *key, const char *value)
 {
-    if (strcmp(value, "on") == 0 || strcmp(value, "true") == 0 || strcmp(value, "yes") == 0) {
-        *out = true;
-        return 1;
+    if (ctx == NULL || ctx->cli_count >= DX_MAX_CLI_ASSIGN) {
+        return;
     }
-    if (strcmp(value, "off") == 0 || strcmp(value, "false") == 0 || strcmp(value, "no") == 0) {
-        *out = false;
-        return 1;
+    if (snprintf(ctx->cli[ctx->cli_count], sizeof(ctx->cli[0]), "%s=%s", key, value) >= 0) {
+        ctx->cli_count++;
     }
+}
+
+/* Build an assignment string "key=value" and hand it to the registry. */
+static int assign(dx_settings_t *s, const char *src, const char *key, const char *value, FILE *msg)
+{
+    char buf[DX_CFG_STR_MAX * 2u];
+
+    if (snprintf(buf, sizeof(buf), "%s=%s", key, value) < 0) {
+        fprintf(msg, "dantrix: %s: cannot build the assignment\n", src);
+        return -1;
+    }
+    /* Recorded so SIGHUP can replay the command line in the same order. */
+    reload_record(g_reload_ctx, key, value);
+    return dx_config_override_src(s, buf, src, msg);
+}
+
+/*
+ * Rebuild the settings on SIGHUP: defaults, then the configuration file, then
+ * the environment, then the recorded command line assignments (highest
+ * priority). On any error the previous settings are kept and -1 is returned.
+ * The reloadable subset is written into reload; the rest is applied to new
+ * connections where it makes sense.
+ */
+static int reload_cb(const void *vctx, dx_worker_reload_t *reload)
+{
+    const dx_reload_ctx_t *ctx = (const dx_reload_ctx_t *)vctx;
+    dx_settings_t fresh;
+    size_t i;
+    FILE *msg = stderr;
+
+    dx_config_defaults(&fresh);
+    if (ctx->config_path != NULL && dx_config_file(&fresh, ctx->config_path, msg) != 0) {
+        return -1;
+    }
+    if (dx_config_env(&fresh, msg) != 0) {
+        return -1;
+    }
+    for (i = 0; i < ctx->cli_count; i++) {
+        if (dx_config_override(&fresh, ctx->cli[i], msg) != 0) {
+            return -1;
+        }
+    }
+    if (dx_config_validate(&fresh, msg) != 0) {
+        return -1;
+    }
+
+    /* Reloadable subset, per the README key table. */
+    pthread_mutex_lock(&reload->mu);
+    reload->static_opts.sendfile = fresh.sendfile;
+    reload->static_opts.sendfile_chunk = fresh.sendfile_chunk;
+    reload->static_opts.etag = fresh.etag;
+    reload->static_opts.server_tokens = fresh.server_tokens;
+    reload->static_opts.hidden_files = fresh.hidden_files;
+    dx_strlcpy(g_cache_control_buf, fresh.cache_control, sizeof(g_cache_control_buf));
+    reload->static_opts.cache_control = g_cache_control_buf;
+
+    reload->life.keepalive_requests = fresh.keepalive_requests;
+    reload->life.header_timeout_ms = fresh.header_timeout_ms;
+    reload->life.body_timeout_ms = fresh.body_timeout_ms;
+    reload->life.send_timeout_ms = fresh.send_timeout_ms;
+    reload->life.keepalive_timeout_ms = fresh.keepalive_timeout_ms;
+    reload->life.shutdown_timeout_ms = fresh.shutdown_timeout_ms;
+    reload->life.max_body_size = fresh.max_body_size;
+
+    reload->limits.max_request_line = fresh.max_request_line;
+    reload->limits.max_header_size = fresh.max_header_size;
+    reload->limits.max_headers = fresh.max_headers;
+    pthread_mutex_unlock(&reload->mu);
     return 0;
 }
 
@@ -92,6 +137,10 @@ static void print_usage(FILE *out)
             "  dantrix [OPTION]...\n"
             "\n"
             "General:\n"
+            "  -c, --config FILE        Configuration file (INI style)\n"
+            "  -t, --test-config        Validate the configuration and exit\n"
+            "      --print-config       Print the effective configuration and exit\n"
+            "  -o, --option KEY=VALUE   Override any configuration key (repeatable)\n"
             "  -h, --help               Show this help\n"
             "  -V, --version            Show version and compiled features\n"
             "\n"
@@ -120,8 +169,7 @@ static void print_usage(FILE *out)
             "\n"
             "HTTP limits:\n"
             "      --max-request-line N Request line limit in bytes        [%d]\n"
-            "      --max-header-size N  Whole-request limit in bytes (k/m/g"
-            " suffixes allowed)      [%d]\n"
+            "      --max-header-size N  Whole-request limit in bytes        [%d]\n"
             "      --max-headers N      Maximum header count per request   [%d]\n"
             "      --max-body-size N    Request body read and discarded     [1m]\n"
             "\n"
@@ -136,12 +184,19 @@ static void print_usage(FILE *out)
             "Logging:\n"
             "      --error-log DEST     stderr, stdout, or a file path     [stderr]\n"
             "      --log-level LEVEL    debug, info, warn, error           [info]\n"
-            "      --access-log DEST    off, stderr, stdout, or a file     [%s]\n"
-            "      --log-format FMT     common or combined                 [common]\n"
+            "      --access-log DEST    off, stderr, stdout, or a file     [off]\n"
+            "      --log-format FMT     common or combined                 [combined]\n"
+            "\n"
+            "Process:\n"
+            "      --daemon             Run in the background\n"
+            "      --pid-file FILE      Write the PID to this file\n"
+            "      --user NAME          Drop privileges to this user after bind\n"
+            "      --group NAME         Drop privileges to this group after bind\n"
+            "      --status-path PATH   JSON status endpoint (loopback only) [off]\n"
             "\n"
             "Exit codes: 0 ok, 1 fatal error, 2 invalid arguments.\n",
             DX_VERSION_STRING, DX_DEFAULT_BIND, DX_DEFAULT_PORT, DX_DEFAULT_BACKLOG,
-            DX_DEFAULT_MAX_CONNS, root, index_name, default_type, 8 * 1024, 16 * 1024, 100, "off");
+            DX_DEFAULT_MAX_CONNS, root, index_name, default_type, 8 * 1024, 16 * 1024, 100);
 }
 
 static void print_version(FILE *out)
@@ -149,77 +204,27 @@ static void print_version(FILE *out)
     fprintf(out, "%s %s\n", DX_PROGRAM_NAME, DX_VERSION_STRING);
 }
 
-/* Open a log destination: "stdout", "stderr" or a file path. */
-static FILE *open_log_dest(const char *dest)
-{
-    FILE *f;
-
-    if (dest == NULL || strcmp(dest, "stderr") == 0) {
-        return stderr;
-    }
-    if (strcmp(dest, "stdout") == 0) {
-        return stdout;
-    }
-
-    f = fopen(dest, "a");
-    if (f != NULL) {
-        setvbuf(f, NULL, _IOLBF, 0);
-    }
-    return f;
-}
-
 int main(int argc, char **argv)
 {
-    const char *bind_addr = DX_DEFAULT_BIND;
-    const char *log_dest = "stderr";
-    const char *log_level_name = "info";
-    const char *access_dest = NULL; /* NULL = off */
-    const char *log_format_name = "common";
-    const char *root = DX_DEFAULT_ROOT;
-    const char *index_name = DX_DEFAULT_INDEX;
-    const char *mime_types = NULL;
-    const char *default_type = DX_DEFAULT_MIME;
-    const char *cache_control = "";
-    bool directory_listing = false;
-    bool sendfile = true;
-    bool etag = true;
-    bool follow_symlinks = false;
-    bool hidden_files = false;
-    bool server_tokens = true;
-    bool reuseport = true;
-    bool cpu_affinity = false;
-    size_t sendfile_chunk = 1024u * 1024u;
-    size_t keepalive_requests = 1000u;
-    uint64_t header_timeout_ms = 10000u;
-    uint64_t body_timeout_ms = 30000u;
-    uint64_t send_timeout_ms = 30000u;
-    uint64_t keepalive_timeout_ms = 30000u;
-    uint64_t shutdown_timeout_ms = 10000u;
-    uint64_t max_body_size = 1024u * 1024u;
-    int port = DX_DEFAULT_PORT;
-    int backlog = DX_DEFAULT_BACKLOG;
-    int max_conns_arg = DX_DEFAULT_MAX_CONNS;
-    int max_headers_arg = 100;
-    int keepalive_requests_int = 1000;
-    size_t max_request_line = 8u * 1024u;
-    size_t max_header_size = 16u * 1024u;
-    int workers = 1;
-    int rc = DX_EXIT_OK;
-    dx_log_t log;
-    /* Zeroed so dx_log_destroy() is a no-op when the access log is off. */
-    dx_log_t access_logger;
-    dx_log_level_t level = DX_LOG_INFO;
-    dx_log_format_t log_format = DX_LOG_FMT_COMMON;
-    dx_http_limits_t limits;
+    dx_settings_t set;
     dx_server_config_t cfg;
     dx_fs_t *fs = NULL;
     dx_mime_t *mime = NULL;
-    FILE *log_file = NULL;
-    FILE *access_file = NULL;
+    FILE *msg = stderr;
+    const char *config_path = NULL;
+    dx_reload_ctx_t reload_ctx;
+    int workers = 1;
+    int rc = DX_EXIT_OK;
+    bool test_config = false;
+    bool print_config = false;
     int opt;
 
     static const struct option long_opts[] = {{"help", no_argument, NULL, 'h'},
                                               {"version", no_argument, NULL, 'V'},
+                                              {"config", required_argument, NULL, 'c'},
+                                              {"test-config", no_argument, NULL, 't'},
+                                              {"print-config", no_argument, NULL, 'q'},
+                                              {"option", required_argument, NULL, 'o'},
                                               {"bind", required_argument, NULL, 'b'},
                                               {"port", required_argument, NULL, 'p'},
                                               {"backlog", required_argument, NULL, 'B'},
@@ -237,11 +242,11 @@ int main(int argc, char **argv)
                                               {"cache-control", required_argument, NULL, 'C'},
                                               {"server-tokens", required_argument, NULL, 'Q'},
                                               {"keepalive-requests", required_argument, NULL, 'k'},
-                                              {"header-timeout", required_argument, NULL, 't'},
-                                              {"body-timeout", required_argument, NULL, 'y'},
-                                              {"send-timeout", required_argument, NULL, 'j'},
-                                              {"keepalive-timeout", required_argument, NULL, 'v'},
-                                              {"shutdown-timeout", required_argument, NULL, 'd'},
+                                              {"header-timeout", required_argument, NULL, 1000},
+                                              {"body-timeout", required_argument, NULL, 1001},
+                                              {"send-timeout", required_argument, NULL, 1002},
+                                              {"keepalive-timeout", required_argument, NULL, 1003},
+                                              {"shutdown-timeout", required_argument, NULL, 1004},
                                               {"max-body-size", required_argument, NULL, 'Z'},
                                               {"max-request-line", required_argument, NULL, 'R'},
                                               {"max-header-size", required_argument, NULL, 'H'},
@@ -253,9 +258,42 @@ int main(int argc, char **argv)
                                               {"log-format", required_argument, NULL, 'F'},
                                               {"error-log", required_argument, NULL, 'E'},
                                               {"log-level", required_argument, NULL, 'L'},
+                                              {"daemon", no_argument, NULL, 1010},
+                                              {"pid-file", required_argument, NULL, 1011},
+                                              {"user", required_argument, NULL, 1012},
+                                              {"group", required_argument, NULL, 1013},
+                                              {"status-path", required_argument, NULL, 1014},
                                               {NULL, 0, NULL, 0}};
 
-    while ((opt = getopt_long(argc, argv, "hVb:p:w:r:PJ", long_opts, NULL)) != -1) {
+    /* Pass 1: find the configuration file so it is loaded before the flags. */
+    optind = 1;
+    while ((opt = getopt_long(argc, argv, "hVc:o:b:p:w:r:t", long_opts, NULL)) != -1) {
+        if (opt == 'c') {
+            config_path = optarg;
+        }
+    }
+
+    dx_config_defaults(&set);
+    memset(&reload_ctx, 0, sizeof(reload_ctx));
+    reload_ctx.config_path = config_path;
+    g_reload_ctx = &reload_ctx;
+
+    /* Lowest tiers first: the configuration file, then the environment. */
+    if (config_path != NULL) {
+        if (dx_config_file(&set, config_path, msg) != 0) {
+            return DX_EXIT_USAGE;
+        }
+    }
+    if (dx_config_env(&set, msg) != 0) {
+        return DX_EXIT_USAGE;
+    }
+
+    /*
+     * Pass 2: apply every command line flag in argv order, so the last one
+     * wins exactly as the documented priority requires.
+     */
+    optind = 1;
+    while ((opt = getopt_long(argc, argv, "hVb:p:w:r:PJo:c:t", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'h':
             print_usage(stdout);
@@ -263,179 +301,205 @@ int main(int argc, char **argv)
         case 'V':
             print_version(stdout);
             return DX_EXIT_OK;
+        case 'c':
+            /* Already consumed in pass 1. */
+            break;
+        case 't':
+            test_config = true;
+            break;
+        case 'q':
+            print_config = true;
+            break;
+        case 'o':
+            if (dx_config_override(&set, optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
+            break;
         case 'b':
-            bind_addr = optarg;
+            if (assign(&set, "--bind", "bind", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
             break;
         case 'p':
-            if (!dx_parse_int(optarg, 1, 65535, &port)) {
-                fprintf(stderr, "dantrix: invalid port '%s' (expected 1..65535)\n", optarg);
+            if (assign(&set, "--port", "port", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'B':
-            if (!dx_parse_int(optarg, 1, 65535, &backlog)) {
-                fprintf(stderr, "dantrix: invalid backlog '%s'\n", optarg);
+            if (assign(&set, "--backlog", "backlog", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'M':
-            if (!dx_parse_int(optarg, 1, 1000000, &max_conns_arg)) {
-                fprintf(stderr, "dantrix: invalid --max-conns '%s'\n", optarg);
+            if (assign(&set, "--max-conns", "max_connections", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'R':
-            if (!dx_parse_size(optarg, &max_request_line) || max_request_line < 64u ||
-                max_request_line > 1024u * 1024u) {
-                fprintf(stderr, "dantrix: invalid --max-request-line '%s' (expected 64..1m)\n",
-                        optarg);
+            if (assign(&set, "--max-request-line", "max_request_line", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'H':
-            if (!dx_parse_size(optarg, &max_header_size) || max_header_size < 256u ||
-                max_header_size > 16u * 1024u * 1024u) {
-                fprintf(stderr, "dantrix: invalid --max-header-size '%s' (expected 256..16m)\n",
-                        optarg);
+            if (assign(&set, "--max-header-size", "max_header_size", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'N':
-            if (!dx_parse_int(optarg, 1, (int)DX_MAX_HEADERS_LIMIT, &max_headers_arg)) {
-                fprintf(stderr, "dantrix: invalid --max-headers '%s' (expected 1..%d)\n", optarg,
-                        (int)DX_MAX_HEADERS_LIMIT);
+            if (assign(&set, "--max-headers", "max_headers", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'w':
-            if (!dx_parse_int(optarg, 0, 1024, &workers)) {
-                fprintf(stderr, "dantrix: invalid --workers '%s' (0 = auto, max 1024)\n", optarg);
+            if (assign(&set, "--workers", "workers", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
-        case 'P': /* --no-reuseport: shared listener with EPOLLEXCLUSIVE */
-            reuseport = false;
+        case 'P':
+            set.reuseport = false;
             break;
-        case 'J': /* --cpu-affinity: pin worker i to CPU i */
-            cpu_affinity = true;
+        case 'J':
+            set.cpu_affinity = true;
             break;
         case 'r':
-            root = optarg;
+            if (assign(&set, "--root", "root", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
             break;
         case 'X':
-            index_name = optarg;
+            if (assign(&set, "--index", "index", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
             break;
         case 'D':
-            if (!parse_on_off(optarg, &directory_listing)) {
-                fprintf(stderr, "dantrix: --directory-listing expects on or off\n");
+            if (assign(&set, "--directory-listing", "directory_listing", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'S':
-            if (!parse_on_off(optarg, &sendfile)) {
-                fprintf(stderr, "dantrix: --sendfile expects on or off\n");
+            if (assign(&set, "--sendfile", "sendfile", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'K':
-            if (!dx_parse_size(optarg, &sendfile_chunk) || sendfile_chunk < 4096u ||
-                sendfile_chunk > 64u * 1024u * 1024u) {
-                fprintf(stderr, "dantrix: invalid --sendfile-chunk '%s' (expected 4k..64m)\n",
-                        optarg);
+            if (assign(&set, "--sendfile-chunk", "sendfile_chunk", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'G':
-            if (!parse_on_off(optarg, &etag)) {
-                fprintf(stderr, "dantrix: --etag expects on or off\n");
+            if (assign(&set, "--etag", "etag", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'Y':
-            if (!parse_on_off(optarg, &follow_symlinks)) {
-                fprintf(stderr, "dantrix: --follow-symlinks expects on or off\n");
+            if (assign(&set, "--follow-symlinks", "follow_symlinks", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'U':
-            if (!parse_on_off(optarg, &hidden_files)) {
-                fprintf(stderr, "dantrix: --hidden-files expects on or off\n");
+            if (assign(&set, "--hidden-files", "hidden_files", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'T':
-            mime_types = optarg;
+            if (assign(&set, "--mime-types", "mime_types", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
             break;
         case 'O':
-            default_type = optarg;
+            if (assign(&set, "--default-type", "default_type", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
             break;
         case 'C':
-            cache_control = optarg;
+            if (assign(&set, "--cache-control", "cache_control", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
             break;
         case 'Q':
-            if (!parse_on_off(optarg, &server_tokens)) {
-                fprintf(stderr, "dantrix: --server-tokens expects on or off\n");
+            if (assign(&set, "--server-tokens", "server_tokens", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'k':
-            if (!dx_parse_int(optarg, 1, 10000000, &keepalive_requests_int)) {
-                fprintf(stderr, "dantrix: invalid --keepalive-requests '%s'\n", optarg);
-                return DX_EXIT_USAGE;
-            }
-            keepalive_requests = (size_t)keepalive_requests_int;
-            break;
-        case 't':
-            if (!parse_duration_ms(optarg, &header_timeout_ms) || header_timeout_ms == 0) {
-                fprintf(stderr, "dantrix: invalid --header-timeout '%s'\n", optarg);
+            if (assign(&set, "--keepalive-requests", "keepalive_requests", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
-        case 'y':
-            if (!parse_duration_ms(optarg, &body_timeout_ms) || body_timeout_ms == 0) {
-                fprintf(stderr, "dantrix: invalid --body-timeout '%s'\n", optarg);
+        case 1000:
+            if (assign(&set, "--header-timeout", "header_timeout", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
-        case 'j':
-            if (!parse_duration_ms(optarg, &send_timeout_ms) || send_timeout_ms == 0) {
-                fprintf(stderr, "dantrix: invalid --send-timeout '%s'\n", optarg);
+        case 1001:
+            if (assign(&set, "--body-timeout", "body_timeout", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
-        case 'v':
-            if (!parse_duration_ms(optarg, &keepalive_timeout_ms) || keepalive_timeout_ms == 0) {
-                fprintf(stderr, "dantrix: invalid --keepalive-timeout '%s'\n", optarg);
+        case 1002:
+            if (assign(&set, "--send-timeout", "send_timeout", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
-        case 'd':
-            if (!parse_duration_ms(optarg, &shutdown_timeout_ms)) {
-                fprintf(stderr, "dantrix: invalid --shutdown-timeout '%s'\n", optarg);
+        case 1003:
+            if (assign(&set, "--keepalive-timeout", "keepalive_timeout", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 1004:
+            if (assign(&set, "--shutdown-timeout", "shutdown_timeout", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'Z':
-            if (!dx_parse_size(optarg, &max_body_size)) {
-                fprintf(stderr, "dantrix: invalid --max-body-size '%s'\n", optarg);
+            if (assign(&set, "--max-body-size", "max_body_size", optarg, msg) != 0) {
                 return DX_EXIT_USAGE;
             }
             break;
         case 'A':
             if (strcmp(optarg, "off") == 0) {
-                access_dest = NULL;
-            } else {
-                access_dest = optarg;
+                dx_strlcpy(set.access_log, "off", sizeof(set.access_log));
+            } else if (assign(&set, "--access-log", "access_log", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
             }
             break;
         case 'F':
-            log_format_name = optarg;
+            if (assign(&set, "--log-format", "log_format", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
             break;
         case 'E':
-            log_dest = optarg;
+            if (assign(&set, "--error-log", "error_log", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
             break;
         case 'L':
-            log_level_name = optarg;
+            if (assign(&set, "--log-level", "log_level", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 1010:
+            set.daemonize = true;
+            break;
+        case 1011:
+            if (assign(&set, "--pid-file", "pid_file", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 1012:
+            if (assign(&set, "--user", "user", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 1013:
+            if (assign(&set, "--group", "group", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
+            break;
+        case 1014:
+            if (assign(&set, "--status-path", "status_path", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
             break;
         default:
             print_usage(stderr);
@@ -448,78 +512,52 @@ int main(int argc, char **argv)
         return DX_EXIT_USAGE;
     }
 
-    if (!dx_log_level_parse(log_level_name, &level)) {
-        fprintf(stderr, "dantrix: unknown log level '%s'\n", log_level_name);
-        return DX_EXIT_USAGE;
-    }
-    if (strcmp(log_format_name, "common") == 0) {
-        log_format = DX_LOG_FMT_COMMON;
-    } else if (strcmp(log_format_name, "combined") == 0) {
-        log_format = DX_LOG_FMT_COMBINED;
-    } else {
-        fprintf(stderr, "dantrix: unknown log format '%s' (expected common or combined)\n",
-                log_format_name);
-        return DX_EXIT_USAGE;
-    }
-
-    /*
-     * The destinations are opened after argument validation, so that an
-     * invalid flag never creates an empty log file.
-     */
-    memset(&access_logger, 0, sizeof(access_logger));
-    log_file = open_log_dest(log_dest);
-    if (log_file == NULL) {
-        fprintf(stderr, "dantrix: cannot open error log '%s': %s\n", log_dest, dx_strerror(errno));
-        return DX_EXIT_FATAL;
-    }
-
-    /*
-     * dx_log_init() sets up the mutex so the error log is safe to write from
-     * several worker threads at once (v0.5.0).
-     */
-    dx_log_init(&log, log_file, level);
-
-    limits.max_request_line = max_request_line;
-    limits.max_header_size = max_header_size;
-    limits.max_headers = (size_t)max_headers_arg;
-
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.bind_addr = bind_addr;
-    cfg.port = port;
-    cfg.backlog = backlog;
-    cfg.max_conns = (size_t)max_conns_arg;
-    /*
-     * --workers 0 means "one worker per online CPU"; resolve it here so the
-     * server layer always receives a concrete count.
-     */
-    if (workers == 0) {
-        workers = (int)dx_cpu_count();
-    }
-    cfg.workers = workers;
-    cfg.reuseport = reuseport;
-    cfg.cpu_affinity = cpu_affinity;
-    cfg.limits = limits;
-    cfg.log = &log;
-    cfg.log_format = log_format;
-
-    if (access_dest != NULL) {
-        access_file = open_log_dest(access_dest);
-        if (access_file == NULL) {
-            fprintf(stderr, "dantrix: cannot open access log '%s': %s\n", access_dest,
-                    dx_strerror(errno));
-            return DX_EXIT_FATAL;
+    /* Deferred diagnostics: they must see the whole merged configuration. */
+    if (print_config) {
+        if (dx_config_validate(&set, msg) != 0) {
+            return DX_EXIT_USAGE;
         }
-        dx_log_init(&access_logger, access_file, level);
-        cfg.access_log = &access_logger;
+        dx_config_print(&set, stdout);
+        return DX_EXIT_OK;
+    }
+    if (test_config) {
+        if (dx_config_validate(&set, msg) != 0 || dx_config_check_root(&set, msg) != 0) {
+            return DX_EXIT_USAGE;
+        }
+        return DX_EXIT_OK;
+    }
+
+    /*
+     * Cross-key validation and the document root check happen before the
+     * server opens any log file, so a bad configuration never creates one.
+     */
+    if (dx_config_validate(&set, msg) != 0 || dx_config_check_root(&set, msg) != 0) {
+        return DX_EXIT_USAGE;
+    }
+
+    /* Features that are documented but not implemented yet stay explicit. */
+    if (set.edge_triggered) {
+        fprintf(stderr, "dantrix: edge_triggered is not implemented yet (planned for v0.7)\n");
+    }
+    if (set.add_header_count > 0) {
+        fprintf(stderr, "dantrix: add_header is not implemented yet (%zu header(s) ignored)\n",
+                set.add_header_count);
+    }
+    if (set.tcp_defer_accept_ms != 0 || set.tcp_fastopen != 0 || set.socket_rcvbuf != 0 ||
+        set.socket_sndbuf != 0) {
+        fprintf(stderr,
+                "dantrix: tcp_defer_accept/tcp_fastopen/socket_rcvbuf/socket_sndbuf are not "
+                "implemented yet\n");
     }
 
     /*
      * The document root is opened before the listener so that a bad root is a
      * start-up error rather than a stream of 404s.
      */
-    fs = dx_fs_create(root, index_name, directory_listing, follow_symlinks);
+    fs = dx_fs_create(set.root, set.index, set.directory_listing, set.follow_symlinks);
     if (fs == NULL) {
-        fprintf(stderr, "dantrix: cannot use document root '%s': %s\n", root, dx_strerror(errno));
+        fprintf(stderr, "dantrix: cannot use document root '%s': %s\n", set.root,
+                dx_strerror(errno));
         return DX_EXIT_FATAL;
     }
     /*
@@ -529,28 +567,57 @@ int main(int argc, char **argv)
      */
     fprintf(stderr, "dantrix: path resolution: %s\n",
             dx_fs_has_openat2() ? "openat2(RESOLVE_BENEATH)" : "manual walk (openat2 unavailable)");
-    mime = dx_mime_create(mime_types, default_type);
+    mime = dx_mime_create(set.mime_types, set.default_type);
     if (mime == NULL) {
         fprintf(stderr, "dantrix: cannot build the MIME table\n");
         dx_fs_destroy(fs);
         return DX_EXIT_FATAL;
     }
 
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.bind_addr = set.bind;
+    cfg.port = set.port;
+    cfg.backlog = set.backlog;
+    cfg.max_conns = set.max_connections;
+    /*
+     * workers == 0 means "one worker per online CPU"; resolve it here so the
+     * server layer always receives a concrete count.
+     */
+    workers = set.workers;
+    if (workers == 0) {
+        workers = (int)dx_cpu_count();
+    }
+    cfg.workers = workers;
+    cfg.reuseport = set.reuseport;
+    cfg.cpu_affinity = set.cpu_affinity;
+    cfg.limits.max_request_line = set.max_request_line;
+    cfg.limits.max_header_size = set.max_header_size;
+    cfg.limits.max_headers = set.max_headers;
+    cfg.log_format = set.log_format;
+    cfg.error_log_path = set.error_log;
+    cfg.access_log_path = set.access_log;
+    cfg.daemonize = set.daemonize;
+    cfg.pid_file = set.pid_file;
+    cfg.user = set.user;
+    cfg.group = set.group;
+    cfg.status_path = set.status_path;
+    cfg.reload_cb = reload_cb;
+    cfg.reload_ctx = &reload_ctx;
     cfg.fs = fs;
     cfg.mime = mime;
-    cfg.static_opts.sendfile = sendfile;
-    cfg.static_opts.sendfile_chunk = sendfile_chunk;
-    cfg.static_opts.etag = etag;
-    cfg.static_opts.server_tokens = server_tokens;
-    cfg.static_opts.hidden_files = hidden_files;
-    cfg.static_opts.cache_control = cache_control;
-    cfg.life.keepalive_requests = keepalive_requests;
-    cfg.life.header_timeout_ms = header_timeout_ms;
-    cfg.life.body_timeout_ms = body_timeout_ms;
-    cfg.life.send_timeout_ms = send_timeout_ms;
-    cfg.life.keepalive_timeout_ms = keepalive_timeout_ms;
-    cfg.life.shutdown_timeout_ms = shutdown_timeout_ms;
-    cfg.life.max_body_size = max_body_size;
+    cfg.static_opts.sendfile = set.sendfile;
+    cfg.static_opts.sendfile_chunk = set.sendfile_chunk;
+    cfg.static_opts.etag = set.etag;
+    cfg.static_opts.server_tokens = set.server_tokens;
+    cfg.static_opts.hidden_files = set.hidden_files;
+    cfg.static_opts.cache_control = set.cache_control;
+    cfg.life.keepalive_requests = set.keepalive_requests;
+    cfg.life.header_timeout_ms = set.header_timeout_ms;
+    cfg.life.body_timeout_ms = set.body_timeout_ms;
+    cfg.life.send_timeout_ms = set.send_timeout_ms;
+    cfg.life.keepalive_timeout_ms = set.keepalive_timeout_ms;
+    cfg.life.shutdown_timeout_ms = set.shutdown_timeout_ms;
+    cfg.life.max_body_size = set.max_body_size;
 
     if (dx_server_run(&cfg) != 0) {
         rc = DX_EXIT_FATAL;
@@ -558,16 +625,5 @@ int main(int argc, char **argv)
 
     dx_mime_destroy(mime);
     dx_fs_destroy(fs);
-
-    /*
-     * Both streams are open here: a failed open exits with DX_EXIT_FATAL
-     * above, and stderr/stdout never need closing by hand.
-     */
-    if (access_file != NULL && access_file != stdout && access_file != stderr) {
-        (void)fclose(access_file);
-    }
-    (void)fclose(log_file);
-    dx_log_destroy(&access_logger);
-    dx_log_destroy(&log);
     return rc;
 }

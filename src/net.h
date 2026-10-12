@@ -5,6 +5,7 @@
 #ifndef DX_NET_H
 #define DX_NET_H
 
+#include <signal.h>
 #include <stdbool.h>
 
 /*
@@ -31,6 +32,17 @@ int dx_listen_tcp_reuseport(const char *addr, int port, int backlog);
  * of epoll_wait() from the main thread.
  */
 int dx_eventfd(void);
+
+/*
+ * Create a signalfd that reports the signals in mask. The signals must also be
+ * blocked (pthread_sigmask) or the default disposition fires before the fd is
+ * ever read. Returns the fd or -1 with errno set.
+ *
+ * blocking selects the wait mode: the single-worker path registers the fd in
+ * epoll (non-blocking, read in a loop until EAGAIN), while the orchestrator
+ * waits on the fd directly and needs a blocking read.
+ */
+int dx_signalfd_create(const sigset_t *mask, bool blocking);
 
 /*
  * Add 1 to an eventfd's counter. A saturated counter (EAGAIN) is treated as

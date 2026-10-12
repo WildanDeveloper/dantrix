@@ -7,6 +7,7 @@
 #include <netinet/tcp.h>
 #include <string.h>
 #include <sys/eventfd.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -144,6 +145,17 @@ fail: {
 int dx_eventfd(void)
 {
     return eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+}
+
+int dx_signalfd_create(const sigset_t *mask, bool blocking)
+{
+    int flags = (blocking) ? SFD_CLOEXEC : (SFD_NONBLOCK | SFD_CLOEXEC);
+
+    if (mask == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    return signalfd(-1, mask, flags);
 }
 
 int dx_eventfd_signal(int fd)

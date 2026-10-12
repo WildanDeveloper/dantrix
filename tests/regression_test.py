@@ -334,7 +334,7 @@ def test_multi_worker_serves_and_shuts_down():
             check(f"multi-worker {label}: exit code 0 on SIGTERM", proc.returncode == 0,
                   f"rc={proc.returncode}")
             text = open(log.name, encoding="utf-8", errors="replace").read()
-            complete = re.search(r"accepted (\d+), rejected (\d+), closed (\d+)\)", text)
+            complete = re.search(r"accepted (\d+), rejected (\d+), closed (\d+)", text)
             accepted = int(complete.group(1)) if complete else -1
             check(f"multi-worker {label}: worker statistics aggregated",
                   accepted >= 16, f"accepted={accepted}")
@@ -353,6 +353,120 @@ def test_multi_worker_serves_and_shuts_down():
             os.unlink(acc.name)
 
 
+def test_signals_reload_reopen_stats():
+    """v0.6.0: SIGHUP reloads, SIGUSR1 reopens the logs, SIGUSR2 snapshots the
+    statistics, SIGQUIT closes immediately. Exercised on one worker so the
+    signalfd path is covered directly."""
+    log = tempfile.NamedTemporaryFile(prefix="dantrix-sig-", suffix=".log", delete=False)
+    log.close()
+    acc = tempfile.NamedTemporaryFile(prefix="dantrix-sig-", suffix=".acc", delete=False)
+    acc.close()
+    cfg = tempfile.NamedTemporaryFile(prefix="dantrix-sig-", suffix=".conf",
+                                      mode="w", delete=False)
+    cfg.write(f"root = {ROOT}\nmax_request_line = 64\nmax_header_size = 256\n")
+    cfg.close()
+    port = PORT + 6
+    proc = subprocess.Popen(
+        [BIN, "-b", "127.0.0.1", "-p", str(port), "-c", cfg.name, "-w", "1",
+         "--access-log", acc.name, "--error-log", log.name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("signals: server started", False)
+            return
+
+        # A request line over the 64 byte limit is refused with 414.
+        long_path = "/" + "a" * 100
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(f"GET {long_path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+                      .encode())
+            data = s.recv(65536)
+        check("signals: 64 byte request line limit enforced (414)",
+              data.split(b" ")[1] == b"414", data[:20])
+
+        # Rewrite the configuration and reload.
+        with open(cfg.name, "w") as f:
+            f.write(f"root = {ROOT}\nmax_request_line = 8k\nmax_header_size = 16k\n")
+        proc.send_signal(signal.SIGHUP)
+        time.sleep(0.6)
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(f"GET {long_path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+                      .encode())
+            data = s.recv(65536)
+        check("signals: SIGHUP raised the request line limit (404 now)",
+              data.split(b" ")[1] == b"404", data[:20])
+
+        # Rotate the logs and reopen them.
+        os.rename(log.name, log.name + ".1")
+        os.rename(acc.name, acc.name + ".1")
+        proc.send_signal(signal.SIGUSR1)
+        time.sleep(0.6)
+        check("signals: SIGUSR1 reopened the error log", os.path.exists(log.name))
+        check("signals: SIGUSR1 reopened the access log", os.path.exists(acc.name))
+
+        # A statistics snapshot is written to the (new) error log.
+        proc.send_signal(signal.SIGUSR2)
+        time.sleep(0.6)
+        text = open(log.name, encoding="utf-8", errors="replace").read()
+        check("signals: SIGUSR2 wrote a statistics snapshot",
+              "stats" in text or "statistics" in text, text[-120:])
+
+        proc.send_signal(signal.SIGQUIT)
+        proc.wait(timeout=10)
+        check("signals: SIGQUIT exits promptly with code 0", proc.returncode == 0,
+              f"rc={proc.returncode}")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        for name in (log.name, acc.name, log.name + ".1", acc.name + ".1", cfg.name):
+            if os.path.exists(name):
+                os.unlink(name)
+
+
+def test_status_endpoint():
+    """v0.6.0: the JSON status endpoint is served only to loopback clients and
+    reports the shared counters."""
+    log = tempfile.NamedTemporaryFile(prefix="dantrix-status-", suffix=".log", delete=False)
+    log.close()
+    port = PORT + 7
+    proc = subprocess.Popen(
+        [BIN, "-b", "127.0.0.1", "-p", str(port), "-r", ROOT, "-w", "2",
+         "--status-path", "/__status", "--access-log", "off", "--error-log", log.name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("status: server started", False)
+            return
+        # Drive two successful requests and one 404 so the counters are non-zero.
+        for path in ("/f", "/f", "/nope"):
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                s.sendall(f"GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+                          .encode())
+                s.recv(65536)
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(b"GET /__status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            data = b""
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        body = data.split(b"\r\n\r\n", 1)[1]
+        check("status: endpoint answers 200", data.split(b" ")[1] == b"200", data[:20])
+        check("status: body is JSON with requests_total", b'"requests_total"' in body)
+        check("status: counters counted the requests", b'"2xx": 2' in body, body[:200])
+        check("status: 4xx counter is non-zero", b'"4xx": 1' in body, body[:200])
+    finally:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        os.unlink(log.name)
+
+
 def main():
     if not os.path.exists(BIN):
         print(f"  [FAIL] binary {BIN} not found - build it first "
@@ -368,6 +482,10 @@ def main():
     test_descriptor_exhaustion_backs_off()
     print("regression: multi-worker (v0.5.0)")
     test_multi_worker_serves_and_shuts_down()
+    print("regression: signals, reload, reopen logs, stats (v0.6.0)")
+    test_signals_reload_reopen_stats()
+    print("regression: JSON status endpoint (v0.6.0)")
+    test_status_endpoint()
 
     print()
     if failures:

@@ -119,7 +119,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Defect audit of v0.4.0 (34 defects, regression suite) | ✅ | v0.4.1 |
 | Second audit round (9 defects, regression suite) | ✅ | v0.4.2 |
 | Multi-worker with `SO_REUSEPORT` | ✅ | v0.5.0 |
-| Configuration, CLI, signals, graceful shutdown and reload | 📝 | v0.6.0 |
+| Configuration, CLI, signals, graceful shutdown and reload | ✅ | v0.6.0 |
 | Benchmark suite and optimization | 📝 | v0.7.0 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
@@ -401,7 +401,7 @@ If `sendfile()` fails with `EINVAL` or `ENOSYS` (for example on certain filesyst
 
 ### Signals and Graceful Shutdown
 
-Signals are blocked in all threads (`pthread_sigmask`) before the workers are created, and are then read only by the main thread, which waits in `sigwait()`. This way no code ever runs inside an asynchronous *signal handler*. `SIGPIPE` is ignored (`SIG_IGN`) because `sendfile()` has no `MSG_NOSIGNAL` flag. (`signalfd` arrives with the v0.6 operations milestone; the blocking and the main-thread-only reading are already in place.)
+Signals are blocked in all threads (`pthread_sigmask`) before the workers are created, and are then read only by the main thread through a `signalfd` (in single-worker mode the signalfd is registered in the worker's own `epoll` set instead). This way no code ever runs inside an asynchronous *signal handler*. `SIGPIPE` is ignored (`SIG_IGN`) because `sendfile()` has no `MSG_NOSIGNAL` flag.
 
 | Signal | Effect |
 |---|---|
@@ -648,6 +648,7 @@ Proses:
       --pid-file FILE      Tulis PID ke FILE
       --user NAME          Turunkan hak akses ke user ini setelah bind
       --group NAME         Turunkan hak akses ke group ini setelah bind
+      --status-path PATH   Endpoint status JSON (loopback saja)   [off]
 ```
 
 ### Examples
@@ -1187,6 +1188,8 @@ dantrix/
 │   │   ├── test_timer.c          test_pool.c
 │   │   ├── test_buffer.c         test_log.c
 │   │   ├── test_util.c           test_net.c
+│   │   ├── test_config.c         test_process.c
+│   │   └── test_status.c
 │   ├── smoke_test.py             # integrasi end-to-end (mulai server sendiri)
 │   ├── regression_test.py        # regresi yang butuh proses server terpisah
 │   ├── tsan_test.py              # trafik konkuren + deteksi ThreadSanitizer
@@ -1208,8 +1211,11 @@ dantrix/
 
 | Module | Responsibilities |
 |---|---|
-| `main.c` | Entry point: parse the CLI, durations and limits, then hand over to the server |
-| `server.c` | Listener bring-up, signal handlers, runs the worker loop |
+| `main.c` | Entry point: merge the configuration sources, parse the CLI, then hand over to the server |
+| `config.c` | Key registry, INI parser, `DANTRIX_*` environment, `-o` overrides, validation, `--print-config` |
+| `server.c` | Log ownership, `signalfd`, reload/reopen/stats commands, listener bring-up, worker lifecycle |
+| `process.c` | pid file, daemonize, privilege drop |
+| `status.c` | Lock-free shared counters and the JSON snapshot for the status endpoint |
 | `worker.c` | Event loop, accept loop, event dispatch, timeout policy, graceful drain |
 | `conn.c` | Slot pool, per-connection state machine, read/write I/O, static responses |
 | `http_parser.c` | Incremental and strict request parser |
@@ -1220,19 +1226,17 @@ dantrix/
 | `mime.c` | Extension to MIME type table |
 | `timer.c` | Hashed timing wheel |
 | `buffer.c` | Buffers and the buffer slab pool |
-| `log.c` | Error and access logger, common and combined formats |
-| `net.c` | Socket helpers (`listen_tcp`, `set_nonblock`, TCP options) |
+| `log.c` | Error and access logger, common and combined formats, thread-safe reopen |
+| `net.c` | Socket helpers (`listen_tcp`, `eventfd`, `signalfd`, TCP options) |
 | `util.c` | Time (including the `Date` cache), number conversion, safe string functions |
 
-Planned modules that do not exist yet: `config.c` (file and environment
-configuration, v0.6), `signals.c` (`signalfd`, v0.6) and `stats.c` (per-worker
-counters exposed as metrics, v0.6).
 
 **Dependency layers** (a module may only depend downward):
 
 ```text
 main -> server -> worker -> conn -> {http_parser, http_response, http_range}
                                   conn -> {path, mime, file}
+main, server -> {config, process, status}
 semua modul -> {buffer, log, net, util, timer}
 ```
 
@@ -1612,7 +1616,6 @@ The `conftest.py` fixture runs the Dantrix binary on a random port with a tempor
 | `test_malformed.py` | A catalog of broken requests and the expected status codes |
 | `test_limits.py` | `414`, `431`, `413`, `max_connections` |
 | `test_path_traversal.py` | `../`, `%2e%2e`, `%2f`, `%00`, symlinks escaping the root |
-| `test_signals.py` | Graceful shutdown, `SIGHUP`, `SIGUSR1` |
 | `test_concurrency.py` | 1,000 and 10,000 parallel connections, slow clients |
 
 ### Fuzzing
@@ -2160,11 +2163,11 @@ Each release has a single capability as its theme. A checked box marks completed
 
 ### v0.6.0: Operations
 
-- [ ] Configuration, environment, and CLI parsers (`--test-config`, `--print-config`)
-- [ ] `signalfd`, graceful shutdown, reload, reopen logs
-- [ ] Privilege drop, pid file, daemonize
-- [ ] JSON status endpoint
-- [ ] systemd unit, Dockerfile, logrotate
+- [x] Configuration, environment, and CLI parsers (`--test-config`, `--print-config`)
+- [x] `signalfd`, graceful shutdown, reload, reopen logs
+- [x] Privilege drop, pid file, daemonize
+- [x] JSON status endpoint
+- [x] systemd unit, Dockerfile, logrotate
 
 ### v0.7.0: Measurable
 

@@ -3,15 +3,19 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include "dantrix.h"
 #include "http_response.h"
 #include "net.h"
+#include "status.h"
 #include "util.h"
 
 #include <time.h>
@@ -22,7 +26,7 @@ dx_log_t *dx_worker_log(dx_worker_t *w)
 }
 
 static int listener_arm(dx_worker_t *w);
-static int wake_arm(dx_worker_t *w);
+static int ctl_arm(dx_worker_t *w);
 
 int dx_worker_init(dx_worker_t *w, const dx_worker_opts_t *opts)
 {
@@ -38,7 +42,7 @@ int dx_worker_init(dx_worker_t *w, const dx_worker_opts_t *opts)
     memset(w, 0, sizeof(*w));
     w->epfd = -1;
     w->listen_fd = -1;
-    w->wake_fd = -1;
+    w->ctl_fd = -1;
 
     if (opts == NULL || opts->listen_fd < 0 || opts->max_conns == 0) {
         errno = EINVAL;
@@ -46,10 +50,20 @@ int dx_worker_init(dx_worker_t *w, const dx_worker_opts_t *opts)
     }
 
     w->listen_fd = opts->listen_fd;
-    w->wake_fd = (opts->wake_fd >= 0) ? opts->wake_fd : -1;
+    w->ctl_fd = (opts->ctl_fd >= 0) ? opts->ctl_fd : -1;
+    w->ctl_is_signal = opts->ctl_is_signal;
     w->worker_id = opts->worker_id;
     w->owns_listen_fd = opts->owns_listen_fd;
     w->exclusive_listen = opts->exclusive_listen;
+    w->reload = opts->reload;
+    w->reopen_cb = opts->reopen_cb;
+    w->reopen_ctx = opts->reopen_ctx;
+    w->reload_cb = opts->reload_cb;
+    w->reload_ctx = opts->reload_ctx;
+    w->status = opts->status;
+    w->status_path = opts->status_path;
+    w->start_ms = (opts->start_ms != 0) ? opts->start_ms : (uint64_t)dx_now_ms();
+    w->total_workers = (opts->total_workers != 0) ? opts->total_workers : 1u;
     dx_timer_node_reset(&w->accept_timer);
     w->log = opts->log;
     w->access_log = opts->access_log;
@@ -100,7 +114,7 @@ int dx_worker_init(dx_worker_t *w, const dx_worker_opts_t *opts)
         return -1;
     }
 
-    if (wake_arm(w) != 0) {
+    if (ctl_arm(w) != 0) {
         return -1;
     }
     if (listener_arm(w) != 0) {
@@ -144,6 +158,41 @@ void dx_worker_stats(const dx_worker_t *w, dx_worker_stats_t *out)
     out->accepted = w->accepted_total;
     out->rejected = w->rejected_total;
     out->closed = w->closed_total;
+}
+
+/*
+ * Refresh the shared snapshot from the configuration sources, then copy it
+ * into this worker's own settings. Both steps happen under the same mutex, so
+ * a partially written snapshot is never visible.
+ *
+ * The hot path never touches the snapshot: it only reads this worker's copy,
+ * so a reload costs one lock per worker and nothing per request.
+ */
+void dx_worker_apply_reload(dx_worker_t *w)
+{
+    if (w == NULL || w->reload == NULL) {
+        return;
+    }
+    if (w->reload_cb != NULL && w->reload_cb(w->reload_ctx, w->reload) != 0) {
+        dx_log_write(w->log, DX_LOG_ERROR, "reload failed, keeping the previous settings");
+        return;
+    }
+    pthread_mutex_lock(&w->reload->mu);
+    w->static_opts = w->reload->static_opts;
+    w->life = w->reload->life;
+    w->limits = w->reload->limits;
+    pthread_mutex_unlock(&w->reload->mu);
+
+    if (w->static_opts.cache_control == NULL) {
+        w->static_opts.cache_control = "";
+    }
+    if (w->static_opts.sendfile_chunk == 0) {
+        w->static_opts.sendfile_chunk = 1024u * 1024u;
+    }
+    if (w->life.keepalive_requests == 0) {
+        w->life.keepalive_requests = 1000u;
+    }
+    dx_log_write(w->log, DX_LOG_INFO, "worker %u: reloadable settings applied", w->worker_id);
 }
 
 /* Format the peer address for the access log; "-" when unknown. */
@@ -224,6 +273,7 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
     /* TCP_NODELAY only changes latency; a failure must not drop the client. */
     (void)dx_set_tcp_nodelay(fd);
     w->accepted_total++;
+    dx_status_conn_accepted(w->status);
     return 0;
 }
 
@@ -240,12 +290,19 @@ void dx_worker_emit_access(dx_worker_t *w, dx_conn_t *conn)
 {
     const dx_access_t *acc = &conn->acc;
 
-    if (w->access_log == NULL || acc->status == 0) {
-        return; /* disabled, or the request never reached a response */
+    if (acc->status == 0) {
+        return; /* the request never reached a response */
     }
-    dx_log_access(w->access_log, w->log_format, conn->peer, acc->method, strlen(acc->method),
-                  acc->target, strlen(acc->target), acc->http10 ? "HTTP/1.0" : "HTTP/1.1",
-                  acc->status, acc->body_bytes, acc->referer, acc->user_agent);
+    if (w->access_log != NULL) {
+        dx_log_access(w->access_log, w->log_format, conn->peer, acc->method, strlen(acc->method),
+                      acc->target, strlen(acc->target), acc->http10 ? "HTTP/1.0" : "HTTP/1.1",
+                      acc->status, acc->body_bytes, acc->referer, acc->user_agent);
+    }
+    /*
+     * The shared counters are updated on the same "response completed" edge as
+     * the access log, independently of whether a log destination is set.
+     */
+    dx_status_response(w->status, acc->status, (uint64_t)acc->body_bytes);
     conn->acc.status = 0; /* one line per request, whichever path runs first */
 }
 
@@ -283,6 +340,7 @@ static void conn_close(dx_worker_t *w, dx_conn_t *conn)
     /* dx_pool_release() resets the slot, so nothing survives this point. */
     (void)dx_pool_release(w->pool, conn);
     w->closed_total++;
+    dx_status_conn_closed(w->status);
 }
 
 /*
@@ -350,13 +408,13 @@ static int listener_arm(dx_worker_t *w)
     return -1;
 }
 
-/* Register the borrowed wake_fd in the epoll set. Returns 0 or -1. */
-static int wake_arm(dx_worker_t *w)
+/* Register the borrowed control fd in the epoll set. Returns 0 or -1. */
+static int ctl_arm(dx_worker_t *w)
 {
     struct epoll_event ev;
 
-    if (w->wake_fd < 0) {
-        return 0; /* single-worker mode stops through the signal flag */
+    if (w->ctl_fd < 0) {
+        return 0; /* no control channel: stop only through the signal flag */
     }
     if (w->epfd < 0) {
         return -1;
@@ -364,7 +422,7 @@ static int wake_arm(dx_worker_t *w)
     memset(&ev, 0, sizeof(ev));
     ev.events = EPOLLIN;
     ev.data.u64 = dx_tag_wake();
-    return epoll_ctl(w->epfd, EPOLL_CTL_ADD, w->wake_fd, &ev);
+    return epoll_ctl(w->epfd, EPOLL_CTL_ADD, w->ctl_fd, &ev);
 }
 
 /*
@@ -403,6 +461,7 @@ static void accept_loop(dx_worker_t *w)
                  * there is nothing left to close here.
                  */
                 w->rejected_total++;
+                dx_status_conn_rejected(w->status);
             }
             continue;
         }
@@ -435,6 +494,77 @@ static void accept_loop(dx_worker_t *w)
     }
 }
 
+/*
+ * Handle one event on the control channel.
+ *
+ * Multi-worker mode: ctl_fd is an eventfd carrying a DX_CMD_* bitmask written
+ * by the main thread.
+ *
+ * Single-worker mode: ctl_fd is a signalfd; every readable signal is mapped
+ * onto the same commands, so both modes run one dispatch path.
+ */
+static void handle_control(dx_worker_t *w)
+{
+    unsigned cmds = 0;
+
+    if (w->ctl_is_signal) {
+        for (;;) {
+            struct signalfd_siginfo info;
+            ssize_t n = read(w->ctl_fd, &info, sizeof(info));
+
+            if (n != (ssize_t)sizeof(info)) {
+                break; /* EAGAIN: the signal queue is drained */
+            }
+            switch (info.ssi_signo) {
+            case SIGTERM:
+            case SIGINT:
+                cmds |= DX_CMD_SHUTDOWN;
+                break;
+            case SIGQUIT:
+                cmds |= DX_CMD_FORCE;
+                break;
+            case SIGHUP:
+                cmds |= DX_CMD_RELOAD;
+                break;
+            case SIGUSR1:
+                cmds |= DX_CMD_REOPEN;
+                break;
+            case SIGUSR2:
+                cmds |= DX_CMD_STATS;
+                break;
+            default:
+                break; /* unexpected signal: ignore */
+            }
+        }
+    } else {
+        uint64_t value = 0;
+
+        if (read(w->ctl_fd, &value, sizeof(value)) == (ssize_t)sizeof(value)) {
+            cmds = (unsigned)value;
+        }
+    }
+
+    if ((cmds & DX_CMD_FORCE) != 0u) {
+        w->force_stop = true;
+        return; /* the loop closes everything on the next turn */
+    }
+    if ((cmds & DX_CMD_SHUTDOWN) != 0u) {
+        w->stop_requested = true;
+    }
+    if ((cmds & DX_CMD_RELOAD) != 0u) {
+        dx_worker_apply_reload(w);
+    }
+    if ((cmds & DX_CMD_REOPEN) != 0u && w->reopen_cb != NULL) {
+        w->reopen_cb(w->reopen_ctx);
+    }
+    if ((cmds & DX_CMD_STATS) != 0u) {
+        dx_log_write(w->log, DX_LOG_INFO,
+                     "worker %u stats (accepted %llu, rejected %llu, closed %llu)", w->worker_id,
+                     (unsigned long long)w->accepted_total, (unsigned long long)w->rejected_total,
+                     (unsigned long long)w->closed_total);
+    }
+}
+
 /* Dispatch one event. Takes ownership of the connection lifetime. */
 static void handle_event(dx_worker_t *w, const struct epoll_event *ev)
 {
@@ -447,11 +577,11 @@ static void handle_event(dx_worker_t *w, const struct epoll_event *ev)
     }
     if (kind == DX_TAG_KIND_WAKE) {
         /*
-         * A wakeup from the main thread (shutdown). Drain the counter and set
-         * the local stop flag; the loop condition observes it on the next turn.
+         * A wakeup from the main thread (shutdown) or a signal on the
+         * single-worker signalfd. Drain the channel and apply the commands;
+         * the loop condition observes the flags on the next turn.
          */
-        (void)dx_eventfd_drain(w->wake_fd);
-        w->stop_requested = true;
+        handle_control(w);
         return;
     }
     if (kind != DX_TAG_KIND_CONN) {
@@ -649,11 +779,17 @@ int dx_worker_run(dx_worker_t *w)
         int n;
         int i;
         /*
-         * Two stop sources: the signal flag of the single-worker mode and the
-         * wake_fd wakeup of the worker-thread mode. Both are only touched by
+         * Stop sources: the signal flag (single-worker), the control channel
+         * (both modes) and SIGQUIT's immediate close. All are only touched by
          * this thread.
          */
         bool stopping = w->stop_requested || (w->stop_flag != NULL && *w->stop_flag != 0);
+
+        if (w->force_stop) {
+            dx_log_write(w->log, DX_LOG_WARN, "forced shutdown, closing %zu connection(s)",
+                         dx_pool_active(w->pool));
+            break;
+        }
 
         if (!stopping && !w->draining) {
             /* Normal operation: wait for the nearest timer or an event. */

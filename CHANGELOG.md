@@ -12,6 +12,69 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.6.0] - 2026-10-12
+
+Operations: configuration sources, signal driven lifecycle, privileges and a
+JSON status endpoint.
+
+### Added
+
+- **Configuration file, environment and `-o` overrides.** `-c/--config` reads an
+  INI style file, `DANTRIX_<KEY>` environment variables are honoured, and
+  `-o key=value` overrides any key (repeatable). Priority, highest first: CLI
+  flags and `-o`, then `DANTRIX_<KEY>`, then the file, then the built-in
+  defaults. Every key is described exactly once in a registry, so the parser,
+  `--print-config` and the defaults can never drift apart. Unknown keys,
+  malformed values and out-of-range values are errors (exit code 2); a repeated
+  single-value key warns and keeps the last value.
+- **`-t/--test-config` and `--print-config`.** Validate (syntax plus the
+  document root) or print the effective configuration, then exit, without
+  starting the server.
+- **Signal driven lifecycle via `signalfd`.** All control signals are blocked
+  process-wide and read from a signalfd: no asynchronous handler ever runs.
+  `SIGTERM`/`SIGINT` shut down gracefully, `SIGQUIT` closes immediately,
+  `SIGHUP` reloads the reloadable keys, `SIGUSR1` reopens the log files (for
+  `logrotate`), `SIGUSR2` writes a statistics snapshot. In multi-worker mode
+  the main thread owns the signalfd and forwards commands to the workers
+  through their eventfds.
+- **Hot reload.** On `SIGHUP` the configuration sources are re-read and
+  validated; on success every worker copies the reloadable subset (timeouts,
+  HTTP limits, static options) into its own settings under a mutex. The hot
+  path never touches the shared snapshot, so a reload costs one lock per worker
+  and nothing per request. On a parse or validation error the previous settings
+  are kept and the failure is logged.
+- **Privilege drop, pid file and daemonize.** `--user`/`--group` drop privileges
+  after `bind()` (`setgroups`, `setgid`, `setuid`, then verify `setuid(0)`
+  fails). `--pid-file` writes and removes the pid file. `--daemon` forks into
+  the background; the parent waits for the child to report readiness so a
+  start-up failure still exits non-zero.
+- **JSON status endpoint (`status_path` / `--status-path`).** Served only to
+  loopback clients, it reports uptime, worker count, active/accepted/rejected
+  connections, request totals, the response class breakdown and bytes sent.
+  The counters are C11 `_Atomic`, incremented lock-free by the workers.
+- New `src/config.c`, `src/process.c`, `src/status.c` with unit tests
+  (`test_config.c`, `test_process.c`, `test_status.c`) and new regression
+  checks for the signals, the reload and the status endpoint.
+
+### Fixed
+
+- **`signalfd` in the orchestrator blocked the wrong way.** A non-blocking
+  signalfd read in the main thread returned `EAGAIN` immediately and left the
+  server spinning without ever handling a signal; the orchestrator now creates
+  a blocking signalfd, while the single-worker path keeps a non-blocking one
+  registered in epoll.
+- **A reload only reached one worker.** A shared "pending" flag was cleared by
+  the first worker to apply the snapshot, so the others kept the old settings;
+  each worker now copies the snapshot unconditionally when it receives RELOAD.
+- **The command value was written on top of a wakeup byte.** The orchestrator
+  wrote the generic "wakeup" (1) *and* the command bitmask into the same
+  eventfd, so a `SIGUSR2` snapshot (value 4) also set the SHUTDOWN bit (5).
+  Only the command value is written now.
+- **The status counters depended on the access log.** They were updated inside
+  the access-log emitter behind an early return, so a server with
+  `access_log = off` reported zero requests; the counter update was moved out
+  of that branch.
+
 ## [0.5.0] - 2026-10-12
 
 Multi-core: one event loop per thread, no locks in the hot path.

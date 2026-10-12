@@ -15,6 +15,7 @@
 #include "mime.h"
 #include "net.h"
 #include "path.h"
+#include "status.h"
 #include "util.h"
 #include "worker.h"
 
@@ -1409,6 +1410,63 @@ static int conn_after_response(struct dx_worker *w, dx_conn_t *conn)
  * must close now.
  */
 /*
+ * JSON status endpoint. Only clients from loopback may read it (127.0.0.0/8
+ * and ::1): the counters are operationally sensitive and the README documents
+ * the loopback-only rule. A non-loopback client gets 404 so the endpoint is
+ * not even disclosed.
+ */
+static bool peer_is_loopback(const char *peer)
+{
+    if (peer == NULL) {
+        return false;
+    }
+    if (strcmp(peer, "::1") == 0) {
+        return true;
+    }
+    /* 127.0.0.0/8 */
+    return strncmp(peer, "127.", 4) == 0;
+}
+
+static bool target_equals(const dx_http_request_t *req, const unsigned char *base, const char *path)
+{
+    size_t n = strlen(path);
+
+    return req->target_len == n && memcmp(base + req->target_off, path, n) == 0;
+}
+
+/* Build and stage the JSON status response. Returns 0 or -1 (close). */
+static int conn_serve_status(struct dx_worker *w, dx_conn_t *conn, const dx_http_request_t *req,
+                             const unsigned char *base, bool head, size_t consumed)
+{
+    char body[DX_RESPONSE_TMP];
+    char tmp[DX_RESPONSE_TMP];
+    uint64_t uptime;
+    size_t body_len;
+    size_t len;
+    bool keep_alive;
+    const char *connection;
+
+    uptime = (uint64_t)((dx_now_ms() - (long long)w->start_ms) / 1000);
+    body_len =
+        dx_status_json(w->status, body, sizeof(body), DX_VERSION_STRING, uptime, w->total_workers);
+    if (body_len == 0) {
+        return conn_finish_error(w, conn, 500, NULL);
+    }
+
+    keep_alive = response_keeps_alive(w, conn, req, base, 200);
+    connection = connection_value(keep_alive, req->minor_version);
+    conn->close_conn = !keep_alive;
+
+    len = dx_http_response_build_ex(tmp, sizeof(tmp), 200, NULL, "application/json", body, body_len,
+                                    head, connection, w->static_opts.server_tokens);
+    if (len == 0) {
+        return conn_finish_error(w, conn, 500, NULL);
+    }
+    access_fill(conn, req, base, 200, head ? 0u : body_len);
+    return conn_finish(w, conn, consumed, tmp, len);
+}
+
+/*
  * Build and stage the answer for a request whose headers were parsed and
  * whose body (if any) has been fully received. `consumed` covers the header
  * block plus the body, so the bytes are only dropped here.
@@ -1443,6 +1501,31 @@ static int conn_dispatch(struct dx_worker *w, dx_conn_t *conn)
         bool keep_alive;
         const char *connection;
         dx_dispatch_t action = dx_http_dispatch_method(req, base, &status, &extra);
+
+        /*
+         * The JSON status endpoint is answered before the static handler so it
+         * works even without a document root, and only for loopback clients.
+         */
+        if (w->status_path != NULL && w->status_path[0] != '\0' && !is_options &&
+            target_equals(req, base, w->status_path)) {
+            if (!peer_is_loopback(conn->peer)) {
+                /* Not disclosed to non-loopback clients. */
+                status = 404;
+                extra = NULL;
+                access_fill(conn, req, base, 404, 0);
+                conn->close_conn = true;
+                len = dx_http_response_error_ex(tmp, sizeof(tmp), 404, NULL, "close",
+                                                w->static_opts.server_tokens);
+                if (len == 0) {
+                    dx_log_write(dx_worker_log(w), DX_LOG_ERROR,
+                                 "conn %llu: response did not fit the staging buffer",
+                                 (unsigned long long)conn->id);
+                    return -1;
+                }
+                return conn_finish(w, conn, consumed, tmp, len);
+            }
+            return conn_serve_status(w, conn, req, base, head, consumed);
+        }
 
         if (action == DX_DISPATCH_SERVE) {
             status = 200;
