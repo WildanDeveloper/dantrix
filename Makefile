@@ -149,10 +149,12 @@ $(BUILD)/%: $(EXAMPLES)/%.c
 # --- Tests ----------------------------------------------------------------
 HDRS := $(wildcard $(SRC)/*.h)
 
+# \$(HDRS) is a prerequisite only: it must not reach the compiler command line,
+# or the driver sees several inputs and rejects -o.
 $(BUILD)/test_%: $(TESTS)/test_%.c $(LIB_SRCS) $(HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(STD) $(DEFS) $(WARN) -O1 -g $(CFLAGS_EXTRA) \
-	    -I$(SRC) -I$(TESTS) $^ -o $@ $(LDFLAGS) -lpthread
+	    -I$(SRC) -I$(TESTS) $(filter %.c,$^) -o $@ $(LDFLAGS) -lpthread
 
 test: test-unit
 
