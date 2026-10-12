@@ -310,25 +310,32 @@ bool dx_http_parse_date(const char *s, size_t len, long long *out_sec)
     tm.tm_wday = 0;
     tm.tm_yday = 0;
     {
+        /* timegm() rewrites the struct in place when it normalises, so the
+         * caller's fields must be captured before the call to compare against
+         * the round-tripped result. */
+        int in_year = tm.tm_year;
+        int in_mon = tm.tm_mon;
+        int in_mday = tm.tm_mday;
+        int in_hour = tm.tm_hour;
+        int in_min = tm.tm_min;
+        int in_sec = tm.tm_sec;
         time_t when = timegm(&tm);
+        struct tm round;
 
         /*
-         * timegm() returns (time_t)-1 both on failure and for the legitimate
-         * instant 1969-12-31T23:59:59Z, one second before the epoch. Round
-         * the value back through gmtime_r() to tell the two apart, so a valid
-         * date is not rejected while a genuinely unrepresentable one still is.
+         * timegm() normalises out-of-range fields: 31 February becomes 3 March
+         * instead of failing, and it returns (time_t)-1 both on error and for
+         * the legitimate instant 1969-12-31T23:59:59Z. Round-tripping the
+         * result through gmtime_r() and comparing against the captured fields
+         * catches both: a normalised (non-existent) date no longer matches its
+         * own input, and the -1 case is accepted only when it round-trips.
          */
-        if (when == (time_t)-1) {
-            struct tm round;
-
-            if (gmtime_r(&when, &round) == NULL) {
-                return false;
-            }
-            if (round.tm_year != tm.tm_year || round.tm_mon != tm.tm_mon ||
-                round.tm_mday != tm.tm_mday || round.tm_hour != tm.tm_hour ||
-                round.tm_min != tm.tm_min || round.tm_sec != tm.tm_sec) {
-                return false; /* timegm really failed */
-            }
+        if (gmtime_r(&when, &round) == NULL) {
+            return false;
+        }
+        if (round.tm_year != in_year || round.tm_mon != in_mon || round.tm_mday != in_mday ||
+            round.tm_hour != in_hour || round.tm_min != in_min || round.tm_sec != in_sec) {
+            return false; /* normalised away or unrepresentable */
         }
         *out_sec = (long long)when;
     }

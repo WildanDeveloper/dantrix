@@ -118,12 +118,29 @@ int dx_daemonize(int *ready_fd)
     if (chdir("/") != 0) {
         /* nothing to do: the process is still usable */
     }
+    /*
+     * The read end is of no use here: only the parent reads readiness. Without
+     * this close the daemon leaks one descriptor for its whole lifetime.
+     */
+    if (ready_fd != NULL) {
+        (void)close(pipefd[0]);
+    }
+    /*
+     * Detach every standard stream. Redirecting only stdin leaves a daemon
+     * that still writes to the controlling terminal when a log destination is
+     * "stdout"/"stderr", and the terminal would be held open for the daemon's
+     * whole lifetime.
+     */
     {
         int devnull = open("/dev/null", O_RDWR | O_CLOEXEC);
 
         if (devnull >= 0) {
-            if (dup2(devnull, STDIN_FILENO) < 0) {
-                /* best effort */
+            int fd;
+
+            for (fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++) {
+                if (dup2(devnull, fd) < 0) {
+                    /* best effort: a failed dup2 leaves the old stream */
+                }
             }
             if (devnull > STDERR_FILENO) {
                 (void)close(devnull);

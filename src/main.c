@@ -29,13 +29,20 @@
 /*
  * Reload context: what is needed to rebuild the settings from scratch on
  * SIGHUP. The command line has the highest priority, so every flag is recorded
- * as a "key=value" assignment and replayed in order after the file and the
- * environment. The list grows once at start-up and is read-only afterwards.
+ * and replayed in order after the file and the environment. The list grows once
+ * at start-up and is read-only afterwards.
+ *
+ * The key is copied into a small fixed array (keys are short); the value is
+ * borrowed from argv, which lives for the whole process and may be a long path
+ * that must not be truncated into a scratch buffer.
  */
 #define DX_MAX_CLI_ASSIGN 128
 typedef struct {
     const char *config_path; /* may be NULL */
-    char cli[DX_MAX_CLI_ASSIGN][DX_CFG_STR_MAX * 2u];
+    struct {
+        char key[DX_CFG_STR_MAX];
+        const char *value;
+    } cli[DX_MAX_CLI_ASSIGN];
     size_t cli_count;
 } dx_reload_ctx_t;
 
@@ -47,26 +54,28 @@ static dx_reload_ctx_t *g_reload_ctx;
 
 static void reload_record(dx_reload_ctx_t *ctx, const char *key, const char *value)
 {
-    if (ctx == NULL || ctx->cli_count >= DX_MAX_CLI_ASSIGN) {
+    if (ctx == NULL || key == NULL || value == NULL || ctx->cli_count >= DX_MAX_CLI_ASSIGN) {
         return;
     }
-    if (snprintf(ctx->cli[ctx->cli_count], sizeof(ctx->cli[0]), "%s=%s", key, value) >= 0) {
-        ctx->cli_count++;
+    if (dx_strlcpy(ctx->cli[ctx->cli_count].key, key, sizeof(ctx->cli[0].key)) >=
+        sizeof(ctx->cli[0].key)) {
+        return; /* key too long to be a real key: skip recording */
     }
+    /* The value is borrowed: it may be a 4096-byte path and argv outlives the
+     * reload, so no truncating copy is made. */
+    ctx->cli[ctx->cli_count].value = value;
+    ctx->cli_count++;
 }
 
-/* Build an assignment string "key=value" and hand it to the registry. */
+/*
+ * Apply one flag value through the key registry (which validates the range)
+ * and record it for the SIGHUP replay. No intermediate "key=value" string is
+ * built, so a long path value cannot be truncated.
+ */
 static int assign(dx_settings_t *s, const char *src, const char *key, const char *value, FILE *msg)
 {
-    char buf[DX_CFG_STR_MAX * 2u];
-
-    if (snprintf(buf, sizeof(buf), "%s=%s", key, value) < 0) {
-        fprintf(msg, "dantrix: %s: cannot build the assignment\n", src);
-        return -1;
-    }
-    /* Recorded so SIGHUP can replay the command line in the same order. */
     reload_record(g_reload_ctx, key, value);
-    return dx_config_override_src(s, buf, src, msg);
+    return dx_config_set(s, key, value, src, msg);
 }
 
 /*
@@ -91,7 +100,7 @@ static int reload_cb(const void *vctx, dx_worker_reload_t *reload)
         return -1;
     }
     for (i = 0; i < ctx->cli_count; i++) {
-        if (dx_config_override(&fresh, ctx->cli[i], msg) != 0) {
+        if (dx_config_set(&fresh, ctx->cli[i].key, ctx->cli[i].value, "cli", msg) != 0) {
             return -1;
         }
     }
@@ -313,26 +322,32 @@ int main(int argc, char **argv)
         case 'o':
             /*
              * -o is the highest-priority source, so it has to be recorded for
-             * the SIGHUP replay exactly like the other flags. Parse it into
-             * key and value and record the pair, then apply it.
+             * the SIGHUP replay exactly like the other flags. Split it into key
+             * and value; the pair is applied directly (no intermediate
+             * "key=value" string), so a long path value is never truncated.
              */
             {
-                char kv[DX_CFG_STR_MAX * 2u];
-                char *eq;
+                const char *eq = strchr(optarg, '=');
 
-                if (dx_strlcpy(kv, optarg, sizeof(kv)) >= sizeof(kv)) {
-                    fprintf(stderr, "dantrix: -o: assignment too long\n");
-                    return DX_EXIT_USAGE;
-                }
-                eq = strchr(kv, '=');
-                if (eq == NULL) {
+                if (eq == NULL || eq == optarg) {
                     fprintf(stderr, "dantrix: -o: expected key=value, got '%s'\n", optarg);
                     return DX_EXIT_USAGE;
                 }
-                *eq = '\0';
-                reload_record(g_reload_ctx, kv, eq + 1);
-                if (dx_config_override(&set, optarg, msg) != 0) {
-                    return DX_EXIT_USAGE;
+                {
+                    /* reload_record() copies the key, so this scratch buffer
+                     * only has to live for the call. */
+                    char key[DX_CFG_STR_MAX];
+
+                    if ((size_t)(eq - optarg) >= sizeof(key)) {
+                        fprintf(stderr, "dantrix: -o: key too long\n");
+                        return DX_EXIT_USAGE;
+                    }
+                    memcpy(key, optarg, (size_t)(eq - optarg));
+                    key[eq - optarg] = '\0';
+                    reload_record(g_reload_ctx, key, eq + 1);
+                    if (dx_config_set(&set, key, eq + 1, "-o", msg) != 0) {
+                        return DX_EXIT_USAGE;
+                    }
                 }
             }
             break;

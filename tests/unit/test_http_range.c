@@ -203,6 +203,16 @@ static void test_dates(void)
     CHECK(!dx_http_parse_date("Mon, 30 Jun 2025 23:59:60 GMT", 29u, &t));
     CHECK(dx_http_parse_date("Mon, 30 Jun 2025 23:59:59 GMT", 29u, &t));
 
+    /*
+     * A day that does not exist in that month must be rejected, not silently
+     * normalised: timegm() would turn 31 February into 3 March.
+     */
+    CHECK(!dx_http_parse_date("Mon, 31 Feb 2025 00:00:00 GMT", 29u, &t));
+    CHECK(!dx_http_parse_date("Sun, 31 Apr 2026 00:00:00 GMT", 29u, &t));
+    /* 29 February is valid in a leap year and invalid otherwise. */
+    CHECK(dx_http_parse_date("Sat, 29 Feb 2020 00:00:00 GMT", 29u, &t));
+    CHECK(!dx_http_parse_date("Mon, 29 Feb 2021 00:00:00 GMT", 29u, &t));
+
     /* Invalid shapes are rejected, never guessed. */
     CHECK(!dx_http_parse_date("", 0u, &t));
     CHECK(!dx_http_parse_date("Sun", 3u, &t));

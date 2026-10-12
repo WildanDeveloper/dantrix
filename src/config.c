@@ -580,6 +580,15 @@ int dx_config_override_src(dx_settings_t *s, const char *assignment, const char 
     return apply_pair(s, buf, eq + 1, src, NULL, msg);
 }
 
+int dx_config_set(dx_settings_t *s, const char *key, const char *value, const char *src, FILE *msg)
+{
+    if (s == NULL || key == NULL || value == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    return apply_pair(s, key, value, src, NULL, msg);
+}
+
 int dx_config_validate(const dx_settings_t *s, FILE *msg)
 {
     if (s == NULL) {

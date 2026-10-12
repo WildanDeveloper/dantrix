@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 /* Write text into a temp file and return its path in out (caller unlinks). */
 static void write_file(char *out, size_t cap, const char *text)
@@ -258,6 +259,38 @@ static void test_print(void)
     }
 }
 
+static void test_long_values(void)
+{
+    dx_settings_t s;
+    FILE *msg = tmpfile();
+    char path[DX_CFG_PATH_MAX];
+    size_t i;
+
+    dx_test_begin("config/long_values");
+
+    /* A 4000-byte path must survive dx_config_set() intact, not be truncated
+     * to a small scratch buffer (the CLI -o/--root path used to truncate it). */
+    dx_config_defaults(&s);
+    for (i = 0; i < sizeof(path) - 1u; i++) {
+        path[i] = (i == 0) ? '/' : 'a';
+    }
+    path[sizeof(path) - 1u] = '\0';
+    CHECK_EQ(dx_config_set(&s, "root", path, "-o", msg), 0);
+    CHECK_EQ(strlen(s.root), strlen(path));
+    CHECK(strcmp(s.root, path) == 0);
+
+    /* A value longer than the field is refused, not truncated. */
+    dx_config_defaults(&s);
+    CHECK_EQ(dx_config_set(&s, "index", path, "-o", msg), -1);
+
+    /* The access log path is DX_CFG_PATH_MAX wide too. */
+    dx_config_defaults(&s);
+    CHECK_EQ(dx_config_set(&s, "access_log", path, "-o", msg), 0);
+    CHECK(strcmp(s.access_log, path) == 0);
+
+    fclose(msg);
+}
+
 int main(void)
 {
     test_defaults();
@@ -268,6 +301,7 @@ int main(void)
     test_env();
     test_validate();
     test_print();
+    test_long_values();
     printf("test_config: ");
     return dx_test_summary();
 }

@@ -124,6 +124,15 @@ int dx_config_override(dx_settings_t *s, const char *assignment, FILE *msg);
 int dx_config_override_src(dx_settings_t *s, const char *assignment, const char *src, FILE *msg);
 
 /*
+ * Apply a key and a value directly, without going through an intermediate
+ * "key=value" string. Building that string would cap a path value at the
+ * buffer size and silently truncate it (DX_CFG_PATH_MAX is 4096, far above the
+ * old 512-byte scratch), so every code path that holds the key and the value
+ * separately uses this one. Same rules and return contract as the overrides.
+ */
+int dx_config_set(dx_settings_t *s, const char *key, const char *value, const char *src, FILE *msg);
+
+/*
  * Cross-key validation (ranges that only make sense together). Returns 0, or
  * -1 with the reason on msg. This is filesystem-free, so --print-config can
  * show an effective configuration whose root is not present yet.
