@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <string.h>
@@ -12,7 +13,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-static int dx_listen_tcp_common(const char *addr, int port, int backlog, bool reuseport);
+static int dx_listen_tcp_common(const char *addr, int port, int backlog, bool reuseport,
+                                const dx_sockopts_t *opts, dx_sockopts_t *out_refused);
 
 const char *dx_strerror(int err)
 {
@@ -49,15 +51,22 @@ int dx_set_tcp_nodelay(int fd)
 
 int dx_listen_tcp(const char *addr, int port, int backlog)
 {
-    return dx_listen_tcp_common(addr, port, backlog, false);
+    return dx_listen_tcp_common(addr, port, backlog, false, NULL, NULL);
 }
 
 int dx_listen_tcp_reuseport(const char *addr, int port, int backlog)
 {
-    return dx_listen_tcp_common(addr, port, backlog, true);
+    return dx_listen_tcp_common(addr, port, backlog, true, NULL, NULL);
 }
 
-static int dx_listen_tcp_common(const char *addr, int port, int backlog, bool reuseport)
+int dx_listen_tcp_ex(const char *addr, int port, int backlog, bool reuseport,
+                     const dx_sockopts_t *opts, dx_sockopts_t *out_refused)
+{
+    return dx_listen_tcp_common(addr, port, backlog, reuseport, opts, out_refused);
+}
+
+static int dx_listen_tcp_common(const char *addr, int port, int backlog, bool reuseport,
+                                const dx_sockopts_t *opts, dx_sockopts_t *out_refused)
 {
     struct sockaddr_storage ss;
     struct sockaddr_in *sin = (struct sockaddr_in *)&ss;
@@ -123,6 +132,59 @@ static int dx_listen_tcp_common(const char *addr, int port, int backlog, bool re
         int off = 0;
         if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off)) != 0) {
             goto fail;
+        }
+    }
+
+    /*
+     * Tuning. Every field is optional and a refusal is reported rather than
+     * fatal: a kernel without the option is still able to serve. All four
+     * must be set before listen() to take effect.
+     */
+    if (opts != NULL) {
+        if (out_refused != NULL) {
+            memset(out_refused, 0, sizeof(*out_refused));
+        }
+        if (opts->rcvbuf > 0) {
+            int value = (opts->rcvbuf > (size_t)INT_MAX) ? INT_MAX : (int)opts->rcvbuf;
+
+            if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &value, sizeof(value)) != 0 &&
+                out_refused != NULL) {
+                out_refused->rcvbuf = opts->rcvbuf;
+            }
+        }
+        if (opts->sndbuf > 0) {
+            int value = (opts->sndbuf > (size_t)INT_MAX) ? INT_MAX : (int)opts->sndbuf;
+
+            if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &value, sizeof(value)) != 0 &&
+                out_refused != NULL) {
+                out_refused->sndbuf = opts->sndbuf;
+            }
+        }
+        if (opts->defer_accept_ms > 0) {
+            /* The kernel option is expressed in seconds, rounded up. */
+            int seconds = (int)((opts->defer_accept_ms + 999u) / 1000u);
+
+            if (seconds < 1) {
+                seconds = 1;
+            }
+            if (setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &seconds, sizeof(seconds)) != 0 &&
+                out_refused != NULL) {
+                out_refused->defer_accept_ms = opts->defer_accept_ms;
+            }
+        }
+        if (opts->fastopen_qlen > 0) {
+            int qlen =
+                (opts->fastopen_qlen > (unsigned)INT_MAX) ? INT_MAX : (int)opts->fastopen_qlen;
+
+            /*
+             * Requires net.ipv4.tcp_fastopen to have the server bit (0x2) set;
+             * on hosts where it does not, this fails with EOPNOTSUPP and the
+             * server simply runs without it.
+             */
+            if (setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN, &qlen, sizeof(qlen)) != 0 &&
+                out_refused != NULL) {
+                out_refused->fastopen_qlen = opts->fastopen_qlen;
+            }
         }
     }
 

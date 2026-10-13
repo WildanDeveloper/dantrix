@@ -7,6 +7,19 @@
 
 #include <signal.h>
 #include <stdbool.h>
+#include <stddef.h>
+
+/*
+ * Listener socket tuning. Every field is optional: 0 means "leave the kernel
+ * default alone". These were accepted by the configuration before but were
+ * never applied, so an operator's tuning silently did nothing.
+ */
+typedef struct {
+    unsigned defer_accept_ms; /* TCP_DEFER_ACCEPT: queue until data arrives */
+    unsigned fastopen_qlen;   /* TCP_FASTOPEN accept queue length */
+    size_t rcvbuf;            /* SO_RCVBUF for the listener (inherited) */
+    size_t sndbuf;            /* SO_SNDBUF for the listener (inherited) */
+} dx_sockopts_t;
 
 /*
  * Create a listening TCP socket bound to addr:port.
@@ -16,6 +29,17 @@
  * The caller owns the fd.
  */
 int dx_listen_tcp(const char *addr, int port, int backlog);
+
+/*
+ * Extended form: additionally sets SO_REUSEPORT when reuseport is true and
+ * applies *opts (when non-NULL) before bind(). A tuning option the kernel
+ * refuses is left at its default and reported in *out_refused (when non-NULL)
+ * by setting only that field; it is never a fatal error, because a host whose
+ * kernel lacks one of the tunables is still perfectly able to serve. The
+ * caller logs what was refused.
+ */
+int dx_listen_tcp_ex(const char *addr, int port, int backlog, bool reuseport,
+                     const dx_sockopts_t *opts, dx_sockopts_t *out_refused);
 
 /*
  * Like dx_listen_tcp(), but additionally sets SO_REUSEPORT before bind() so

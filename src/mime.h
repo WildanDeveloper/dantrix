@@ -2,7 +2,8 @@
  * mime.h - Extension to Content-Type mapping.
  *
  * A built-in table covers the common web extensions; a custom mime.types file
- * (the nginx/apache format: "type ext1 ext2;") can add or override entries.
+ * (the classic mime.types format: "type ext1 ext2;") can add or override
+ * entries.
  *
  * dx_mime_type_for() returns the stable base type owned by the table.
  * dx_mime_content_type() composes the full header value, applying the charset

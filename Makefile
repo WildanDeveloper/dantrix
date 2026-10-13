@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.7.0
+VERSION := 0.7.1
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -259,7 +259,7 @@ bench:
 	@echo "Payloads ready in bench/www. Start the server and run:"
 	@echo "  ./bin/dantrix -r bench/www -p 8080 -w 4 --access-log off"
 	@echo "  bench/run_all.sh"
-	@echo "  bench/compare_nginx.sh 8080 8081"
+	@echo "  bench/compare_reference.sh 8080 8081"
 	@echo
 	@echo "Or run one scenario at a time with bench/run_wrk.sh."
 

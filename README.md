@@ -21,7 +21,7 @@
 ---
 
 > [!WARNING]
-> **Dantrix is a learning project that is still pre-alpha.** There has been no security audit and it is not suitable for production. For production, use a mature server such as Nginx, Caddy, HAProxy, or Apache httpd. See [Project Status](#project-status) and [Security](#security).
+> **Dantrix is a learning project that is still pre-alpha.** There has been no security audit and it is not suitable for production. See [Project Status](#project-status) and [Security](#security).
 
 ## Table of Contents
 
@@ -124,6 +124,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Fourth audit round (40 defects, regression suite) | ✅ | v0.6.2 |
 | Re-audit: pipelining/keep-alive regressions fixed | ✅ | v0.6.3 |
 | Benchmark suite and optimization | ✅ | v0.7.0 |
+| Listener tuning, fd auto-tune, host pre-flight | ✅ | v0.7.1 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
 
@@ -147,7 +148,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 
 At least until version 1.0, Dantrix is **not** intended to:
 
-- replace Nginx, Caddy, or Apache for general production use;
+- replace a production-grade server;
 - run natively on Windows or macOS (`epoll` is Linux-only);
 - run application code (no CGI/FastCGI, scripting, or dynamic modules);
 - become a web application framework;
@@ -183,24 +184,9 @@ The **Target** column shows the release version in which the feature is schedule
 | Operations | Signals | Graceful shutdown, reload, reopen log | v0.6 |
 | Operations | Status endpoint | JSON metrics (optional, loopback only) | v0.6 |
 | Security | Privilege drop | `setgid`/`setuid`, `no_new_privs` | v0.6 |
-| Performance | Reproducible benchmark | `wrk`, `wrk2`, comparison with Nginx | v0.7 |
+| Performance | Reproducible benchmark | `wrk`, `wrk2` and the `bench/` harness | v0.7 |
 | Performance | `Date` header cache | Rendered once per second, copied afterwards | v0.7 |
 | Quality | Layered testing | Unit, integration, fuzzing, ASan/UBSan/TSan | v0.8 |
-
----
-
-## Brief Comparison with Other Servers
-
-This comparison is **qualitative** and is not a performance claim.
-
-| | Dantrix | Nginx | Caddy | Apache httpd | `python -m http.server` |
-|---|---|---|---|---|---|
-| Language | C | C | Go | C | Python |
-| I/O model | `epoll` event loop per core | Event-driven, one worker per core | Goroutines on top of the Go runtime | MPM (prefork, worker, or event) | Thread per connection |
-| HTTPS | Not yet (planned) | Yes | Yes (automatic HTTPS) | Yes | Not by default |
-| HTTP/2 | Not yet (planned) | Yes | Yes | Yes | No |
-| Maturity | Pre-alpha | Very mature | Mature | Very mature | Development tool |
-| Purpose | Learning and experimentation | Production | Production | Production | Local development |
 
 ---
 
@@ -622,6 +608,7 @@ General:
   -c, --config FILE        Configuration file (INI style)
   -t, --test-config        Validate the configuration and exit
       --print-config       Print the effective configuration and exit
+      --doctor             Check the host (limits, kernel tunables) and exit
   -o, --option KEY=VALUE   Override any configuration key (repeatable)
   -h, --help               Show this help
   -V, --version            Show version and compiled features
@@ -874,10 +861,10 @@ daemonize = false
 | Key | Type | Default | Reload | Description |
 |---|---|---|---|---|
 | `tcp_nodelay` | bool | `true` | yes | `TCP_NODELAY` on new connections |
-| `tcp_defer_accept` | duration | `0` | no | `TCP_DEFER_ACCEPT`: a new `accept` is only woken up when data arrives. `0` = disabled |
-| `tcp_fastopen` | int | `0` | no | TCP Fast Open queue length (requires `net.ipv4.tcp_fastopen=3`). `0` = disabled |
-| `socket_rcvbuf` | size | `0` | no | `SO_RCVBUF`. `0` = kernel autotuning (setting a value disables autotuning) |
-| `socket_sndbuf` | size | `0` | no | `SO_SNDBUF`. Handled the same as above |
+| `tcp_defer_accept` | duration | `0` | no | `TCP_DEFER_ACCEPT`: a new `accept` is only woken up when data arrives (seconds, rounded up). `0` = disabled |
+| `tcp_fastopen` | int | `0` | no | TCP Fast Open accept queue length. Needs the server bit (`2`) in `net.ipv4.tcp_fastopen`; without it the option is refused with a warning. `0` = disabled |
+| `socket_rcvbuf` | size | `0` | no | `SO_RCVBUF` on the listener (accepted sockets inherit it). Setting a value disables kernel autotuning. `0` = leave it alone |
+| `socket_sndbuf` | size | `0` | no | `SO_SNDBUF`, handled the same as `socket_rcvbuf` |
 
 **Logging**
 
@@ -907,13 +894,57 @@ daemonize = false
 - On `SIGHUP`, keys marked **Reload = yes** are applied to new requests or connections. Keys marked **no** require a restart; changes to them are ignored with a warning in the error log.
 
 > [!IMPORTANT]
-> Since v0.6.0 the parser accepts **every key above** and validates it, but a few
-> are accepted without an effect yet and are announced at start-up with an
-> explicit warning: `edge_triggered` (v0.7), `add_header`, `tcp_defer_accept`,
-> `tcp_fastopen`, `socket_rcvbuf` and `socket_sndbuf`. `log_format = json` is
-> rejected with exit code 2 rather than silently downgraded. `root`, `index` and
-> `mime_types` open a file descriptor at start-up and are therefore **not**
-> re-applied on `SIGHUP`; everything else in the table reloads live.
+> Since v0.7.1 every key above is **applied**. The listener tunables
+> (`tcp_defer_accept`, `tcp_fastopen`, `socket_rcvbuf`, `socket_sndbuf`) are set
+> on the listening socket before `listen()`; an option the kernel refuses is
+> reported as a warning and the server keeps running without it. The two keys
+> still announced as not implemented are `edge_triggered` and `add_header`.
+> `log_format = json` is rejected with exit code 2 rather than silently
+> downgraded. `root`, `index` and `mime_types` open a file descriptor at
+> start-up and are therefore **not** re-applied on `SIGHUP`; everything else in
+> the table reloads live.
+
+</details>
+
+### Host pre-flight (`--doctor`)
+
+Most start-up failures on a real host are not configuration mistakes, they are
+host limits. `--doctor` answers them before the server is started and exits
+non-zero when something would block it:
+
+```bash
+./bin/dantrix --doctor -r /var/www -p 8080 -w 4 --max-conns 16384
+```
+
+```text
+dantrix doctor
+  document root      /var/www
+  bind               0.0.0.0:8080
+  workers            4
+  max_connections    16384 (per worker)
+
+  RLIMIT_NOFILE      soft = 1024, hard = 524288
+                     workers x max_connections = 65536
+  [WARN] the soft limit is below 65536. Dantrix raises it to the hard limit
+         automatically and lowers max_connections if even that is not
+         enough; to give it room permanently:
+           sysctl -w fs.nr_open=<value>   (ceiling for the hard limit)
+           ulimit -n <value>              (in the service unit)
+
+  net.core.somaxconn = 4096, backlog = 4096
+  [ OK ] the listen queue fits
+
+  [ OK ] 0.0.0.0:8080 is free
+  [ OK ] document root '/var/www' is usable
+
+  result: no blockers found
+```
+
+It checks `RLIMIT_NOFILE` against `workers × max_connections`,
+`net.core.somaxconn` against the backlog, whether the port can be bound, whether
+the document root is usable, and whether the configured privilege-drop user and
+group exist — each with the exact number that is wrong and the command that
+fixes it.
 
 </details>
 
@@ -1013,7 +1044,7 @@ Error responses caused by parsing failures are always followed by **closing the 
 | `X-Content-Type-Options: nosniff` | Sent on all responses |
 | Custom headers | From `add_header` |
 
-The **ETag** has the format `"<mtime-hex>-<size-hex>"` (similar to Nginx), for example `"6acafefa-1c"`. Limitation: two content changes with the same size within the same second will produce identical ETags.
+The **ETag** has the format `"<mtime-hex>-<size-hex>"`, for example `"6acafefa-1c"`. Limitation: two content changes with the same size within the same second will produce identical ETags.
 
 ### Path resolution
 
@@ -1035,7 +1066,7 @@ The order of processing a request target into a file:
 - `If-None-Match` uses *weak comparison* as specified by RFC 9110 and supports `*` as well as a list of ETags.
 - `If-Modified-Since` only recognizes the IMF-fixdate format.
 - A **single range** is supported in three forms: `bytes=0-499`, `bytes=500-`, and `bytes=-500` (suffix). The result is `206` with `Content-Range: bytes start-end/size`.
-- **Multi-range** (`bytes=0-10,20-30`) is **deliberately not served**: the server chooses to ignore the Range and send a full `200`, in order to close the overlapping-range attack gap (a vulnerability class such as "Apache Killer").
+- **Multi-range** (`bytes=0-10,20-30`) is **deliberately not served**: the server chooses to ignore the Range and send a full `200`, closing the overlapping-range attack gap.
 - A range beyond the file size produces `416`. An invalid Range syntax is ignored.
 - `If-Range` only evaluates strong validators; when it does not match, the server sends a full `200`.
 
@@ -1163,8 +1194,8 @@ dantrix/
 │   ├── make_files.sh             # create the 1k, 10k, 100k, 1m, 100m test files
 │   ├── run_wrk.sh                # throughput and latency scenarios
 │   ├── run_all.sh                # every scenario (called by `make bench`)
-│   ├── compare_nginx.sh          # comparison against Nginx
-│   ├── nginx.conf                # Nginx comparison configuration
+│   ├── compare_reference.sh      # measure against a reference instance
+│   ├── reference.conf            # reference configuration for the comparison
 │   ├── mixed.lua                 # wrk script: mixed file sizes
 │   ├── py_loadgen.py             # minimal Python load generator (no wrk needed)
 │   ├── slowloris.py              # slow-connection resilience test
@@ -1457,7 +1488,7 @@ These numbers are **goals**, not verified values.
 |---|---|
 | Concurrent idle keep-alive connections | ≥ 10,000 (C10K) at v0.4; *stretch* ≥ 100,000 (C100K) at v0.7 |
 | User-space memory per idle connection | ≤ 1 KiB (excluding kernel memory) |
-| Small-file throughput with keep-alive, compared to Nginx on an equivalent configuration | ≥ 80% (*stretch* ≥ 100%) |
+| Small-file throughput with keep-alive on the same machine | ≥ 30,000 req/s (*stretch* higher) |
 | Stability | 0 crashes and 0 leaks in 24 hours of fuzzing and a 1-hour stress test before v1.0 |
 
 ### Preparing the environment
@@ -1466,7 +1497,7 @@ These numbers are **goals**, not verified values.
 2. Apply [Operating System Tuning](#operating-system-tuning) on the server **and** the client.
 3. Set the CPU governor to `performance`.
 4. Warm up for 10 to 30 seconds before measuring.
-5. Record: CPU model, core count, RAM, `uname -r`, compiler version and flags, commit hash, Nginx version.
+5. Record: CPU model, core count, RAM, `uname -r`, compiler version and flags, commit hash.
 
 ### Test files
 
@@ -1490,7 +1521,7 @@ done
 |---|---|
 | `wrk` | An efficient multithreaded load generator; the primary choice for throughput |
 | `wrk2` | A variant with a fixed rate (`-R`); correct for measuring latency because it avoids *coordinated omission* (the built binary is renamed to `wrk2` so it does not clash with `wrk`) |
-| `ab` (ApacheBench) | Single-threaded; easily becomes its own bottleneck. Not recommended for judging fast servers |
+| `ab` | Single-threaded; easily becomes its own bottleneck. Not recommended for judging fast servers |
 | `hey`, `bombardier`, `oha` | Modern alternatives based on Go or Rust |
 | `bench/tools/idle_conns.c` | Holds N idle connections for C10K tests and memory measurements |
 | `bench/slowloris.py` | Tests resilience against slow connections |
@@ -1552,36 +1583,6 @@ All scenarios at once: `make bench`.
 | Cycles, instructions, cache misses | `sudo perf stat -e task-clock,context-switches,cycles,instructions,cache-misses -p $(pidof dantrix) -- sleep 10` |
 | Kernel TCP memory | The `TCP: ... mem N` line in `/proc/net/sockstat` (unit: 4 KiB pages) |
 
-### Comparison with Nginx
-
-Run Nginx side by side on a different port with an equivalent configuration (`bench/nginx.conf`):
-
-```nginx
-worker_processes 4;                  # match Dantrix's --workers
-worker_rlimit_nofile 1048576;
-
-events {
-    worker_connections 65535;
-    use epoll;
-}
-
-http {
-    access_log off;
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 30;
-    keepalive_requests 1000;
-
-    server {
-        listen 8081 reuseport;
-        root /path/to/dantrix/bench/www;
-    }
-}
-```
-
-Automation: `bench/compare_nginx.sh`.
-
 ### Results template
 
 **Test environment (v0.7.0, measured)**
@@ -1594,7 +1595,6 @@ Automation: `bench/compare_nginx.sh`.
 | OS and kernel | Debian 13, Linux 6.12 |
 | Compiler and flags | gcc 14.2, `-O2 -DNDEBUG` + hardening (`-D_FORTIFY_SOURCE=2`, stack protector, PIE) |
 | Dantrix commit | b2b9eb7 (v0.7.0) |
-| Nginx version | not measured (no Nginx on this machine) |
 | Date | 2026-10-13 |
 | Load generator | `bench/py_loadgen.py` (single-process Python; **not** wrk — see the note below) |
 
@@ -2120,21 +2120,12 @@ Because logs are written to `stdout`/`stderr`, nothing is written to disk, so `r
 
 Dantrix does not support TLS yet, so HTTPS termination is done by the proxy. Set `bind = 127.0.0.1` on Dantrix.
 
-**Caddy** (automatic certificates):
+A generic reverse-proxy configuration (any TLS-terminating proxy) looks like
+this:
 
 ```text
-example.com {
-    reverse_proxy 127.0.0.1:8080
-}
-```
-
-**Nginx:**
-
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_set_header Host $host;
-}
+proxy_pass http://127.0.0.1:8080;
+proxy_set_header Host $host;
 ```
 
 ### Checklist before exposing it to the network
@@ -2258,6 +2249,15 @@ Each release has a single capability as its theme. A checked box marks completed
       open-file cache remain planned)
 - [ ] C100K test (*stretch goal*)
 
+### v0.7.1: Tuning that reaches the kernel
+
+- [x] Listener tunables (`tcp_defer_accept`, `tcp_fastopen`, `socket_rcvbuf`,
+      `socket_sndbuf`) applied to the socket instead of ignored
+- [x] Automatic `RLIMIT_NOFILE` tuning (raise the soft limit, lower
+      `max_connections` with a warning when it is still too low)
+- [x] `--doctor`: a host pre-flight that reports the exact blocking number and
+      the command that fixes it
+
 ### v0.8.0: Hardening
 
 - [ ] Long-running fuzzing (≥ 24 hours) on all targets
@@ -2297,7 +2297,7 @@ This list is written honestly so there are no surprises.
 
 1. **Disk I/O can block a worker.** `open`, `stat`, and `sendfile` on files not yet in the *page cache* can wait on the disk, holding up every connection owned by that worker. Temporary mitigations: more workers, faster storage, cache warming. Long-term solutions: a thread pool for file operations or `io_uring`.
 2. **`SO_REUSEPORT` distribution is not always even.** It is hash-based, so with few clients or long-lived connections some workers may be busier than others. Each listener also has its own accept queue.
-3. **One process, many threads.** A crash in one thread kills the whole server (no process isolation like Nginx's master/worker pattern). Mitigations: sanitizers, fuzzing, and a supervisor (`Restart=on-failure`).
+3. **One process, many threads.** A crash in one thread kills the whole server (there is no supervisor-process isolation). Mitigations: sanitizers, fuzzing, and a supervisor (`Restart=on-failure`).
 4. **No built-in zero-downtime binary upgrade.** Alternative: run a new instance side by side on the same port (`SO_REUSEPORT`), then stop the old one with `SIGTERM`. There is a small gap: connections still queued on the old listener can be reset (kernel ≥ 5.14 has `net.ipv4.tcp_migrate_req` to mitigate this).
 5. **Linux only.** `epoll`, `openat2`, `signalfd`, and `eventfd` are Linux APIs.
 6. **No TLS, HTTP/2, or compression yet.**
@@ -2316,7 +2316,7 @@ This list is written honestly so there are no surprises.
 The goal is learning down to the syscall and memory level: no runtime, no garbage collector, no abstraction that hides what is happening. The consequence is that memory safety becomes the author's responsibility, which is why sanitizers and fuzzing exist in this project. For new production projects, memory-safe languages such as Rust are worth considering.
 
 **Why `epoll` and not `io_uring`?**
-`epoll` is mature, widely documented, and used by Nginx, Redis, and libuv, making it a good learning foundation (the *readiness* model). `io_uring` (the *completion* model) is newer and potentially faster, but more complex, and some platforms restrict or disable it for security reasons. An `io_uring` backend is planned for after 1.0 so it can be compared directly with `epoll`.
+`epoll` is mature, widely documented, and used by well-known event loops such as Redis's `ae.c` and libuv, making it a good learning foundation (the *readiness* model). `io_uring` (the *completion* model) is newer and potentially faster, but more complex, and some platforms restrict or disable it for security reasons. An `io_uring` backend is planned for after 1.0 so it can be compared directly with `epoll`.
 
 **Why not just one thread per connection?**
 Ten thousand threads means ten thousand stacks and lots of context switches. `examples/02_echo_thread_per_conn.c` exists so you can prove it to yourself with numbers.
@@ -2325,7 +2325,7 @@ Ten thousand threads means ten thousand stacks and lots of context switches. `ex
 Not natively. Use WSL2 (Windows), or Docker/a Linux VM (macOS). A `kqueue` backend is on the long-term idea list.
 
 **Is it safe to use in production?**
-Not yet. It is pre-alpha, unaudited, and does not support TLS. Use Nginx, Caddy, or HAProxy for production.
+Not yet. It is pre-alpha, unaudited, and does not support TLS. Use a production-grade server for production.
 
 **Why is there no HTTPS yet?**
 TLS adds substantial complexity (a non-blocking OpenSSL API, certificates, and `sendfile` cannot be used without kTLS). The v1.0 priority is a correct and tested HTTP/1.1 foundation. For now, TLS termination is done at a reverse proxy.
@@ -2341,9 +2341,6 @@ It depends on the workload. Edge-triggered can reduce the number of wakeups but 
 
 **Can it be used as a library or a reverse proxy?**
 That is the direction of development: the event loop and parser are designed modularly, and extracting `libdantrix` is on the post-1.0 idea list.
-
-**How is it different from Nginx?**
-Nginx is a mature product with a large ecosystem. Dantrix is an educational project with a small scope and code designed to be concise and easy to read, plus documentation of the design decisions.
 
 **How do you make sure performance claims are honest?**
 Every number must come from a script in `bench/`, with the hardware specification, kernel version, and commit hash recorded. See [Common pitfalls](#common-pitfalls-reading-results-honestly).
@@ -2594,7 +2591,6 @@ Following the [Keep a Changelog](https://keepachangelog.com/) format and [Semant
 - W. Richard Stevens et al., *UNIX Network Programming, Volume 1*
 - Randal Bryant and David O'Hallaron, *Computer Systems: A Programmer's Perspective* (the "Tiny" web server)
 - Brendan Gregg, *Systems Performance*, and the [Flame Graphs](https://www.brendangregg.com/flamegraphs.html) page
-- Andrew Alexeev, the ["nginx" chapter](https://aosabook.org/en/nginx.html) in *The Architecture of Open Source Applications, Vol. 2*
 - Shuveb Hussain, [*Lord of the io_uring*](https://unixism.net/loti/)
 
 **Tools**
@@ -2608,7 +2604,7 @@ Following the [Keep a Changelog](https://keepachangelog.com/) format and [Semant
 
 - [libuv](https://docs.libuv.org/): the cross-platform event loop behind Node.js
 - [picohttpparser](https://github.com/h2o/picohttpparser) and [llhttp](https://github.com/nodejs/llhttp): fast and mature HTTP parsers
-- Nginx and Redis (`ae.c`): event loop designs proven in production
+- Redis (`ae.c`): a concise event loop proven in production
 
 ---
 
@@ -2616,7 +2612,6 @@ Following the [Keep a Changelog](https://keepachangelog.com/) format and [Semant
 
 Dantrix is inspired by the designs and writing of:
 
-- **Nginx**, which proved that an event-driven model with one worker per core can serve very large amounts of traffic;
 - **Redis** (`ae.c`) and **libuv**, as examples of concise, easy-to-learn event loops;
 - **H2O/picohttpparser** and **llhttp**, as references for HTTP parser design;
 - **Dan Kegel** (C10K), **Michael Kerrisk**, **W. Richard Stevens**, **Beej**, and **Brendan Gregg**, whose writing makes systems topics feel learnable by anyone;

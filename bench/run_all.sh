@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run every benchmark scenario in one go (and prepare the payloads first).
 #
-# Requires: wrk, python3. wrk2 and nginx are optional (S6 and the comparison).
+# Requires: wrk, python3. wrk2 is optional (scenario S6).
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"

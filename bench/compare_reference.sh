@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Compare Dantrix and Nginx under the same load.
+# Compare Dantrix against a reference instance of any static file server
+# running on a neighbouring port.
 #
 # Usage:
-#   bench/compare_nginx.sh [DANTRIX_PORT] [NGINX_PORT] [DURATION]
+#   bench/compare_reference.sh [DANTRIX_PORT] [REFERENCE_PORT] [DURATION]
 #
 # Both servers must already be running with equivalent configurations:
 #   * Dantrix: ./bin/dantrix -r bench/www -p 8080 -w 4 --access-log off
-#   * Nginx:   nginx -c "$PWD/bench/nginx.conf" -p /tmp   (listens on 8081)
+#   * Reference: whatever serves the same payload on REFERENCE_PORT (8081)
 #
 # The script runs the same wrk scenario against both and prints a small table.
 # It never starts or stops the servers; that keeps the comparison honest (no
@@ -20,7 +21,7 @@ WRK="${WRK:-wrk}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 command -v "$WRK" >/dev/null 2>&1 || {
-    echo "compare_nginx.sh: '$WRK' not found; install wrk first" >&2
+    echo "compare_reference.sh: '$WRK' not found; install wrk first" >&2
     exit 1
 }
 
@@ -36,14 +37,14 @@ measure() {
     printf '%-10s %-8s %s req/s\n' "$label" "$scenario" "${rps:-n/a}"
 }
 
-echo "Dantrix vs Nginx ($DURATION per scenario)"
+echo "Dantrix vs reference ($DURATION per scenario)"
 echo "  Dantrix: http://127.0.0.1:$DPORT"
-echo "  Nginx:   http://127.0.0.1:$NPORT"
+echo "  Reference: http://127.0.0.1:$NPORT"
 echo
 printf '%-10s %-8s %s\n' "server" "scenario" "result"
 for scenario in s1 s3; do
     measure "Dantrix" "http://127.0.0.1:$DPORT" "$scenario"
-    measure "Nginx" "http://127.0.0.1:$NPORT" "$scenario"
+    measure "Reference" "http://127.0.0.1:$NPORT" "$scenario"
 done
 echo
 echo "Record the full output in bench/results/ together with the hardware,"

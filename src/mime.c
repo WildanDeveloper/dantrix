@@ -319,7 +319,7 @@ const char *dx_mime_type_for(const dx_mime_t *m, const char *path)
         return "application/octet-stream";
     }
     if (dx_mime_extension(path, ext, sizeof(ext)) > 0) {
-        /* Custom entries win over the built-ins, matching nginx behaviour. */
+        /* Custom entries win over the built-ins. */
         for (size_t i = 0; i < m->custom_count; i++) {
             if (strcmp(m->custom[i].ext, ext) == 0) {
                 return m->custom[i].type;

@@ -8,6 +8,9 @@
  */
 #include <errno.h>
 #include <getopt.h>
+#include <grp.h>
+#include <limits.h>
+#include <pwd.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -158,6 +161,7 @@ static void print_usage(FILE *out)
             "  -c, --config FILE        Configuration file (INI style)\n"
             "  -t, --test-config        Validate the configuration and exit\n"
             "      --print-config       Print the effective configuration and exit\n"
+            "      --doctor             Check the host (limits, kernel tunables) and exit\n"
             "  -o, --option KEY=VALUE   Override any configuration key (repeatable)\n"
             "  -h, --help               Show this help\n"
             "  -V, --version            Show version and compiled features\n"
@@ -222,6 +226,147 @@ static void print_version(FILE *out)
     fprintf(out, "%s %s\n", DX_PROGRAM_NAME, DX_VERSION_STRING);
 }
 
+/*
+ * Read one unsigned long out of a /proc/sys file. Returns 0 on success, -1
+ * when the file is missing (the tunable does not exist on this kernel) or the
+ * content is not a number.
+ */
+static int read_sysctl_ulong(const char *path, unsigned long *out)
+{
+    FILE *f = fopen(path, "r");
+
+    if (f == NULL) {
+        return -1;
+    }
+    if (fscanf(f, "%lu", out) != 1) {
+        (void)fclose(f);
+        return -1;
+    }
+    (void)fclose(f);
+    return 0;
+}
+
+/*
+ * The host pre-flight. The idea: most start-up failures on a production host
+ * are not configuration mistakes, they are host limits -- a low file limit, a
+ * small somaxconn, an occupied port, a document root that will not be readable
+ * after the privilege drop. A configuration file cannot answer any of that,
+ * so it is answered here, before the operator starts the server, with the
+ * exact number that is too small and what to change.
+ *
+ * Exit code is 0 when nothing blocks a start-up, 1 when something does.
+ */
+static int run_doctor(const dx_settings_t *set)
+{
+    unsigned soft = 0;
+    unsigned hard = 0;
+    unsigned long somaxconn = 0;
+    int rc = DX_EXIT_OK;
+    int workers = set->workers;
+    size_t want;
+
+    if (workers == 0) {
+        workers = (int)dx_cpu_count();
+    }
+    printf("dantrix doctor\n");
+    printf("  document root      %s\n", set->root);
+    printf("  bind               %s:%d\n", set->bind, set->port);
+    printf("  workers            %d\n", workers);
+    printf("  max_connections    %zu (per worker)\n\n", set->max_connections);
+
+    want = (size_t)workers * set->max_connections;
+
+    /* 1. File descriptors: one per socket, plus logs and the root handle. */
+    if (dx_fd_limit(&soft, &hard) != 0) {
+        printf("  [WARN] could not read RLIMIT_NOFILE (%s)\n", dx_strerror(errno));
+    } else if (soft == 0u) {
+        printf("  [ OK ] RLIMIT_NOFILE soft = unlimited, hard = %u\n", hard);
+    } else {
+        printf("  RLIMIT_NOFILE      soft = %u, hard = %u\n", soft, hard);
+        printf("                     workers x max_connections = %zu\n", want);
+        if ((size_t)soft < want) {
+            printf("  [WARN] the soft limit is below %zu. Dantrix raises it to the hard limit\n"
+                   "         automatically and lowers max_connections if even that is not\n"
+                   "         enough; to give it room permanently:\n"
+                   "           sysctl -w fs.nr_open=<value>   (ceiling for the hard limit)\n"
+                   "           ulimit -n <value>              (in the service unit)\n",
+                   want);
+        } else {
+            printf("  [ OK ] the soft limit covers workers x max_connections\n");
+        }
+    }
+
+    /* 2. Backlog: clamped by somaxconn without any error. */
+    if (read_sysctl_ulong("/proc/sys/net/core/somaxconn", &somaxconn) == 0) {
+        printf("\n  net.core.somaxconn = %lu, backlog = %d\n", somaxconn, set->backlog);
+        if (somaxconn > 0 && (unsigned long)set->backlog > somaxconn) {
+            printf("  [WARN] backlog %d is above somaxconn %lu: the kernel silently clamps it.\n"
+                   "           sysctl -w net.core.somaxconn=%d\n",
+                   set->backlog, somaxconn, set->backlog);
+        } else {
+            printf("  [ OK ] the listen queue fits\n");
+        }
+    } else {
+        printf("\n  [SKIP] net.core.somaxconn is not readable on this kernel\n");
+    }
+
+    /* 3. The port: a start-up that dies on EADDRINUSE is the most common one. */
+    {
+        int probe = dx_listen_tcp(set->bind, set->port, 1);
+
+        if (probe >= 0) {
+            (void)close(probe);
+            printf("\n  [ OK ] %s:%d is free\n", set->bind, set->port);
+        } else {
+            printf("\n  [FAIL] cannot bind %s:%d: %s\n", set->bind, set->port, dx_strerror(errno));
+            rc = DX_EXIT_FATAL;
+        }
+    }
+
+    /* 4. The document root, as the *server user* would see it. */
+    {
+        dx_fs_t *probe =
+            dx_fs_create(set->root, set->index, set->directory_listing, set->follow_symlinks);
+
+        if (probe == NULL) {
+            printf("  [FAIL] document root '%s' is unusable: %s\n", set->root, dx_strerror(errno));
+            rc = DX_EXIT_FATAL;
+        } else {
+            dx_fs_destroy(probe);
+            printf("  [ OK ] document root '%s' is usable\n", set->root);
+        }
+    }
+
+    /* 5. The privilege-drop user, if one is configured. */
+    if (set->user[0] != '\0') {
+        const struct passwd *pw = getpwnam(set->user);
+
+        printf("\n  privilege drop     user '%s'", set->user);
+        if (pw == NULL) {
+            printf("\n  [FAIL] user '%s' does not exist on this host\n", set->user);
+            rc = DX_EXIT_FATAL;
+        } else {
+            printf(" (uid %u)\n", (unsigned)pw->pw_uid);
+            if (set->group[0] == '\0') {
+                printf("  [ OK ] no group configured: the user's login group is used\n");
+            } else {
+                const struct group *gr = getgrnam(set->group);
+
+                if (gr == NULL) {
+                    printf("  [FAIL] group '%s' does not exist on this host\n", set->group);
+                    rc = DX_EXIT_FATAL;
+                } else {
+                    printf("  [ OK ] group '%s' exists (gid %u)\n", set->group,
+                           (unsigned)gr->gr_gid);
+                }
+            }
+        }
+    }
+
+    printf("\n  result: %s\n", (rc == DX_EXIT_OK) ? "no blockers found" : "problems above");
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     dx_settings_t set;
@@ -235,6 +380,7 @@ int main(int argc, char **argv)
     int rc = DX_EXIT_OK;
     bool test_config = false;
     bool print_config = false;
+    bool doctor = false;
     int opt;
 
     static const struct option long_opts[] = {{"help", no_argument, NULL, 'h'},
@@ -281,6 +427,7 @@ int main(int argc, char **argv)
                                               {"user", required_argument, NULL, 1012},
                                               {"group", required_argument, NULL, 1013},
                                               {"status-path", required_argument, NULL, 1014},
+                                              {"doctor", no_argument, NULL, 1015},
                                               {NULL, 0, NULL, 0}};
 
     /* Pass 1: find the configuration file so it is loaded before the flags. */
@@ -546,6 +693,9 @@ int main(int argc, char **argv)
                 return DX_EXIT_USAGE;
             }
             break;
+        case 1015:
+            doctor = true;
+            break;
         default:
             print_usage(stderr);
             return DX_EXIT_USAGE;
@@ -564,6 +714,13 @@ int main(int argc, char **argv)
         }
         dx_config_print(&set, stdout);
         return DX_EXIT_OK;
+    }
+    if (doctor) {
+        /* The doctor reports on the effective configuration, so validate it. */
+        if (dx_config_validate(&set, msg) != 0) {
+            return DX_EXIT_USAGE;
+        }
+        return run_doctor(&set);
     }
     if (test_config) {
         if (dx_config_validate(&set, msg) != 0 || dx_config_check_root(&set, msg) != 0) {
@@ -587,12 +744,6 @@ int main(int argc, char **argv)
     if (set.add_header_count > 0) {
         fprintf(stderr, "dantrix: add_header is not implemented yet (%zu header(s) ignored)\n",
                 set.add_header_count);
-    }
-    if (set.tcp_defer_accept_ms != 0 || set.tcp_fastopen != 0 || set.socket_rcvbuf != 0 ||
-        set.socket_sndbuf != 0) {
-        fprintf(stderr,
-                "dantrix: tcp_defer_accept/tcp_fastopen/socket_rcvbuf/socket_sndbuf are not "
-                "implemented yet\n");
     }
 
     /*
@@ -669,9 +820,51 @@ int main(int argc, char **argv)
         fprintf(stderr, "dantrix: --workers %d exceeds the maximum of 1024\n", workers);
         return DX_EXIT_USAGE;
     }
+
+    /*
+     * Automatic file-descriptor limit tuning. The kernel grants one fd per
+     * socket, so max_connections is meaningless unless the soft limit is high
+     * enough. The soft limit is raised towards the hard one here, before any
+     * socket is opened, and max_connections is lowered when even that is not
+     * enough, with a warning. This used to be documented but not implemented:
+     * on a host with the default 1024 limit every connection past ~1000 was
+     * refused with no hint why.
+     */
+    {
+        unsigned soft = 0;
+        unsigned hard = 0;
+
+        if (dx_fd_limit(&soft, &hard) == 0 && soft != 0u) {
+            size_t want = (size_t)workers * set.max_connections;
+
+            if ((size_t)soft < want) {
+                size_t room = (soft > 16u) ? (size_t)soft - 16u : 0u; /* logs, root, the listener */
+                size_t lowered = room / (size_t)workers;
+
+                if (lowered < 1u) {
+                    lowered = 1u;
+                }
+                fprintf(stderr,
+                        "dantrix: WARNING: RLIMIT_NOFILE soft limit is %u (hard %u) but workers x "
+                        "max_connections is %zu; lowering max_connections to %zu\n",
+                        soft, hard, want, lowered);
+                set.max_connections = lowered;
+            }
+        }
+    }
+
     cfg.workers = workers;
     cfg.reuseport = set.reuseport;
     cfg.cpu_affinity = set.cpu_affinity;
+    /*
+     * Listener tuning. These were accepted by the configuration before but
+     * never reached the socket, so an operator's tuning silently did nothing.
+     */
+    cfg.sockopts.defer_accept_ms =
+        (set.tcp_defer_accept_ms > UINT_MAX) ? UINT_MAX : (unsigned)set.tcp_defer_accept_ms;
+    cfg.sockopts.fastopen_qlen = (set.tcp_fastopen < 0) ? 0u : (unsigned)set.tcp_fastopen;
+    cfg.sockopts.rcvbuf = set.socket_rcvbuf;
+    cfg.sockopts.sndbuf = set.socket_sndbuf;
     cfg.limits.max_request_line = set.max_request_line;
     cfg.limits.max_header_size = set.max_header_size;
     cfg.limits.max_headers = set.max_headers;

@@ -158,6 +158,37 @@ static void control_signal_set(sigset_t *set)
     sigaddset(set, SIGUSR2);
 }
 
+/*
+ * Log the tuning options the kernel refused, so a configuration that asks for
+ * TCP_FASTOPEN on a kernel without it does not silently do nothing. A refusal
+ * is a warning, not an error: the listener works without it.
+ */
+static void warn_refused_tuning(dx_log_t *log, const dx_sockopts_t *refused)
+{
+    if (refused == NULL) {
+        return;
+    }
+    if (refused->rcvbuf > 0) {
+        dx_log_write(log, DX_LOG_WARN, "SO_RCVBUF %zu refused by the kernel: keeping the default",
+                     refused->rcvbuf);
+    }
+    if (refused->sndbuf > 0) {
+        dx_log_write(log, DX_LOG_WARN, "SO_SNDBUF %zu refused by the kernel: keeping the default",
+                     refused->sndbuf);
+    }
+    if (refused->defer_accept_ms > 0) {
+        dx_log_write(log, DX_LOG_WARN,
+                     "TCP_DEFER_ACCEPT %ums refused by the kernel: keeping the default",
+                     refused->defer_accept_ms);
+    }
+    if (refused->fastopen_qlen > 0) {
+        dx_log_write(log, DX_LOG_WARN,
+                     "TCP_FASTOPEN %u refused (net.ipv4.tcp_fastopen lacks the server bit?): "
+                     "keeping the default",
+                     refused->fastopen_qlen);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Single-worker path: the main thread runs the event loop              */
 /* ------------------------------------------------------------------ */
@@ -169,6 +200,7 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
     dx_worker_opts_t opts;
     dx_worker_reload_t reload;
     dx_reopen_ctx_t reopen_ctx;
+    dx_sockopts_t refused;
     sigset_t mask;
     int sig_fd;
     int listen_fd;
@@ -190,13 +222,15 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
         return -1;
     }
 
-    listen_fd = dx_listen_tcp(cfg->bind_addr, cfg->port, cfg->backlog);
+    listen_fd =
+        dx_listen_tcp_ex(cfg->bind_addr, cfg->port, cfg->backlog, false, &cfg->sockopts, &refused);
     if (listen_fd < 0) {
         dx_log_write(&logs->log, DX_LOG_ERROR, "cannot listen on %s:%d: %s", cfg->bind_addr,
                      cfg->port, dx_strerror(errno));
         (void)close(sig_fd);
         return -1;
     }
+    warn_refused_tuning(&logs->log, &refused);
 
     memset(&reload, 0, sizeof(reload));
     pthread_mutex_init(&reload.mu, NULL);
@@ -315,15 +349,19 @@ static int setup_listeners(const dx_server_config_t *cfg, dx_logs_t *logs, dx_wo
                            unsigned count, int *shared_fd)
 {
     unsigned i;
+    dx_sockopts_t refused;
 
     *shared_fd = -1;
+    memset(&refused, 0, sizeof(refused));
 
     if (cfg->reuseport) {
         for (i = 0; i < count; i++) {
-            ctxs[i].listen_fd = dx_listen_tcp_reuseport(cfg->bind_addr, cfg->port, cfg->backlog);
+            ctxs[i].listen_fd = dx_listen_tcp_ex(cfg->bind_addr, cfg->port, cfg->backlog, true,
+                                                 &cfg->sockopts, &refused);
             if (ctxs[i].listen_fd < 0) {
                 break;
             }
+            warn_refused_tuning(&logs->log, &refused);
         }
         if (i == count) {
             for (i = 0; i < count; i++) {
@@ -354,10 +392,12 @@ static int setup_listeners(const dx_server_config_t *cfg, dx_logs_t *logs, dx_wo
         }
     }
 
-    *shared_fd = dx_listen_tcp(cfg->bind_addr, cfg->port, cfg->backlog);
+    *shared_fd =
+        dx_listen_tcp_ex(cfg->bind_addr, cfg->port, cfg->backlog, false, &cfg->sockopts, &refused);
     if (*shared_fd < 0) {
         return -1;
     }
+    warn_refused_tuning(&logs->log, &refused);
     for (i = 0; i < count; i++) {
         ctxs[i].listen_fd = *shared_fd;
         ctxs[i].opts.listen_fd = *shared_fd;

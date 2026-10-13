@@ -11,6 +11,7 @@
 #include "file.h"
 #include "http_parser.h"
 #include "mime.h"
+#include "net.h"
 #include "worker.h"
 
 typedef struct {
@@ -21,6 +22,7 @@ typedef struct {
     int workers;                /* 1 = main-thread loop; >1 = worker threads */
     bool reuseport;             /* one SO_REUSEPORT listener per worker */
     bool cpu_affinity;          /* pin worker i to CPU i */
+    dx_sockopts_t sockopts;     /* listener tuning; zeroed = kernel defaults */
     dx_http_limits_t limits;    /* HTTP request line / header limits */
     dx_log_format_t log_format; /* common or combined */
     dx_log_level_t log_level;   /* error, warn, info, debug */

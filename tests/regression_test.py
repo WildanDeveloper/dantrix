@@ -65,6 +65,36 @@ def open_fd_count(pid):
     except OSError:
         return None
 
+def fetch(port, request):
+    """Send one raw request, read one response, return the bytes."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        s.sendall(request)
+        s.settimeout(3)
+        data = b""
+        while True:
+            try:
+                chunk = s.recv(65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            data += chunk
+            if b"\r\n\r\n" in data:
+                head, _, rest = data.partition(b"\r\n\r\n")
+                length = 0
+                for line in head.split(b"\r\n"):
+                    if line.lower().startswith(b"content-length:"):
+                        try:
+                            length = int(line.split(b":", 1)[1])
+                        except ValueError:
+                            length = 0
+                if len(rest) >= length:
+                    break
+        return data
+    finally:
+        s.close()
+
 
 def test_idle_cpu_after_partial_request():
     """BUG-01: a lazy refresh inside one bucket used to leave a past deadline in
@@ -711,6 +741,146 @@ def test_audit_round4_regressions():
         os.unlink(log2.name)
 
 
+def test_v070_tuning_and_doctor():
+    """v0.7.0: the listener tuning flags reach the socket, the file-descriptor
+    limit is raised automatically, and --doctor reports a blocked start-up."""
+    print("regression: v0.7.0 listener tuning, fd auto-tune, doctor")
+
+    # --- --doctor must exit 0 on a healthy configuration and name the fields.
+    proc = subprocess.run(
+        [BIN, "--doctor", "-r", ROOT, "-p", str(PORT + 40), "--max-conns", "64"],
+        capture_output=True, text=True, timeout=30)
+    out = proc.stdout
+    check("doctor: exits 0 on a healthy configuration", proc.returncode == 0,
+          f"rc={proc.returncode} {proc.stderr[:120]}")
+    check("doctor: reports the document root", "document root" in out)
+    check("doctor: reports RLIMIT_NOFILE", "RLIMIT_NOFILE" in out)
+    check("doctor: reports the free port", "is free" in out)
+
+    # --- --doctor must fail (rc != 0) when the port is already taken.
+    holder = subprocess.Popen([BIN, "-b", "127.0.0.1", "-p", str(PORT + 41), "-r", ROOT,
+                               "-w", "1", "--access-log", "off", "--error-log", "/dev/null"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if wait_ready(holder, PORT + 41):
+            proc = subprocess.run(
+                [BIN, "--doctor", "-b", "127.0.0.1", "-p", str(PORT + 41), "-r", ROOT],
+                capture_output=True, text=True, timeout=30)
+            check("doctor: fails when the port is occupied", proc.returncode != 0,
+                  f"rc={proc.returncode}")
+            check("doctor: says why the port failed", "Address already in use" in proc.stdout)
+        else:
+            check("doctor: holder server started", False)
+    finally:
+        holder.send_signal(signal.SIGTERM)
+        try:
+            holder.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+
+    # --- The fd auto-tune must lower max_connections when the soft limit is low.
+    # A shell raises the limit only for the child, so use a wrapper. The warning
+    # goes to a file so the check never blocks on a pipe.
+    warn_log = tempfile.NamedTemporaryFile(prefix="dantrix-fdtune-", suffix=".log", delete=False)
+    warn_log.close()
+    script = (
+        f"ulimit -Sn 128 2>/dev/null; ulimit -Hn 128 2>/dev/null; "
+        f"exec {BIN} -b 127.0.0.1 -p {PORT + 42} -r {ROOT} -w 2 --max-conns 16384 "
+        f"--access-log off --error-log /dev/null"
+    )
+    with open(warn_log.name, "w", encoding="utf-8") as err:
+        tuned = subprocess.Popen(["bash", "-c", script], stdout=subprocess.DEVNULL,
+                                 stderr=err)
+        try:
+            if wait_ready(tuned, PORT + 42):
+                text = ""
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    try:
+                        with open(warn_log.name, "r", encoding="utf-8", errors="replace") as f:
+                            text = f.read()
+                    except OSError:
+                        text = ""
+                    if "max_connections" in text:
+                        break
+                    time.sleep(0.1)
+                check("fd auto-tune: warns that max_connections was lowered",
+                      "lowering max_connections" in text, text[:160])
+            else:
+                check("fd auto-tune: tuned server started", False)
+        finally:
+            tuned.send_signal(signal.SIGTERM)
+            try:
+                tuned.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                tuned.kill()
+    os.unlink(warn_log.name)
+
+    # --- The tuning flags must be accepted and the server must still serve.
+    tuned = subprocess.Popen(
+        [BIN, "-b", "127.0.0.1", "-p", str(PORT + 43), "-r", ROOT, "-w", "1",
+         "--access-log", "off", "--error-log", "/dev/null",
+         "-o", "socket_rcvbuf=131072", "-o", "socket_sndbuf=131072",
+         "-o", "tcp_defer_accept=100ms", "-o", "tcp_fastopen=8"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if wait_ready(tuned, PORT + 43):
+            check("tuning flags: the server still serves after applying them",
+                  fetch(PORT + 43, b"GET /f HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+                  .startswith(b"HTTP/1.1 200"))
+        else:
+            check("tuning flags: server started", False)
+    finally:
+        tuned.send_signal(signal.SIGTERM)
+        try:
+            tuned.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            tuned.kill()
+
+
+def test_v070_date_header_cache():
+    """The Date header is served from a cache, so it must stay correct: within
+    the same second every response carries the same, parseable fixdate."""
+    print("regression: v0.7.0 Date header cache")
+    import datetime
+
+    proc = subprocess.Popen([BIN, "-b", "127.0.0.1", "-p", str(PORT + 44), "-r", ROOT, "-w", "4",
+                             "--access-log", "off", "--error-log", "/dev/null"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, PORT + 44):
+            check("date cache: server started", False)
+            return
+        seen = set()
+        ok = True
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        for _ in range(30):
+            data = fetch(PORT + 44, b"GET /f HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+            m = re.search(rb"\r\nDate: ([^\r\n]+)\r\n", data)
+            if not m:
+                ok = False
+                break
+            value = m.group(1).decode()
+            try:
+                got = datetime.datetime.strptime(value, "%a, %d %b %Y %H:%M:%S GMT")
+            except ValueError:
+                ok = False
+                break
+            seen.add(value)
+            if abs((got - now).total_seconds()) > 5:
+                ok = False
+                break
+        check("date cache: every response carries a parseable Date", ok)
+        check("date cache: 4 workers agree within the same second", len(seen) <= 2,
+              f"{len(seen)} distinct values")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def main():
     if not os.path.exists(BIN):
         print(f"  [FAIL] binary {BIN} not found - build it first "
@@ -734,6 +904,10 @@ def main():
     test_audit_round3_fixes()
     print("regression: fourth audit round (idle keep-alive, pipelined burst)")
     test_audit_round4_regressions()
+    print("regression: v0.7.0 listener tuning, fd auto-tune, doctor")
+    test_v070_tuning_and_doctor()
+    print("regression: v0.7.0 Date header cache")
+    test_v070_date_header_cache()
 
     print()
     if failures:

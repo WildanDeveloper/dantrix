@@ -12,6 +12,34 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.7.1] - 2026-10-13
+
+Tuning that actually reaches the kernel, plus a host pre-flight.
+
+### Added
+
+- **`--doctor`**: a pre-flight that checks the host before start-up and exits
+  non-zero when something would block it. It reports `RLIMIT_NOFILE` against
+  `workers x max_connections`, `net.core.somaxconn` against the backlog, whether
+  the port is free (it tries to bind it), whether the document root is usable,
+  and whether the configured privilege-drop user and group exist -- each with
+  the exact number that is wrong and the command to fix it.
+
+### Fixed
+
+- **`tcp_defer_accept`, `tcp_fastopen`, `socket_rcvbuf` and `socket_sndbuf`
+  were accepted by the configuration and then silently ignored.** They are now
+  applied to every listener before `listen()`. An option the kernel refuses
+  (for example `TCP_FASTOPEN` on a host whose `net.ipv4.tcp_fastopen` lacks the
+  server bit) is reported as a warning and the server keeps running: a missing
+  tunable is never fatal.
+- **The automatic `RLIMIT_NOFILE` tuning documented in the README did not
+  exist.** The soft limit is now raised towards the hard one at start-up, and
+  when even that is below `workers x max_connections`, `max_connections` is
+  lowered with a warning that names both numbers. Before this, a host with the
+  usual 1024 soft limit refused every connection past roughly a thousand with
+  no explanation.
+
 ## [0.7.0] - 2026-10-13
 
 Measurable: the benchmark harness, a real set of measurements, and the first
@@ -26,11 +54,11 @@ optimization.
   10,000 connections held with zero drops.
 - **`bench/make_files.sh`** creates the 1k/10k/100k/1m/100m payloads (and a
   small index) that every scenario uses.
-- **`bench/run_wrk.sh`**, **`bench/run_all.sh`** and **`bench/compare_nginx.sh`**
+- **`bench/run_wrk.sh`**, **`bench/run_all.sh`** and **`bench/compare_reference.sh`**
   drive the scenarios from the README; `make bench` prepares the payloads and
   prints the commands, `make stress` the long-hold commands.
-- **`bench/mixed.lua`** (weighted mixed file sizes), **`bench/nginx.conf`**
-  (an equivalent Nginx configuration for the comparison) and
+- **`bench/mixed.lua`** (weighted mixed file sizes), **`bench/reference.conf`**
+  (a reference configuration for the comparison) and
   **`bench/slowloris.py`** (slow-connection resilience, scenario S8).
 - **`bench/py_loadgen.py`**: a minimal keep-alive load generator for machines
   without `wrk`. It reports a lower bound only and says so.
@@ -643,7 +671,7 @@ for the cases that need their own server process.
 - `src/http_range.c`: single-range parsing (`bytes=0-499`, `bytes=500-`,
   `bytes=-500`) with `206`, `416` (`Content-Range: bytes */size`), multi-range
   deliberately ignored (full `200`, closing the overlapping-range attack
-  class), nginx-style `ETag` formatting (`"<mtime-hex>-<size-hex>"`), weak
+  class), `"<mtime-hex>-<size-hex>"` `ETag` formatting, weak
   `If-None-Match` comparison (`*` and lists), strict `If-Modified-Since`
   IMF-fixdate parsing and strong-only `If-Range`.
 - `src/mime.c`: built-in table of ~70 extensions with the charset rule (every

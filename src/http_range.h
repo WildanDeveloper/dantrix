@@ -38,7 +38,8 @@ dx_range_result_t dx_http_range_parse(const char *value, size_t len, uint64_t si
                                       dx_range_t *out);
 
 /*
- * Write an ETag in the nginx style "\"<mtime-hex>-<size-hex>\"" into buf.
+ * Write an ETag as "\"<mtime-hex>-<size-hex>\"" into buf (the widely used
+ * format, so existing caches keep matching).
  * Returns the number of bytes written excluding the terminator, or 0 when the
  * buffer is too small.
  */

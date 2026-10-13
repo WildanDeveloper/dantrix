@@ -34,6 +34,19 @@ bool dx_parse_int(const char *s, int min, int max, int *out);
 long long dx_now_ms(void);
 
 /*
+ * The number of file descriptors this process may actually open.
+ *
+ * The kernel caps an fd per socket, so `max_connections` is meaningless unless
+ * the *soft* limit is high enough. Dantrix raises the soft limit towards the
+ * hard one automatically and reports what it ended up with, so a low
+ * `ulimit -n` no longer shows up as connections failing after ~1020.
+ *
+ * Writes the raised soft limit back; out_soft/out_hard are always set.
+ * Returns 0, or -1 when the limit could not be read at all.
+ */
+int dx_fd_limit(unsigned *out_soft, unsigned *out_hard);
+
+/*
  * Pin the calling thread to a single CPU (the "i-th worker to the i-th core"
  * rule). Returns 0 on success, -1 with errno set (e.g. EINVAL when cpu is not
  * an online CPU). The caller decides whether a failure is fatal.

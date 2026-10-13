@@ -5,6 +5,7 @@
 #include <sched.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -138,6 +139,42 @@ long long dx_now_ms(void)
         }
     }
     return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000L);
+}
+
+int dx_fd_limit(unsigned *out_soft, unsigned *out_hard)
+{
+    struct rlimit rl;
+
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
+        return -1;
+    }
+    /*
+     * Raise the soft limit towards the hard one. The hard limit itself is
+     * raised only when running as root and only up to the value the caller
+     * asks for: an unprivileged process cannot raise its own hard limit, and
+     * RLIM_INFINITY as a soft limit is only meaningful for root.
+     */
+    if (rl.rlim_cur < rl.rlim_max) {
+        rlim_t target = rl.rlim_max;
+
+        if (target == RLIM_INFINITY) {
+            target = (rlim_t)1024 * 1024u; /* nr_open's default ceiling */
+        }
+        rl.rlim_cur = target;
+        if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+            /* Fall back to the maximum that is usually accepted unprivileged:
+             * just below the hard limit. */
+            rl.rlim_cur = (rl.rlim_max > 0) ? rl.rlim_max - 1u : 0u;
+            (void)setrlimit(RLIMIT_NOFILE, &rl);
+        }
+        /* Re-read whatever the kernel actually granted. */
+        if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
+            return -1;
+        }
+    }
+    *out_soft = (rl.rlim_cur >= RLIM_INFINITY) ? 0u : (unsigned)rl.rlim_cur;
+    *out_hard = (rl.rlim_max >= RLIM_INFINITY) ? 0u : (unsigned)rl.rlim_max;
+    return 0;
 }
 
 int dx_write_all(int fd, const void *buf, size_t len)
