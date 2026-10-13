@@ -602,9 +602,10 @@ int main(int argc, char **argv)
      */
     if (set.pid_file[0] != '\0' && set.pid_file[0] != '/') {
         char cwd[DX_CFG_PATH_MAX];
-        char abs[DX_CFG_PATH_MAX];
 
         if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            char abs[DX_CFG_PATH_MAX];
+
             if (snprintf(abs, sizeof(abs), "%s/%s", cwd, set.pid_file) < (int)sizeof(abs)) {
                 dx_strlcpy(set.pid_file, abs, sizeof(set.pid_file));
             }
