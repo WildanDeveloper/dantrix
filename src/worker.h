@@ -59,6 +59,7 @@ typedef struct dx_worker {
     bool ctl_is_signal;                     /* ctl_fd is a signalfd, not an eventfd */
     dx_pool_t *pool;                        /* connection slots */
     dx_bufpool_t *bufs;                     /* per-connection read buffers */
+    dx_bufpool_t *hdrs;                     /* per-connection HTTP header tables */
     dx_log_t *log;                          /* borrowed error logger */
     dx_log_t *access_log;                   /* borrowed access logger; NULL = off */
     dx_log_format_t log_format;             /* common or combined */

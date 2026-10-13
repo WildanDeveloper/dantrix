@@ -123,6 +123,7 @@ static void test_options_and_zero_body(void)
 static void test_dispatch(void)
 {
     dx_http_parser_t p;
+    dx_http_header_t hdrs[DX_MAX_HEADERS_LIMIT];
     dx_http_request_t *req = &p.req;
     static unsigned char base[64];
     int status = 0;
@@ -131,7 +132,7 @@ static void test_dispatch(void)
     dx_test_begin("http_response/dispatch");
 
     memcpy(base, "GET / HTTP/1.1", 14u);
-    dx_http_parser_init(&p, NULL);
+    dx_http_parser_init_ex(&p, NULL, hdrs, DX_MAX_HEADERS_LIMIT);
     req->method_off = 0u;
     req->method_len = 3u;
     CHECK_EQ(dx_http_dispatch_method(req, base, &status, &extra), DX_DISPATCH_SERVE);

@@ -360,9 +360,12 @@ void dx_conn_init(dx_conn_t *conn, int fd, const dx_http_limits_t *limits)
     conn->file_left = 0;
     conn->body_left = 0;
     conn->requests = 0;
+    conn->hdr_table = NULL;
+    conn->hdr_mem = NULL;
     dx_timer_node_reset(&conn->timer);
     dx_buffer_init(&conn->buf, NULL, 0);
-    dx_http_parser_init(&conn->parser, limits);
+    /* No header table yet: it is acquired with the read buffer on first read. */
+    dx_http_parser_init_ex(&conn->parser, limits, NULL, 0u);
     memset(&conn->acc, 0, sizeof(conn->acc));
     conn->peer[0] = '-';
     conn->peer[1] = '\0';
@@ -490,6 +493,14 @@ void dx_conn_reset(dx_conn_t *conn)
     free(conn->hdr);
     conn->hdr = NULL;
     conn->hdr_len = 0;
+
+    /*
+     * The pooled header table belongs to the header pool, not to the slot: the
+     * caller returns it (dx_conn_release_headers). Resetting only clears the
+     * pointer so a recycled slot can never hand a stale table to the parser.
+     */
+    conn->hdr_table = NULL;
+    conn->hdr_mem = NULL;
 
     /*
      * The streamed file belongs to the connection lifecycle and is closed by
@@ -772,23 +783,59 @@ void dx_conn_arm_timer(struct dx_worker *w, dx_conn_t *conn)
 int dx_conn_ensure_buffer(struct dx_worker *w, dx_conn_t *conn)
 {
     unsigned char *mem;
+    unsigned char *tbl;
 
     if (w == NULL || conn == NULL) {
         return -1;
     }
-    if (conn->buf.data != NULL) {
-        return 0;
+    if (conn->buf.data == NULL) {
+        mem = (unsigned char *)dx_bufpool_acquire(w->bufs, DX_CONN_BUF_SIZE);
+        if (mem == NULL) {
+            dx_log_write(dx_worker_log(w), DX_LOG_WARN,
+                         "closing connection: no read buffer available (%zu in use)",
+                         dx_bufpool_outstanding(w->bufs));
+            return -1;
+        }
+        conn->buf_mem = mem;
+        dx_buffer_init(&conn->buf, mem, DX_CONN_BUF_SIZE);
     }
-    mem = (unsigned char *)dx_bufpool_acquire(w->bufs, DX_CONN_BUF_SIZE);
-    if (mem == NULL) {
-        dx_log_write(dx_worker_log(w), DX_LOG_WARN,
-                     "closing connection: no read buffer available (%zu in use)",
-                     dx_bufpool_outstanding(w->bufs));
-        return -1;
+    /*
+     * The header table is acquired together with the buffer: both are parsing
+     * resources an idle connection does not need. The table is sized to the
+     * compile-time maximum and the parser is capped to the configured
+     * max_headers, so a reload can raise the limit without the pool shrinking.
+     */
+    if (conn->hdr_mem == NULL) {
+        tbl = dx_bufpool_acquire(w->hdrs, DX_MAX_HEADERS_LIMIT * sizeof(dx_http_header_t));
+        if (tbl == NULL) {
+            dx_log_write(dx_worker_log(w), DX_LOG_WARN,
+                         "closing connection: no header table available (%zu in use)",
+                         dx_bufpool_outstanding(w->hdrs));
+            return -1;
+        }
+        conn->hdr_mem = tbl;
+        conn->hdr_table = (dx_http_header_t *)tbl;
+        /*
+         * The parser must be pointed at the fresh table before it sees another
+         * byte. It was left without one when the connection went idle, so this
+         * is a full reset, not a partial update.
+         */
+        dx_http_parser_init_ex(&conn->parser, &w->limits, conn->hdr_table, DX_MAX_HEADERS_LIMIT);
     }
-    conn->buf_mem = mem;
-    dx_buffer_init(&conn->buf, mem, DX_CONN_BUF_SIZE);
     return 0;
+}
+
+/* Hand the header table back to the pool and leave the parser without one. */
+void dx_conn_release_headers(dx_conn_t *conn, dx_bufpool_t *pool)
+{
+    if (conn == NULL || conn->hdr_mem == NULL) {
+        return;
+    }
+    (void)dx_bufpool_release(pool, conn->hdr_mem);
+    conn->hdr_mem = NULL;
+    conn->hdr_table = NULL;
+    /* The parser must never be read again before it is re-initialised. */
+    dx_http_parser_init_ex(&conn->parser, NULL, NULL, 0u);
 }
 
 int dx_conn_on_writable(struct dx_worker *w, dx_conn_t *conn)
@@ -1432,7 +1479,8 @@ static int conn_after_response(struct dx_worker *w, dx_conn_t *conn)
     }
 
     /* Ready for the next request on the same connection. */
-    dx_http_parser_init(&conn->parser, &w->limits);
+    dx_http_parser_init_ex(&conn->parser, &w->limits, conn->hdr_table,
+                           (conn->hdr_table != NULL) ? DX_MAX_HEADERS_LIMIT : 0u);
     conn->close_conn = false;
     conn->body_left = 0;
     conn->state = DX_CONN_READING;
@@ -1455,8 +1503,9 @@ static int conn_after_response(struct dx_worker *w, dx_conn_t *conn)
     if (dx_conn_has_pending(conn)) {
         return 0; /* a restored pipelined request: the caller's loop parses it */
     }
-    /* Idle: the read buffer goes back to the pool while nothing is pending. */
+    /* Idle: the read buffer and header table go back to the pools. */
     dx_conn_release_buffer(conn, w->bufs);
+    dx_conn_release_headers(conn, w->hdrs);
     conn->state = DX_CONN_IDLE;
     dx_conn_arm_timer(w, conn);
     return 0;

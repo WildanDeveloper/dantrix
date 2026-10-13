@@ -35,11 +35,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     dx_http_limits_t limits;
     dx_http_parser_t p;
+    dx_http_header_t headers[DX_MAX_HEADERS_LIMIT];
     dx_parse_result_t whole;
     size_t consumed = 0;
 
     dx_http_limits_default(&limits);
-    dx_http_parser_init(&p, &limits);
+    /*
+     * The header table is caller-owned, so the fuzzer owns one too: without it
+     * every header-bearing request would be rejected with 431 and the fuzzer
+     * would never reach the header parsing paths it exists to exercise.
+     */
+    dx_http_parser_init_ex(&p, &limits, headers, DX_MAX_HEADERS_LIMIT);
     whole = dx_http_parser_feed(&p, data, size, &consumed);
 
     if (whole == DX_PARSE_OK) {
@@ -60,11 +66,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     /* Split feeding must agree with whole feeding. */
     if (size > 1u) {
         dx_http_parser_t q;
+        dx_http_header_t qheaders[DX_MAX_HEADERS_LIMIT];
         dx_parse_result_t split;
         size_t half = size / 2u;
         size_t used = 0;
 
-        dx_http_parser_init(&q, &limits);
+        dx_http_parser_init_ex(&q, &limits, qheaders, DX_MAX_HEADERS_LIMIT);
         if (dx_http_parser_feed(&q, data, half, &used) == DX_PARSE_NEED_DATA) {
             split = dx_http_parser_feed(&q, data, size, &used);
             if (split != whole) {

@@ -12,6 +12,36 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.7.2] - 2026-10-13
+
+The per-connection memory breakthrough: an idle keep-alive connection now costs
+~1.2 KiB instead of ~9.2 KiB.
+
+### Changed
+
+- **The HTTP header table is pooled, not embedded.** Every connection used to
+  carry a 256-entry header array (8 KiB) inside its slot, whether or not a
+  request was in flight. That array is now a caller-owned table acquired from a
+  pool together with the read buffer and returned the moment the connection
+  goes idle. Measured on this machine, 10,000 idle keep-alive connections now
+  cost 12 MiB of RSS instead of 90 MiB -- the documented "user-space memory per
+  idle connection <= 1 KiB" target is met for the first time (marginal cost
+  ~1.0 KiB; ~1.2 KiB including the fixed baseline).
+- `dx_http_parser_init_ex()` takes the table and its capacity; the parser never
+  allocates. A request with more headers than the table holds is answered 431
+  rather than read past it. `dx_http_parser_init()` keeps its old signature and
+  means "no header storage", which is only useful for request-line-only callers.
+
+### Fixed
+
+- Two defects found while auditing this change, both caught by the test suite
+  before release:
+  - `dx_conn_release_scratch()` cleared the header-table pointer without
+    returning the pool slot, leaking one 8 KiB table per directory listing and
+    breaking the parser for that request.
+  - The fuzz target stopped exercising header parsing (a zero-capacity table
+    makes every header-bearing request 431); it now owns a real table.
+
 ## [0.7.1] - 2026-10-13
 
 Tuning that actually reaches the kernel, plus a host pre-flight.

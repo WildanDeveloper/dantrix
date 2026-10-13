@@ -24,17 +24,23 @@ static void field(const unsigned char *base, size_t off, size_t len, char *out, 
     out[len] = '\0';
 }
 
-static dx_parse_result_t parse_whole(dx_http_parser_t *p, const char *req, size_t *consumed)
+static dx_parse_result_t parse_whole(dx_http_parser_t *p, dx_http_header_t *hdrs, size_t cap,
+                                     const char *req, size_t *consumed)
 {
-    dx_http_parser_init(p, NULL);
+    dx_http_parser_init_ex(p, NULL, hdrs, cap);
     return dx_http_parser_feed(p, (const unsigned char *)req, strlen(req), consumed);
 }
+
+/* Shorthand for the common case: the default-size table declared next to p. */
+#define PARSE_WHOLE(p_, hdrs_, req_, out_)                                                         \
+    parse_whole((p_), (hdrs_), DX_MAX_HEADERS_LIMIT, (req_), (out_))
 
 static void test_simple_get(void)
 {
     static const char req[] = "GET /hello?x=1 HTTP/1.1\r\nHost: example.com\r\n"
                               "User-Agent: unit-test\r\n\r\n";
     dx_http_parser_t p;
+    dx_http_header_t hdrs[DX_MAX_HEADERS_LIMIT];
     size_t consumed = 0;
     dx_parse_result_t r;
     char buf[64];
@@ -43,7 +49,7 @@ static void test_simple_get(void)
 
     dx_test_begin("http_parser/simple_get");
 
-    r = parse_whole(&p, req, &consumed);
+    r = PARSE_WHOLE(&p, hdrs, req, &consumed);
     CHECK_EQ(r, DX_PARSE_OK);
     CHECK_EQ(consumed, sizeof(req) - 1u);
     field((const unsigned char *)req, p.req.method_off, p.req.method_len, buf, sizeof(buf));
@@ -68,21 +74,22 @@ static void test_simple_get(void)
 static void test_minimal_requests(void)
 {
     dx_http_parser_t p;
+    dx_http_header_t hdrs[DX_MAX_HEADERS_LIMIT];
     size_t consumed = 0;
 
     dx_test_begin("http_parser/minimal");
 
     /* HTTP/1.0 needs no Host, so this is the shortest legal request. */
-    CHECK_EQ(parse_whole(&p, "GET / HTTP/1.0\r\n\r\n", &consumed), DX_PARSE_OK);
+    CHECK_EQ(PARSE_WHOLE(&p, hdrs, "GET / HTTP/1.0\r\n\r\n", &consumed), DX_PARSE_OK);
     CHECK_EQ(p.req.minor_version, 0);
     CHECK_EQ(p.req.num_headers, 0);
     CHECK_EQ(consumed, 18u);
 
     /* HTTP/1.0 with a Host is fine too. */
-    CHECK_EQ(parse_whole(&p, "GET / HTTP/1.0\r\nHost: h\r\n\r\n", &consumed), DX_PARSE_OK);
+    CHECK_EQ(PARSE_WHOLE(&p, hdrs, "GET / HTTP/1.0\r\nHost: h\r\n\r\n", &consumed), DX_PARSE_OK);
 
     /* HTTP/1.1 requires exactly one non-empty Host. */
-    CHECK_EQ(parse_whole(&p, "GET / HTTP/1.1\r\nHost: h\r\n\r\n", &consumed), DX_PARSE_OK);
+    CHECK_EQ(PARSE_WHOLE(&p, hdrs, "GET / HTTP/1.1\r\nHost: h\r\n\r\n", &consumed), DX_PARSE_OK);
     CHECK_EQ(p.req.minor_version, 1);
 }
 
@@ -97,12 +104,13 @@ static void test_split_feeds(void)
 
     for (ci = 0; ci < sizeof(chunks) / sizeof(chunks[0]); ci++) {
         dx_http_parser_t p;
+        dx_http_header_t hdrs[DX_MAX_HEADERS_LIMIT];
         size_t step = chunks[ci];
         size_t fed = 0;
         size_t consumed = 0;
         dx_parse_result_t r = DX_PARSE_NEED_DATA;
 
-        dx_http_parser_init(&p, NULL);
+        dx_http_parser_init_ex(&p, NULL, hdrs, DX_MAX_HEADERS_LIMIT);
         while (fed < total) {
             fed += (total - fed < step) ? (total - fed) : step;
             r = dx_http_parser_feed(&p, (const unsigned char *)req, fed, &consumed);
@@ -120,13 +128,14 @@ static void test_split_feeds(void)
 static void test_split_at_crlf_boundary(void)
 {
     dx_http_parser_t p;
+    dx_http_header_t hdrs[DX_MAX_HEADERS_LIMIT];
     size_t consumed = 0;
     dx_parse_result_t r;
     static const char req[] = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
 
     dx_test_begin("http_parser/split_crlf");
 
-    dx_http_parser_init(&p, NULL);
+    dx_http_parser_init_ex(&p, NULL, hdrs, DX_MAX_HEADERS_LIMIT);
     r = dx_http_parser_feed(&p, (const unsigned char *)req, 15u, &consumed); /* "...1.1\r" */
     CHECK_EQ(r, DX_PARSE_NEED_DATA);
     r = dx_http_parser_feed(&p, (const unsigned char *)req, 24u, &consumed); /* "...x\r" */
@@ -143,6 +152,7 @@ static void test_header_values(void)
 {
     static const char req[] = "GET / HTTP/1.1\r\nHost: \t spaced.example.com \t\r\n\r\n";
     dx_http_parser_t p;
+    dx_http_header_t hdrs[DX_MAX_HEADERS_LIMIT];
     size_t consumed = 0;
     size_t voff;
     size_t vlen;
@@ -150,17 +160,19 @@ static void test_header_values(void)
 
     dx_test_begin("http_parser/values");
 
-    CHECK_EQ(parse_whole(&p, req, &consumed), DX_PARSE_OK);
+    CHECK_EQ(PARSE_WHOLE(&p, hdrs, req, &consumed), DX_PARSE_OK);
     CHECK(dx_http_request_find_header(&p.req, (const unsigned char *)req, "Host", &voff, &vlen));
     field((const unsigned char *)req, voff, vlen, buf, sizeof(buf));
     CHECK(strcmp(buf, "spaced.example.com") == 0);
 
     /* obs-text (>= 0x80) is allowed in values per RFC 9110. */
-    CHECK_EQ(parse_whole(&p, "GET / HTTP/1.1\r\nHost: h\r\nX-N: caf\xc3\xa9\r\n\r\n", &consumed),
-             DX_PARSE_OK);
+    CHECK_EQ(
+        PARSE_WHOLE(&p, hdrs, "GET / HTTP/1.1\r\nHost: h\r\nX-N: caf\xc3\xa9\r\n\r\n", &consumed),
+        DX_PARSE_OK);
 
     /* An empty value is legal for ordinary headers. */
-    CHECK_EQ(parse_whole(&p, "GET / HTTP/1.1\r\nHost: h\r\nX-E:\r\n\r\n", &consumed), DX_PARSE_OK);
+    CHECK_EQ(PARSE_WHOLE(&p, hdrs, "GET / HTTP/1.1\r\nHost: h\r\nX-E:\r\n\r\n", &consumed),
+             DX_PARSE_OK);
 }
 
 static void test_error_table(void)
@@ -240,11 +252,12 @@ static void test_error_table(void)
 
     for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         dx_http_parser_t p;
+        dx_http_header_t hdrs[DX_MAX_HEADERS_LIMIT];
         size_t consumed = 0;
         size_t len = (cases[i].len != 0u) ? cases[i].len : strlen(cases[i].req);
         dx_parse_result_t r;
 
-        dx_http_parser_init(&p, NULL);
+        dx_http_parser_init_ex(&p, NULL, hdrs, DX_MAX_HEADERS_LIMIT);
         r = dx_http_parser_feed(&p, (const unsigned char *)cases[i].req, len, &consumed);
         if (r != DX_PARSE_ERROR) {
             fprintf(stderr, "  case %zu expected error, got %d: %.40s\n", i, (int)r, cases[i].req);
@@ -260,9 +273,10 @@ static void test_error_table(void)
      * strict posture, so it is a 400 like the conflicting case. */
     {
         dx_http_parser_t p;
+        dx_http_header_t hdrs[DX_MAX_HEADERS_LIMIT];
         size_t consumed = 0;
 
-        CHECK_EQ(parse_whole(&p,
+        CHECK_EQ(PARSE_WHOLE(&p, hdrs,
                              "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
                              "content-length: 5\r\n\r\n",
                              &consumed),
@@ -295,6 +309,7 @@ static void test_limit_errors(void)
 {
     dx_http_limits_t limits;
     dx_http_parser_t p;
+    dx_http_header_t hdrs[DX_MAX_HEADERS_LIMIT];
     size_t consumed = 0;
     char *big;
 
@@ -307,7 +322,7 @@ static void test_limit_errors(void)
         CHECK(0);
         return;
     }
-    dx_http_parser_init(&p, &limits);
+    dx_http_parser_init_ex(&p, &limits, hdrs, DX_MAX_HEADERS_LIMIT);
     CHECK_EQ(dx_http_parser_feed(&p, (const unsigned char *)big, limits.max_request_line + 5u,
                                  &consumed),
              DX_PARSE_ERROR);
@@ -320,7 +335,7 @@ static void test_limit_errors(void)
         CHECK(0);
         return;
     }
-    dx_http_parser_init(&p, &limits);
+    dx_http_parser_init_ex(&p, &limits, hdrs, DX_MAX_HEADERS_LIMIT);
     CHECK_EQ(dx_http_parser_feed(&p, (const unsigned char *)big, limits.max_request_line + 4u,
                                  &consumed),
              DX_PARSE_OK);
@@ -338,7 +353,7 @@ static void test_limit_errors(void)
         }
         memcpy(big, "GET / HTTP/1.1\r\nHost: x\r\nX-Pad: ", n);
         memset(big + n, 'a', pad + 40u);
-        dx_http_parser_init(&p, &limits);
+        dx_http_parser_init_ex(&p, &limits, hdrs, DX_MAX_HEADERS_LIMIT);
         CHECK_EQ(dx_http_parser_feed(&p, (const unsigned char *)big, n + pad + 40u, &consumed),
                  DX_PARSE_ERROR);
         CHECK_EQ(p.status_code, 431);
@@ -364,7 +379,7 @@ static void test_limit_errors(void)
             memcpy(req + n, "\r\n", 3u);
             n += 2u;
             limits.max_headers = 10u;
-            dx_http_parser_init(&p, &limits);
+            dx_http_parser_init_ex(&p, &limits, hdrs, DX_MAX_HEADERS_LIMIT);
             CHECK_EQ(dx_http_parser_feed(&p, (const unsigned char *)req, n, &consumed),
                      (count <= 10u) ? DX_PARSE_OK : DX_PARSE_ERROR);
             if (count == 11u) {
@@ -378,23 +393,24 @@ static void test_limit_errors(void)
 static void test_reuse_and_guards(void)
 {
     dx_http_parser_t p;
+    dx_http_header_t hdrs[DX_MAX_HEADERS_LIMIT];
     size_t consumed = 0;
 
     dx_test_begin("http_parser/guards");
 
     /* A finished parser refuses more data until it is re-initialised. */
-    CHECK_EQ(parse_whole(&p, "GET / HTTP/1.1\r\nHost: x\r\n\r\n", &consumed), DX_PARSE_OK);
+    CHECK_EQ(PARSE_WHOLE(&p, hdrs, "GET / HTTP/1.1\r\nHost: x\r\n\r\n", &consumed), DX_PARSE_OK);
     CHECK_EQ(dx_http_parser_feed(&p, (const unsigned char *)"GET / HTTP/1.1\r\n", 16u, &consumed),
              DX_PARSE_ERROR);
     CHECK_EQ(p.status_code, 500);
 
     /* NULL data or a NULL consumed sink must not crash. */
-    dx_http_parser_init(&p, NULL);
+    dx_http_parser_init_ex(&p, NULL, hdrs, DX_MAX_HEADERS_LIMIT);
     CHECK_EQ(dx_http_parser_feed(&p, NULL, 5u, &consumed), DX_PARSE_ERROR);
     CHECK_EQ(p.status_code, 500);
 
     /* After re-init the same struct parses a fresh request. */
-    CHECK_EQ(parse_whole(&p, "GET / HTTP/1.0\r\n\r\n", &consumed), DX_PARSE_OK);
+    CHECK_EQ(PARSE_WHOLE(&p, hdrs, "GET / HTTP/1.0\r\n\r\n", &consumed), DX_PARSE_OK);
     CHECK_EQ(p.req.minor_version, 0);
 }
 

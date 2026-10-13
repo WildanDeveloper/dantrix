@@ -125,6 +125,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Re-audit: pipelining/keep-alive regressions fixed | ✅ | v0.6.3 |
 | Benchmark suite and optimization | ✅ | v0.7.0 |
 | Listener tuning, fd auto-tune, host pre-flight | ✅ | v0.7.1 |
+| Pooled header table: ~1 KiB per idle connection | ✅ | v0.7.2 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
 
@@ -363,7 +364,7 @@ In both modes, Dantrix limits the number of consecutive operations per event (a 
 - **File contents never cross user space.** `sendfile()` moves data directly from the page cache to the socket.
 - **Response headers are assembled with bounded append functions** (no `sprintf`) into a fixed buffer. The `Date` header string is cached per second per worker.
 - **Allocation failures are handled**: the connection is closed and a warning is logged, rather than `abort()`.
-- **Design target:** ≤ 1 KiB of user-space state per idle connection. This number has not been verified yet and does not include kernel memory for the socket (a few KiB per connection, depending on `tcp_rmem` and `tcp_wmem`).
+- **Design target:** ≤ 1 KiB of user-space state per idle connection. **Met since v0.7.2**: measured 1.2 KiB per idle connection at the 10,000-connection mark (12 MiB of RSS total, marginal cost ~1.0 KiB). It does not include kernel memory for the socket (a few KiB per connection, depending on `tcp_rmem` and `tcp_wmem`).
 
 ### Timers and Timeouts
 
@@ -2257,6 +2258,12 @@ Each release has a single capability as its theme. A checked box marks completed
       `max_connections` with a warning when it is still too low)
 - [x] `--doctor`: a host pre-flight that reports the exact blocking number and
       the command that fixes it
+
+### v0.7.2: Memory per idle connection
+
+- [x] Pooled HTTP header table: the 8 KiB table moved out of every connection
+      slot, so an idle keep-alive connection costs ~1.2 KiB instead of ~9.2 KiB
+- [x] The documented "<= 1 KiB per idle connection" target is met and measured
 
 ### v0.8.0: Hardening
 

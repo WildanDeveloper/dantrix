@@ -50,7 +50,16 @@ typedef struct {
     size_t target_off;
     size_t target_len;
     int minor_version; /* 0 for HTTP/1.0, 1 for HTTP/1.1 */
-    dx_http_header_t headers[DX_MAX_HEADERS_LIMIT];
+    /*
+     * The header table is NOT embedded: an inline array of the compile-time
+     * maximum made every connection carry 8 KiB (256 x 32 bytes) even while it
+     * sat idle between keep-alive requests, which is what pushed the per
+     * connection cost to ~9 KiB against the documented 1 KiB target. The
+     * storage is now handed in by the caller (see dx_http_parser_init) and can
+     * be sized to the configured max_headers and returned when the connection
+     * goes idle, so memory follows active work instead of open sockets.
+     */
+    dx_http_header_t *headers;
     size_t num_headers;
     /* Parsed Content-Length of the request body, for the drain path. */
     uint64_t content_length;
@@ -75,6 +84,7 @@ typedef struct {
     /* Request line assembly. */
 
     /* Header accumulation. */
+    size_t header_cap; /* entries available in req.headers; 0 = none yet */
 
     /* Validation state. */
     bool host_seen;
@@ -89,7 +99,17 @@ typedef struct {
 /*
  * Reset the parser for a new request on the same connection. limits is copied;
  * pass NULL to use the built-in defaults.
+ *
+ * headers/header_cap describe a caller-owned table. The parser stores the
+ * pointer and never allocates: a request with more headers than header_cap is
+ * answered with 431 instead of writing past the table. NULL/0 is allowed and
+ * makes every header-bearing request 431, which keeps the request-line-only
+ * unit tests working.
  */
+void dx_http_parser_init_ex(dx_http_parser_t *p, const dx_http_limits_t *limits,
+                            dx_http_header_t *headers, size_t header_cap);
+
+/* As above with no header storage: any header-bearing request becomes 431. */
 void dx_http_parser_init(dx_http_parser_t *p, const dx_http_limits_t *limits);
 
 /*

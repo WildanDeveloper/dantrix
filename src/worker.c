@@ -103,6 +103,21 @@ int dx_worker_init(dx_worker_t *w, const dx_worker_opts_t *opts)
         errno = ENOMEM;
         return -1;
     }
+    /*
+     * The HTTP header table is pooled separately from the read buffer: it used
+     * to be an inline array inside every connection, which cost 8 KiB per
+     * connection even while it sat idle between keep-alive requests. Pooling it
+     * means an idle connection costs the slot alone and the table is only held
+     * while a request is actually being parsed.
+     */
+    w->hdrs =
+        dx_bufpool_create(DX_MAX_HEADERS_LIMIT * sizeof(dx_http_header_t), DX_BUF_CHUNK_SLOTS);
+    if (w->hdrs == NULL) {
+        dx_bufpool_destroy(w->bufs);
+        w->bufs = NULL;
+        errno = ENOMEM;
+        return -1;
+    }
     w->timers = dx_timer_wheel_create();
     if (w->timers == NULL) {
         errno = ENOMEM;
@@ -146,6 +161,8 @@ void dx_worker_destroy(dx_worker_t *w)
     w->pool = NULL;
     dx_bufpool_destroy(w->bufs);
     w->bufs = NULL;
+    dx_bufpool_destroy(w->hdrs);
+    w->hdrs = NULL;
     dx_timer_wheel_destroy(w->timers);
     w->timers = NULL;
 }
@@ -343,6 +360,7 @@ static void conn_close(dx_worker_t *w, dx_conn_t *conn)
 
     /* Returns the pooled slot or frees the grown heap allocation. */
     dx_conn_release_buffer(conn, w->bufs);
+    dx_conn_release_headers(conn, w->hdrs);
     /* dx_pool_release() resets the slot, so nothing survives this point. */
     (void)dx_pool_release(w->pool, conn);
     w->closed_total++;

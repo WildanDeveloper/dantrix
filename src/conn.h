@@ -85,6 +85,14 @@ typedef struct {
     uint64_t requests;     /* requests already answered on this connection */
     dx_timer_node_t timer; /* the single timer this connection owns */
     dx_http_parser_t parser;
+    /*
+     * Pooled header table. Held only while a request is being parsed; handed
+     * back the moment the connection goes idle, so the per-connection cost is
+     * the slot (a few hundred bytes) rather than the 8 KiB table it used to
+     * embed. hdr_mem is the pool slot to return (NULL = none held).
+     */
+    dx_http_header_t *hdr_table;
+    unsigned char *hdr_mem;
     dx_access_t acc;
     char peer[64]; /* formatted client address, "-" when unknown */
     uint64_t bytes_in;
@@ -151,6 +159,12 @@ void dx_conn_init(dx_conn_t *conn, int fd, const dx_http_limits_t *limits);
 
 /* Return the read buffer (pool slot or heap) and reset counters. */
 void dx_conn_release_buffer(dx_conn_t *conn, dx_bufpool_t *pool);
+
+/*
+ * Return the pooled HTTP header table and leave the parser without one. Must be
+ * called before the slot is released (dx_conn_release_headers is idempotent).
+ */
+void dx_conn_release_headers(dx_conn_t *conn, dx_bufpool_t *pool);
 
 /* Close a streamed file, if any. Safe to call at any time. */
 void dx_conn_release_file(dx_conn_t *conn);

@@ -881,6 +881,69 @@ def test_v070_date_header_cache():
             proc.kill()
 
 
+def test_v071_header_table_pooling():
+    """v0.7.1 breakthrough: the HTTP header table is pooled, not embedded, so an
+    idle keep-alive connection costs a fraction of what it used to.
+
+    The old layout put a 256-entry header array (8 KiB) inside every connection
+    slot, which made 10,000 idle connections cost ~90 MiB of RSS. This asserts
+    the per-connection cost stays far below that.
+    """
+    print("regression: v0.7.1 per-connection memory (pooled header table)")
+
+    port = PORT + 45
+    proc = subprocess.Popen([BIN, "-b", "127.0.0.1", "-p", str(port), "-r", ROOT, "-w", "1",
+                             "--max-conns", "6000", "--access-log", "off",
+                             "--error-log", "/dev/null"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("mem: server started", False)
+            return
+        n = 3000
+        socks = []
+        try:
+            for _ in range(n):
+                try:
+                    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+                    socks.append(s)
+                except OSError:
+                    break
+        finally:
+            pass
+        # Give the server a moment to reach steady state, then read its RSS.
+        time.sleep(0.5)
+        rss_kb = None
+        try:
+            with open(f"/proc/{proc.pid}/status", "r", encoding="ascii") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        rss_kb = int(line.split()[1])
+                        break
+        except OSError:
+            pass
+        opened = len(socks)
+        check(f"mem: held {n} idle connections", opened >= n - 20, f"opened {opened}")
+        if rss_kb is not None and opened > 0:
+            per_conn = rss_kb / opened
+            # The embedded table alone was 8 KiB; anything near that is the bug.
+            # A sanitizer build inflates every allocation with redzones and a
+            # quarantine, so the threshold only applies to a plain build.
+            limit = 3.0 if "asan" not in BIN else 40.0
+            check(f"mem: per idle connection stays under {limit:.0f} KiB",
+                  per_conn < limit, f"{per_conn:.2f} KiB/conn, RSS {rss_kb} KiB")
+        else:
+            check("mem: RSS readable", False)
+        for s in socks:
+            s.close()
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def main():
     if not os.path.exists(BIN):
         print(f"  [FAIL] binary {BIN} not found - build it first "
@@ -908,6 +971,8 @@ def main():
     test_v070_tuning_and_doctor()
     print("regression: v0.7.0 Date header cache")
     test_v070_date_header_cache()
+    print("regression: v0.7.1 per-connection memory (pooled header table)")
+    test_v071_header_table_pooling()
 
     print()
     if failures:

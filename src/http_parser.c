@@ -15,18 +15,47 @@ void dx_http_limits_default(dx_http_limits_t *limits)
     limits->max_headers = 100u;
 }
 
-void dx_http_parser_init(dx_http_parser_t *p, const dx_http_limits_t *limits)
+void dx_http_parser_init_ex(dx_http_parser_t *p, const dx_http_limits_t *limits,
+                            dx_http_header_t *headers, size_t header_cap)
 {
     if (p == NULL) {
         return;
     }
-    memset(p, 0, sizeof(*p));
+    /*
+     * The header table is caller-owned, so it must survive the reset: clear the
+     * parser state but keep the pointer. memset() would wipe it, so the fields
+     * are assigned one by one.
+     */
     p->state = DX_PS_REQUEST_LINE;
+    p->scan = 0;
+    p->request_size = 0;
+    p->line_start = 0;
+    p->prev_cr = false;
+    p->host_seen = false;
+    p->content_length_seen = false;
+    p->content_length = 0;
+    p->transfer_encoding_seen = false;
+    p->status_code = 0;
+    p->req.method_off = 0;
+    p->req.method_len = 0;
+    p->req.target_off = 0;
+    p->req.target_len = 0;
+    p->req.minor_version = 1;
+    p->req.num_headers = 0;
+    p->req.content_length = 0;
+    p->req.has_content_length = false;
+    p->req.headers = headers;
+    p->header_cap = (headers != NULL) ? header_cap : 0u;
     if (limits != NULL) {
         p->limits = *limits;
     } else {
         dx_http_limits_default(&p->limits);
     }
+}
+
+void dx_http_parser_init(dx_http_parser_t *p, const dx_http_limits_t *limits)
+{
+    dx_http_parser_init_ex(p, limits, NULL, 0u);
 }
 
 /* True for RFC 9110 tchar: allowed in tokens (method, header names). */
@@ -192,7 +221,12 @@ static int parse_header_line(dx_http_parser_t *p, const unsigned char *data, siz
         }
     }
 
-    if (p->req.num_headers >= DX_MAX_HEADERS_LIMIT || p->req.num_headers >= p->limits.max_headers) {
+    /*
+     * Two independent caps: the caller-provided table size and the configured
+     * header limit. A table sized to limits.max_headers makes the second check
+     * redundant, but a smaller table must still be honoured exactly.
+     */
+    if (p->req.num_headers >= p->header_cap || p->req.num_headers >= p->limits.max_headers) {
         p->status_code = 431;
         return -1;
     }
