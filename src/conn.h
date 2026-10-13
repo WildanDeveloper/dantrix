@@ -116,6 +116,14 @@ typedef struct {
      * the release hashes exactly what the acquire hashed; ip_counted is false
      * when the feature is off, in which case nothing is released.
      */
+    /*
+     * Wall clock of the first byte of the current request, or 0 when no byte
+     * has arrived yet. The header timeout is a deadline from this instant, not
+     * a gap between bytes: refreshing it on every read let a client that drips
+     * one byte at a time hold a connection open forever (the slowloris case),
+     * which contradicted the documented behaviour.
+     */
+    uint64_t header_deadline_ms;
     unsigned char ip_key[16];
     uint8_t ip_key_len;
     bool ip_counted;

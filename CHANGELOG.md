@@ -12,6 +12,50 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.3] - 2026-10-13
+
+Hardening step 4: a security review with the claims actually tested, and a
+slowloris hole it found.
+
+### Fixed
+
+- **A client that dripped one byte at a time could hold a connection open
+  forever.** The header timeout was refreshed on every read instead of being a
+  deadline from the first byte, so a trickle reset it indefinitely -- the
+  classic slowloris, and the exact opposite of what the README documented
+  ("since `accept` or since the first byte of the next request"). The window is
+  now stamped on the first byte of a request and never pushed forward; a
+  complete request that arrives slowly inside the window still succeeds, which
+  is the difference between bounding the phase and bounding the gaps.
+  Proven: with `header_timeout=1s`, a 0.4s drip held the connection for 12.3s
+  on the previous release and is closed after 1.6s now. The new security test
+  fails against v0.8.2.
+- The body timeout keeps its gap semantics on purpose: resetting on progress is
+  what lets a slow but genuine upload finish. The two timeouts now behave
+  differently because they protect different things, and both are documented.
+
+### Added
+
+- **`SECURITY.md`**: threat model, reporting process, known limitations, and a
+  table of every security claim with *how it is verified*. A claim that cannot
+  be tested is listed as unverified rather than assumed true.
+- **`make test-security`** (`tests/security_test.py`): 34 checks that attack a
+  live server the way an untrusted client would -- 12 path-traversal payloads
+  against a secret file outside the root, a real symlink pointing outside,
+  hidden-file probes, six framing/smuggling payloads, CRLF injection through
+  the redirect path, open-redirect targets, six malformed `Content-Length`
+  forms, 500 overlapping ranges, oversized request line/headers/body, log
+  injection, the slowloris bound, and the build hardening of the binary itself
+  (`readelf`: PIE, non-executable stack, RELRO, `BIND_NOW`; `nm`: fortified
+  calls and the stack protector).
+
+### Notes
+
+- The review found no defect in the path, parser, header-building or log paths:
+  every traversal, smuggling, splitting and injection payload was already
+  refused. The slowloris hole was the one real finding, and it was in a timeout
+  the documentation described correctly and the code implemented differently.
+
 ## [0.8.2] - 2026-10-13
 
 Hardening step 3: an optional seccomp-bpf sandbox.

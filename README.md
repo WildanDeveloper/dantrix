@@ -130,6 +130,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Runtime descriptor accounting (leak detection) | ✅ | v0.8.0 |
 | Per-IP connection limit (`max_conns_per_ip`) | ✅ | v0.8.1 |
 | Optional seccomp-bpf sandbox (`seccomp`) | ✅ | v0.8.2 |
+| Security review with every claim tested (`make test-security`) | ✅ | v0.8.3 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
 
@@ -376,8 +377,8 @@ Dantrix uses a ***hashed timing wheel***: 1 second per slot, 256 slots, with a r
 
 | Timeout | Default | Starts counting | Action on expiry |
 |---|---|---|---|
-| `header_timeout` | 10 s | Since `accept` (new connections) or since the first byte of the next request | If bytes have already been received: send `408` then close. If not: close without a response |
-| `body_timeout` | 30 s | Since the headers are complete; reset every time data arrives | Close |
+| `header_timeout` | 10 s | **Deadline** from the first byte of a request (a drip cannot extend it) | If bytes have already been received: send `408` then close. If not: close without a response |
+| `body_timeout` | 30 s | **Gap** between body chunks; reset every time data arrives, so a slow but genuine upload can finish | Close |
 | `send_timeout` | 30 s | Reset every time there is progress in writing | Close |
 | `keepalive_timeout` | 30 s | After the response has been fully sent | Close silently |
 | `shutdown_timeout` | 10 s | Since receiving `SIGTERM` or `SIGINT` | Force close all connections |
@@ -2345,6 +2346,8 @@ Each release has a single capability as its theme. A checked box marks completed
 - [ ] ASan, UBSan, and TSan as mandatory parts of CI
 - [x] `max_conns_per_ip`: a shared, lock-free per-IP connection limit
 - [x] `seccomp-bpf` allow list: 79 syscalls, everything else kills the process
+- [x] Security review: every claim in `SECURITY.md` verified by
+      `make test-security`; the slowloris header-timeout hole found and fixed
 - [ ] optional `chroot`
 - [ ] Manual security review and `SECURITY.md`
 

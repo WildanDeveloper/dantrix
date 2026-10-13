@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.8.2
+VERSION := 0.8.3
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -79,7 +79,7 @@ EX_SRC := $(wildcard $(EXAMPLES)/*.c)
 EX_BINS := $(patsubst $(EXAMPLES)/%.c,$(BUILD)/%,$(EX_SRC))
 
 .PHONY: all release debug profile asan tsan examples \
-        test test-unit test-asan test-tsan test-regression test-c10k test-seccomp \
+        test test-unit test-asan test-tsan test-regression test-c10k test-seccomp test-security \
         lint format format-check coverage bench stress fuzz valgrind \
         install uninstall docker clean distclean help
 
@@ -282,6 +282,9 @@ test-c10k: release
 
 test-seccomp: release
 	@python3 tests/seccomp_test.py $(BIN)/dantrix
+
+test-security: release
+	@python3 tests/security_test.py $(BIN)/dantrix
 
 # Fuzzers. Without clang/libFuzzer the standalone deterministic drivers run
 # the same invariant checks with plain gcc.

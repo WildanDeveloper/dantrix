@@ -374,6 +374,7 @@ void dx_conn_init(dx_conn_t *conn, int fd, const dx_http_limits_t *limits)
     memset(&conn->acc, 0, sizeof(conn->acc));
     conn->peer[0] = '-';
     conn->peer[1] = '\0';
+    conn->header_deadline_ms = 0;
     conn->ip_key_len = 0u;
     conn->ip_counted = false;
     conn->climit = NULL;
@@ -798,7 +799,35 @@ void dx_conn_arm_timer(struct dx_worker *w, dx_conn_t *conn)
         delay = w->life.keepalive_timeout_ms;
         break;
     case DX_CONN_READING:
-        delay = (conn->body_left > 0) ? w->life.body_timeout_ms : w->life.header_timeout_ms;
+        if (conn->body_left > 0) {
+            /*
+             * The body timeout is a gap between chunks, which is the right
+             * shape for a large upload: resetting on progress is what lets a
+             * slow but genuine client finish.
+             */
+            delay = w->life.body_timeout_ms;
+        } else if (conn->header_deadline_ms != 0) {
+            /*
+             * The header timeout is a DEADLINE from the first byte, not a gap.
+             * A client that drips one byte at a time must not be able to extend
+             * it: that is the slowloris case, and refreshing the timer on every
+             * read let such a client hold a connection open indefinitely. The
+             * remaining time is what is left of the original window; when it is
+             * gone the connection is closed on the next event.
+             */
+            uint64_t deadline = conn->header_deadline_ms;
+
+            if (now >= deadline) {
+                /* Overdue: fire almost immediately so the connection is torn
+                 * down instead of waiting another full window. */
+                delay = 1u;
+            } else {
+                delay = deadline - now;
+            }
+        } else {
+            /* No byte yet: the full window is available, and it starts now. */
+            delay = w->life.header_timeout_ms;
+        }
         break;
     case DX_CONN_FREE:    /* the slot is not owned by anybody */
     case DX_CONN_CLOSING: /* being torn down; its timer is already cancelled */
@@ -1585,7 +1614,9 @@ static int conn_after_response(struct dx_worker *w, dx_conn_t *conn)
         return -1;
     }
 
-    /* Ready for the next request on the same connection. */
+    /* Ready for the next request on the same connection. The header window is
+     * restarted for it: the deadline belongs to one request, not to the socket. */
+    conn->header_deadline_ms = 0;
     dx_http_parser_init_ex(&conn->parser, &w->limits, conn->hdr_table,
                            (conn->hdr_table != NULL) ? DX_MAX_HEADERS_LIMIT : 0u);
     conn->close_conn = false;
@@ -1912,6 +1943,7 @@ static int conn_process(struct dx_worker *w, dx_conn_t *conn)
             conn->body_left = req->content_length;
             conn->body_offset = consumed;
             conn->state = DX_CONN_READING;
+            conn->header_deadline_ms = 0; /* headers done: body timeout takes over */
             /*
          * Dispatch still reads method, target and header values through the
          * offsets the parser produced, so the header block must survive until
@@ -2062,6 +2094,16 @@ int dx_conn_on_readable(struct dx_worker *w, dx_conn_t *conn)
         if (n > 0) {
             conn->buf.len += (size_t)n;
             conn->bytes_in += (size_t)n;
+            /*
+             * Stamp the header deadline on the first byte of a request and
+             * leave it alone afterwards: the window runs from here, so a client
+             * that trickles bytes cannot push it forward. body_left > 0 means
+             * the headers are already complete, so the stamp is not touched.
+             */
+            if (conn->header_deadline_ms == 0 && conn->body_left == 0 &&
+                w->life.header_timeout_ms > 0) {
+                conn->header_deadline_ms = (uint64_t)dx_now_ms() + w->life.header_timeout_ms;
+            }
 
             if (conn->body_left > 0) {
                 /*
