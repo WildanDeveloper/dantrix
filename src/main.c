@@ -162,6 +162,7 @@ static void print_usage(FILE *out)
             "  -t, --test-config        Validate the configuration and exit\n"
             "      --print-config       Print the effective configuration and exit\n"
             "      --doctor             Check the host (limits, kernel tunables) and exit\n"
+            "      --seccomp on|off     Sandbox: allow-list syscalls after start-up  [off]\n"
             "  -o, --option KEY=VALUE   Override any configuration key (repeatable)\n"
             "  -h, --help               Show this help\n"
             "  -V, --version            Show version and compiled features\n"
@@ -428,6 +429,7 @@ int main(int argc, char **argv)
                                               {"group", required_argument, NULL, 1013},
                                               {"status-path", required_argument, NULL, 1014},
                                               {"doctor", no_argument, NULL, 1015},
+                                              {"seccomp", required_argument, NULL, 1016},
                                               {NULL, 0, NULL, 0}};
 
     /* Pass 1: find the configuration file so it is loaded before the flags. */
@@ -696,6 +698,11 @@ int main(int argc, char **argv)
         case 1015:
             doctor = true;
             break;
+        case 1016:
+            if (assign(&set, "--seccomp", "seccomp", optarg, msg) != 0) {
+                return DX_EXIT_USAGE;
+            }
+            break;
         default:
             print_usage(stderr);
             return DX_EXIT_USAGE;
@@ -888,6 +895,7 @@ int main(int argc, char **argv)
     cfg.fcache_valid_ms = set.open_file_cache_valid_ms;
     cfg.max_conns_per_ip = set.max_conns_per_ip;
     cfg.connlimit_slots = set.connlimit_slots;
+    cfg.seccomp = set.seccomp;
     cfg.static_opts.server_tokens = set.server_tokens;
     cfg.static_opts.hidden_files = set.hidden_files;
     cfg.static_opts.cache_control = set.cache_control;

@@ -80,6 +80,7 @@ static const dx_key_t dx_keys[] = {
     K("open_file_cache_valid", K_DUR, open_file_cache_valid_ms, 0, 86400000),
     K("max_conns_per_ip", K_INT, max_conns_per_ip, 0, 1000000),
     K("connlimit_slots", K_SIZE, connlimit_slots, 0, 1LL << 22),
+    K("seccomp", K_BOOL, seccomp, 0, 0),
     KS("mime_types", K_PATH, mime_types, 0, 0),
     KS("default_type", K_STR, default_type, 0, 0),
     KS("cache_control", K_STR, cache_control, 0, 0),
@@ -166,6 +167,7 @@ void dx_config_defaults(dx_settings_t *s)
     s->open_file_cache_valid_ms = 0;
     s->max_conns_per_ip = 0;
     s->connlimit_slots = 8192;
+    s->seccomp = false;
     s->mime_types[0] = '\0';
     dx_strlcpy(s->default_type, DX_DEFAULT_MIME, sizeof(s->default_type));
     s->cache_control[0] = '\0';

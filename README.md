@@ -129,6 +129,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Fewer syscalls per request; fd-leak fix; open-file cache | ✅ | v0.7.3 |
 | Runtime descriptor accounting (leak detection) | ✅ | v0.8.0 |
 | Per-IP connection limit (`max_conns_per_ip`) | ✅ | v0.8.1 |
+| Optional seccomp-bpf sandbox (`seccomp`) | ✅ | v0.8.2 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
 
@@ -858,11 +859,43 @@ daemonize = false
 | `open_file_cache_valid` | duration | `0` | no | How long a cached descriptor is trusted. `0` = off |
 | `max_conns_per_ip` | int | `0` | no | Maximum simultaneous connections from one client address. `0` = unlimited |
 | `connlimit_slots` | size | `8192` | no | Size of the per-IP tracking table (shared by every worker) |
+| `seccomp` | bool | `false` | no | Install the seccomp-bpf allow list after start-up. See [Sandbox](#sandbox-seccomp-bpf) |
 | `mime_types` | path | empty | no | Additional file mapping extensions to MIME types (`mime.types` format) |
 | `default_type` | string | `application/octet-stream` | yes | MIME type for unknown extensions |
 | `cache_control` | string | empty | yes | `Cache-Control` header value (not sent if empty) |
 | `server_tokens` | bool | `true` | yes | `true`: `Server: Dantrix/x.y.z`. `false`: `Server: Dantrix` |
 | `add_header` | string | empty | yes | Additional response header `Name: value`. May be repeated |
+
+### Sandbox (seccomp-bpf)
+
+`seccomp = true` installs a seccomp-bpf allow list after start-up. The process
+may then use only the 79 syscalls the server actually needs; anything else kills
+it. It is **off by default** because it is a hardening option that changes what
+happens on a bug: instead of an error return, the process dies.
+
+```bash
+./bin/dantrix -r /var/www -p 8080 --seccomp on
+```
+
+What the list deliberately excludes: `execve`/`execveat` (the server never
+spawns a process), `ptrace`, `mount`/`umount`, `reboot`, `kexec_load`,
+`init_module`/`finit_module`, `bpf`, `process_vm_*`, and the whole
+`setuid`/`setgid` family — the privilege drop happens *before* the filter is
+installed, so afterwards the process cannot change identity again.
+
+The filter is installed with `PR_SET_NO_NEW_PRIVS` and
+`SECCOMP_FILTER_FLAG_TSYNC`, so it covers every worker thread. A kernel that
+cannot install it (no `CONFIG_SECCOMP`, or a policy that forbids it) is logged
+as a warning and the server continues without the sandbox.
+
+> [!NOTE]
+> `make test-seccomp` replays the whole feature set with the filter armed. If an
+> entry is ever missing from the list, that test fails with the server dying on
+> `SIGSYS` rather than the problem appearing in production.
+>
+> A sanitizer build needs `ASAN_OPTIONS=detect_leaks=0` when the sandbox is on:
+> LeakSanitizer's stop-the-world cannot complete under a seccomp filter, so it
+> spins at exit. The unsanitized build is unaffected.
 
 > [!NOTE]
 > `open_file_cache` trades freshness for speed. Within the validity window a
@@ -2311,7 +2344,8 @@ Each release has a single capability as its theme. A checked box marks completed
 - [ ] Long-running fuzzing (≥ 24 hours) on all targets
 - [ ] ASan, UBSan, and TSan as mandatory parts of CI
 - [x] `max_conns_per_ip`: a shared, lock-free per-IP connection limit
-- [ ] `seccomp-bpf` and optional `chroot`
+- [x] `seccomp-bpf` allow list: 79 syscalls, everything else kills the process
+- [ ] optional `chroot`
 - [ ] Manual security review and `SECURITY.md`
 
 ### v1.0.0: Stable

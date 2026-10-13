@@ -46,6 +46,8 @@ typedef struct {
      */
     int max_conns_per_ip;
     size_t connlimit_slots;
+    /* Install the seccomp-bpf allow list once everything is set up. */
+    bool seccomp;
     /* Connection lifecycle. */
     dx_lifecycle_opts_t life; /* keep-alive budget and timeouts */
     /* Process and privileges (all optional; empty/NULL = off). */

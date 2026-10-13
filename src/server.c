@@ -14,6 +14,7 @@
 #include "fdcount.h"
 #include "net.h"
 #include "process.h"
+#include "seccomp.h"
 #include "status.h"
 #include "util.h"
 #include "worker.h"
@@ -825,6 +826,29 @@ int dx_server_run(const dx_server_config_t *cfg)
         dx_daemon_fail(ready_fd);
         dx_connlimit_destroy(climit);
         return -1;
+    }
+
+    /*
+     * The sandbox goes on last, after the listener exists, the log files are
+     * open and privileges have been dropped: everything the filter allows has
+     * already happened, and every thread created from here inherits it. A
+     * kernel that cannot install it is a warning, not a failure -- the server
+     * is still able to serve without the extra guarantee.
+     */
+    if (cfg->seccomp) {
+        if (dx_seccomp_apply() != 0) {
+            dx_log_write(&logs.log, DX_LOG_WARN,
+                         "seccomp filter not installed (%s); continuing without the sandbox",
+                         dx_strerror(errno));
+        } else {
+            size_t n = 0;
+
+            (void)dx_seccomp_allowlist(&n);
+            dx_log_write(&logs.log, DX_LOG_INFO,
+                         "seccomp filter active: %zu syscalls allowed, everything else kills the "
+                         "process",
+                         n);
+        }
     }
 
     if (cfg->workers > 1) {

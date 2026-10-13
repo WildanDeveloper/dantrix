@@ -12,6 +12,64 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.2] - 2026-10-13
+
+Hardening step 3: an optional seccomp-bpf sandbox.
+
+### Added
+
+- **`seccomp`** (and `--seccomp on|off`): after start-up the process is limited
+  to an allow list of 79 syscalls; anything else kills it. Off by default.
+  The list was collected by tracing the server through every feature -- static
+  files, listings, ranges, conditional requests, the status endpoint, reload,
+  log reopen, statistics, pipelining, the keep-alive timeout and a graceful
+  shutdown -- and then reviewed entry by entry. `make test-seccomp` replays that
+  workload with the filter armed, so a missing entry fails the test instead of
+  showing up as a production crash.
+- Deliberately absent from the list: `execve`/`execveat`, `ptrace`,
+  `mount`/`umount`, `reboot`, `kexec_load`, `init_module`/`finit_module`,
+  `bpf`, `process_vm_*`, and every `setuid`/`setgid` family. The privilege drop
+  happens before the filter goes on, so afterwards the process cannot change
+  identity again.
+- `PR_SET_NO_NEW_PRIVS` is set and the filter is installed with
+  `SECCOMP_FILTER_FLAG_TSYNC`, so it covers every worker thread. A kernel that
+  cannot install it is a warning, not a start-up failure.
+
+### Fixed
+
+- **The filter allowed every syscall while reporting itself active.** The kill
+  return was emitted before the allow return, so falling through the last
+  comparison landed on ALLOW: a silent no-op sandbox that still logged "seccomp
+  filter active". Found by a test that asserts a forbidden syscall kills the
+  process -- `ptrace` returned 0 with the filter armed. The kill return now
+  comes first and each comparison jumps forward to the allow return. Verified:
+  the same probe now dies with SIGSYS.
+- `readlinkat` was missing from the list. The symptom was not a crash but a
+  hang: a sanitized build spins on `sched_yield()` forever at shutdown, because
+  a sanitizer resolves addresses to file names through
+  `readlinkat("/proc/self/exe")`. The release build was unaffected, which is
+  why it took an ASan run to find.
+- `_Static_assert` pins the allow list below 255 entries: a cBPF jump distance
+  is a `uint8_t`, and an oversized list would silently produce wrong distances.
+
+### Known limitation
+
+- LeakSanitizer (on by default in ASan) cannot complete its stop-the-world
+  under a seccomp filter: the process spins on `sched_yield()` at exit instead
+  of shutting down. This is a sanitizer limitation, not a server bug -- the same
+  binary with `detect_leaks=0` exits in 0.01s, and the unsanitized build exits
+  in 0.00s with the filter armed. `tests/seccomp_test.py` sets `detect_leaks=0`
+  for sanitizer builds and documents why.
+
+### Tests
+
+- `test_seccomp` (3045 checks): the allow list is well formed, unique, sized
+  under the cBPF limit, contains every syscall the serving path needs, and
+  contains none of the dangerous ones.
+- `tests/seccomp_test.py`: a full sandboxed workload (17 checks) plus the
+  enforcement proof, where a probe built from the same filter source must die
+  with SIGSYS on a forbidden syscall.
+
 ## [0.8.1] - 2026-10-13
 
 Hardening step 2: one client can no longer take the whole server.

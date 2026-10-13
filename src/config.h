@@ -77,6 +77,9 @@ typedef struct {
      */
     int max_conns_per_ip;
     size_t connlimit_slots;
+
+    /* Install the seccomp-bpf allow list after start-up. Off by default. */
+    bool seccomp;
     char mime_types[DX_CFG_PATH_MAX];
     char default_type[DX_CFG_STR_MAX];
     char cache_control[DX_CFG_STR_MAX];
