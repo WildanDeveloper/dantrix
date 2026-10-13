@@ -886,6 +886,8 @@ int main(int argc, char **argv)
     cfg.static_opts.etag = set.etag;
     cfg.fcache_slots = set.open_file_cache;
     cfg.fcache_valid_ms = set.open_file_cache_valid_ms;
+    cfg.max_conns_per_ip = set.max_conns_per_ip;
+    cfg.connlimit_slots = set.connlimit_slots;
     cfg.static_opts.server_tokens = set.server_tokens;
     cfg.static_opts.hidden_files = set.hidden_files;
     cfg.static_opts.cache_control = set.cache_control;

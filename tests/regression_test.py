@@ -1105,6 +1105,109 @@ def test_v080_fd_invariant():
             proc.kill()
 
 
+def test_v080_per_ip_limit():
+    """v0.8.0: max_conns_per_ip must bound one client, count across workers, and
+    release on close."""
+    print("regression: v0.8.0 per-IP connection limit")
+
+    # --- Part 1: the limit is enforced and shared by both workers.
+    port = PORT + 60
+    proc = subprocess.Popen([BIN, "-b", "127.0.0.1", "-p", str(port), "-r", ROOT, "-w", "2",
+                             "--access-log", "off", "--error-log", "/dev/null",
+                             "-o", "max_conns_per_ip=4"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("per-ip: server started", False)
+            return
+        socks = []
+        try:
+            for _ in range(30):
+                try:
+                    s = socket.create_connection(("127.0.0.1", port), timeout=2)
+                    s.sendall(b"GET /f HTTP/1.1\r\nHost: x\r\n\r\n")
+                    if s.recv(200).startswith(b"HTTP/1.1 200"):
+                        socks.append(s)
+                    else:
+                        s.close()
+                except OSError:
+                    pass
+            # One shared counter across 2 workers, so exactly the limit.
+            check("per-ip: exactly the limit is accepted (shared across workers)",
+                  len(socks) == 4, f"accepted {len(socks)}")
+        finally:
+            for s in socks:
+                s.close()
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    # --- Part 2: closing a connection returns its slot (no permanent ban).
+    port = PORT + 61
+    proc = subprocess.Popen([BIN, "-b", "127.0.0.1", "-p", str(port), "-r", ROOT, "-w", "1",
+                             "--access-log", "off", "--error-log", "/dev/null",
+                             "-o", "max_conns_per_ip=2"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("per-ip release: server started", False)
+            return
+        ok = 0
+        for _ in range(20):
+            try:
+                s = socket.create_connection(("127.0.0.1", port), timeout=2)
+                s.sendall(b"GET /f HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                data = b""
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                s.close()
+                if data.startswith(b"HTTP/1.1 200"):
+                    ok += 1
+            except OSError:
+                pass
+        check("per-ip: 20 sequential connections all served with limit=2", ok == 20,
+              f"{ok}/20 served")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    # --- Part 3: the feature is off by default.
+    port = PORT + 62
+    proc = subprocess.Popen([BIN, "-b", "127.0.0.1", "-p", str(port), "-r", ROOT, "-w", "1",
+                             "--access-log", "off", "--error-log", "/dev/null"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("per-ip default: server started", False)
+            return
+        socks = []
+        try:
+            for _ in range(12):
+                try:
+                    socks.append(socket.create_connection(("127.0.0.1", port), timeout=2))
+                except OSError:
+                    pass
+            check("per-ip: unlimited by default", len(socks) == 12, f"accepted {len(socks)}")
+        finally:
+            for s in socks:
+                s.close()
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def main():
     if not os.path.exists(BIN):
         print(f"  [FAIL] binary {BIN} not found - build it first "
@@ -1138,6 +1241,8 @@ def main():
     test_v073_fd_leak_and_file_cache()
     print("regression: v0.8.0 fd accounting invariant")
     test_v080_fd_invariant()
+    print("regression: v0.8.0 per-IP connection limit")
+    test_v080_per_ip_limit()
 
     print()
     if failures:

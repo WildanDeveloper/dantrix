@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "buffer.h"
+#include "connlimit.h"
 #include "conn.h"
 #include "dantrix.h"
 #include "file.h"
@@ -61,6 +62,8 @@ typedef struct dx_worker {
     dx_bufpool_t *bufs;                     /* per-connection read buffers */
     dx_bufpool_t *hdrs;                     /* per-connection HTTP header tables */
     dx_fcache_t *fcache;                    /* open-file cache; NULL = disabled */
+    dx_connlimit_t *climit;                 /* shared per-IP limit; NULL = off */
+    unsigned max_conns_per_ip;              /* 0 = unlimited */
     dx_log_t *log;                          /* borrowed error logger */
     dx_log_t *access_log;                   /* borrowed access logger; NULL = off */
     dx_log_format_t log_format;             /* common or combined */
@@ -144,6 +147,8 @@ typedef struct {
      */
     size_t fcache_slots;
     uint64_t fcache_valid_ms;
+    dx_connlimit_t *climit;    /* borrowed shared table; NULL = off */
+    unsigned max_conns_per_ip; /* 0 = unlimited */
     const dx_static_opts_t *static_opts;
     const dx_lifecycle_opts_t *life;
     dx_worker_reload_t *reload;

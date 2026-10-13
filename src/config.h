@@ -69,6 +69,14 @@ typedef struct {
      */
     size_t open_file_cache;
     uint64_t open_file_cache_valid_ms;
+
+    /*
+     * Per-IP connection limit (0 = unlimited) and the size of the tracking
+     * table. The table is shared by every worker so the limit counts the whole
+     * client, not one worker's share of it.
+     */
+    int max_conns_per_ip;
+    size_t connlimit_slots;
     char mime_types[DX_CFG_PATH_MAX];
     char default_type[DX_CFG_STR_MAX];
     char cache_control[DX_CFG_STR_MAX];

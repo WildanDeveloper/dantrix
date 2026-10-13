@@ -10,6 +10,7 @@
 
 #include "dantrix.h"
 #include "fcache.h"
+#include "connlimit.h"
 #include "fdcount.h"
 #include "net.h"
 #include "process.h"
@@ -198,7 +199,7 @@ static void warn_refused_tuning(dx_log_t *log, const dx_sockopts_t *refused)
 /* ------------------------------------------------------------------ */
 
 static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int ready_fd,
-                             dx_status_t *status, uint64_t start_ms)
+                             dx_status_t *status, uint64_t start_ms, dx_connlimit_t *climit)
 {
     dx_worker_t worker;
     dx_worker_opts_t opts;
@@ -264,6 +265,8 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
     opts.fs = cfg->fs;
     opts.fcache_slots = cfg->fcache_slots;
     opts.fcache_valid_ms = cfg->fcache_valid_ms;
+    opts.climit = climit;
+    opts.max_conns_per_ip = (cfg->max_conns_per_ip > 0) ? (unsigned)cfg->max_conns_per_ip : 0u;
     opts.mime = cfg->mime;
     opts.static_opts = &cfg->static_opts;
     opts.life = &cfg->life;
@@ -445,7 +448,7 @@ static void log_stats(dx_logs_t *logs, const dx_worker_ctx_t *ctxs, unsigned cou
 }
 
 static int server_run_multi(const dx_server_config_t *cfg, dx_logs_t *logs, int ready_fd,
-                            dx_status_t *status, uint64_t start_ms)
+                            dx_status_t *status, uint64_t start_ms, dx_connlimit_t *climit)
 {
     const unsigned count = (unsigned)cfg->workers;
     dx_worker_ctx_t *ctxs = NULL;
@@ -550,6 +553,9 @@ static int server_run_multi(const dx_server_config_t *cfg, dx_logs_t *logs, int 
         ctxs[i].opts.fs = cfg->fs;
         ctxs[i].opts.fcache_slots = cfg->fcache_slots;
         ctxs[i].opts.fcache_valid_ms = cfg->fcache_valid_ms;
+        ctxs[i].opts.climit = climit;
+        ctxs[i].opts.max_conns_per_ip =
+            (cfg->max_conns_per_ip > 0) ? (unsigned)cfg->max_conns_per_ip : 0u;
         ctxs[i].opts.mime = cfg->mime;
         ctxs[i].opts.static_opts = &cfg->static_opts;
         ctxs[i].opts.life = &cfg->life;
@@ -723,12 +729,20 @@ int dx_server_run(const dx_server_config_t *cfg)
 {
     dx_logs_t logs;
     dx_status_t status;
+    dx_connlimit_t *climit;
     uint64_t start_ms = (uint64_t)dx_now_ms();
     int rc;
     int ready_fd = -1;
     bool wrote_pid = false;
 
     dx_status_init(&status);
+    /*
+     * One table for the whole server, shared by every worker: the limit has to
+     * count the client, not one worker's share of it. NULL when the feature is
+     * off, and every connlimit call treats NULL as "allow".
+     */
+    climit = (cfg != NULL && cfg->max_conns_per_ip > 0) ? dx_connlimit_create(cfg->connlimit_slots)
+                                                        : NULL;
 
     /*
      * Both log destinations are dereferenced unconditionally in the paths
@@ -774,12 +788,14 @@ int dx_server_run(const dx_server_config_t *cfg)
             return -1;
         }
         if (drc == 1) {
+            dx_connlimit_destroy(climit);
             return 0; /* parent: the child owns the server now */
         }
     }
 
     if (logs_open(&logs, cfg) != 0) {
         dx_daemon_fail(ready_fd);
+        dx_connlimit_destroy(climit);
         return -1;
     }
 
@@ -789,6 +805,7 @@ int dx_server_run(const dx_server_config_t *cfg)
                          dx_strerror(errno));
             logs_close(&logs);
             dx_daemon_fail(ready_fd);
+            dx_connlimit_destroy(climit);
             return -1;
         }
         wrote_pid = true;
@@ -806,18 +823,20 @@ int dx_server_run(const dx_server_config_t *cfg)
         }
         logs_close(&logs);
         dx_daemon_fail(ready_fd);
+        dx_connlimit_destroy(climit);
         return -1;
     }
 
     if (cfg->workers > 1) {
-        rc = server_run_multi(cfg, &logs, ready_fd, &status, start_ms);
+        rc = server_run_multi(cfg, &logs, ready_fd, &status, start_ms, climit);
     } else {
-        rc = server_run_single(cfg, &logs, ready_fd, &status, start_ms);
+        rc = server_run_single(cfg, &logs, ready_fd, &status, start_ms, climit);
     }
 
     if (wrote_pid) {
         dx_pid_file_remove(cfg->pid_file);
     }
     logs_close(&logs);
+    dx_connlimit_destroy(climit);
     return rc;
 }

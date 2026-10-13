@@ -12,6 +12,49 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.1] - 2026-10-13
+
+Hardening step 2: one client can no longer take the whole server.
+
+### Added
+
+- **`max_conns_per_ip`**: a cap on how many connections one client address may
+  hold at once. Without it, a single host opening `max_connections` sockets
+  denies service to everyone else, which is the cheapest denial-of-service
+  there is. `0` (the default) leaves it unlimited.
+- **`connlimit_slots`**: the size of the tracking table (default 8192).
+- The tracking table is **shared by every worker**, so the limit counts the
+  client rather than one worker's share of it. Proven: with two workers and
+  `max_conns_per_ip = 4`, exactly 4 of 30 connections are accepted -- not 8.
+
+### Design
+
+- Sharded, direct-mapped, lock-free. A key hashes into one slot in each of 16
+  shards; the matching slot is used and a collision means the address is not
+  tracked, which fails **open** (the connection is allowed) rather than closing
+  somebody else's connections. The reservation uses a compare-and-swap loop, so
+  two workers can never both slip past the limit. The refusal counter and every
+  slot are C11 atomics: nothing on the accept path takes a lock.
+- The reservation is released in `dx_conn_reset()`, the single place a slot is
+  recycled, not in each caller. That is deliberate: while auditing this feature
+  the release had been left to the caller in one error path (the `epoll_ctl`
+  failure path), which leaked a reservation and banned that address
+  permanently. Putting it where the slot is recycled makes the omission
+  impossible.
+- A stray release cannot underflow the counter (which would deny an address
+  forever), and IPv4 and IPv4-mapped IPv6 peers are counted separately, because
+  they are different sockets -- normalising them would let a client use both
+  forms to double its allowance.
+
+### Tests
+
+- `test_connlimit` (52 checks) covers the exact limit, the no-underflow rule,
+  IPv6 keys, the fail-open cases, and a concurrency test where 8 threads race
+  for an allowance of 50: exactly 50 of 4000 attempts are granted.
+- A regression test covers the shared-counter behaviour across workers, the
+  release on close (20 sequential connections all served with a limit of 2) and
+  the off-by-default case.
+
 ## [0.8.0] - 2026-10-13
 
 Hardening, and the first step of it: the server can now see its own descriptors.

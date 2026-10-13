@@ -128,6 +128,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Pooled header table: ~1 KiB per idle connection | ✅ | v0.7.2 |
 | Fewer syscalls per request; fd-leak fix; open-file cache | ✅ | v0.7.3 |
 | Runtime descriptor accounting (leak detection) | ✅ | v0.8.0 |
+| Per-IP connection limit (`max_conns_per_ip`) | ✅ | v0.8.1 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
 
@@ -855,6 +856,8 @@ daemonize = false
 | `etag` | bool | `true` | yes | Send and evaluate `ETag` |
 | `open_file_cache` | size | `0` | no | Descriptors kept open across requests. `0` = off (open and stat every request). Trades freshness for speed; see the note below |
 | `open_file_cache_valid` | duration | `0` | no | How long a cached descriptor is trusted. `0` = off |
+| `max_conns_per_ip` | int | `0` | no | Maximum simultaneous connections from one client address. `0` = unlimited |
+| `connlimit_slots` | size | `8192` | no | Size of the per-IP tracking table (shared by every worker) |
 | `mime_types` | path | empty | no | Additional file mapping extensions to MIME types (`mime.types` format) |
 | `default_type` | string | `application/octet-stream` | yes | MIME type for unknown extensions |
 | `cache_control` | string | empty | yes | `Cache-Control` header value (not sent if empty) |
@@ -1811,7 +1814,7 @@ GCC can also be used as an additional analyzer: `make debug CFLAGS_EXTRA=-fanaly
 | Giant headers or URIs | Exhausting memory | `max_request_line`, `max_header_size`, `max_headers` |
 | Range DoS | Many overlapping ranges | Only a single range is served |
 | File descriptor exhaustion | A flood of connections | `max_connections`, `RLIMIT_NOFILE` checks, *backpressure* on accept |
-| Connection flood from one IP | One client monopolizing connections | 📝 `max_conns_per_ip` (v0.8) |
+| Connection flood from one IP | One client monopolizing connections | `max_conns_per_ip` (v0.8.1) |
 | Open redirect | `GET //evil.com` triggers a `301` to `Location: //evil.com/` | Consecutive slashes are folded before `Location` is built; always starts with a single `/` |
 | Reflected XSS | Client input appearing on error pages or listings | Fixed error body (no client input); the listing HTML-escapes names and percent-encodes URLs |
 | Log injection | Control characters in the path or user-agent forging log lines | Escaped in all log formats |
@@ -2307,7 +2310,8 @@ Each release has a single capability as its theme. A checked box marks completed
       the status endpoint, so a descriptor leak is visible and testable
 - [ ] Long-running fuzzing (≥ 24 hours) on all targets
 - [ ] ASan, UBSan, and TSan as mandatory parts of CI
-- [ ] `max_conns_per_ip`, `seccomp-bpf`, and optional `chroot`
+- [x] `max_conns_per_ip`: a shared, lock-free per-IP connection limit
+- [ ] `seccomp-bpf` and optional `chroot`
 - [ ] Manual security review and `SECURITY.md`
 
 ### v1.0.0: Stable

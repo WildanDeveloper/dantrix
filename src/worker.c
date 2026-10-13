@@ -122,6 +122,9 @@ int dx_worker_init(dx_worker_t *w, const dx_worker_opts_t *opts)
     }
     /* NULL when disabled: the serving path then opens and stats every request. */
     w->fcache = dx_fcache_create(opts->fcache_slots, opts->fcache_valid_ms);
+    /* Borrowed: the orchestrator owns the table and destroys it once. */
+    w->climit = opts->climit;
+    w->max_conns_per_ip = opts->max_conns_per_ip;
     w->timers = dx_timer_wheel_create();
     if (w->timers == NULL) {
         errno = ENOMEM;
@@ -222,6 +225,31 @@ void dx_worker_apply_reload(dx_worker_t *w)
     dx_log_write(w->log, DX_LOG_INFO, "worker %u: reloadable settings applied", w->worker_id);
 }
 
+/*
+ * The raw client address bytes and their length, for the per-IP counter. IPv4
+ * addresses are keyed as 4 bytes and IPv6 as 16, so a v4-mapped v6 peer and its
+ * plain IPv4 form are counted separately -- which is correct, because they are
+ * different sockets, and the alternative (normalising them) would let a client
+ * use both forms to double its allowance.
+ */
+static bool peer_key(const struct sockaddr_storage *ss, const void **out, size_t *out_len)
+{
+    if (ss == NULL) {
+        return false;
+    }
+    if (ss->ss_family == AF_INET) {
+        *out = &((const struct sockaddr_in *)(const void *)ss)->sin_addr;
+        *out_len = 4u;
+        return true;
+    }
+    if (ss->ss_family == AF_INET6) {
+        *out = &((const struct sockaddr_in6 *)(const void *)ss)->sin6_addr;
+        *out_len = 16u;
+        return true;
+    }
+    return false;
+}
+
 /* Format the peer address for the access log; "-" when unknown. */
 static void format_peer(const struct sockaddr_storage *ss, char *out, size_t cap)
 {
@@ -247,8 +275,14 @@ static void format_peer(const struct sockaddr_storage *ss, char *out, size_t cap
     }
 }
 
-/* Register a new connection. Returns 0, or -1 with *fd consumed on failure. */
-static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer)
+/*
+ * Register a new connection. Returns 0, or -1 with *fd consumed on failure.
+ *
+ * ip_key/ip_key_len carry the per-IP reservation this connection already holds,
+ * so the slot can release it when it closes; NULL means nothing was reserved.
+ */
+static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer,
+                     const void *ip_key, size_t ip_key_len)
 {
     unsigned char *mem;
     dx_conn_t *conn;
@@ -279,6 +313,16 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
     conn->buf_mem = mem;
     dx_buffer_init(&conn->buf, mem, DX_CONN_BUF_SIZE);
     format_peer(peer, conn->peer, sizeof(conn->peer));
+    if (ip_key != NULL && ip_key_len > 0u && ip_key_len <= sizeof(conn->ip_key)) {
+        memcpy(conn->ip_key, ip_key, ip_key_len);
+        conn->ip_key_len = (uint8_t)ip_key_len;
+        conn->ip_counted = true;
+        conn->climit = w->climit; /* borrowed: reset() releases through it */
+    } else {
+        conn->ip_key_len = 0u;
+        conn->ip_counted = false;
+        conn->climit = NULL;
+    }
     /* The header clock starts at accept, so a silent client cannot hold a
      * connection slot forever. */
     dx_conn_arm_timer(w, conn);
@@ -512,12 +556,42 @@ static void accept_loop(dx_worker_t *w)
                      SOCK_NONBLOCK | SOCK_CLOEXEC);
 
         if (fd >= 0) {
+            const void *ipkey;
+            size_t ipkey_len;
+            bool counted = false;
+
             dx_fdcount_opened(DX_FD_CONN);
-            if (conn_open(w, fd, &peer) != 0) {
+            /*
+             * The per-IP limit is checked before the connection is registered,
+             * so a refused client never occupies a slot or a buffer. The
+             * reservation is released by conn_close() -- which is why the
+             * worker records whether this particular connection was counted.
+             */
+            if (w->climit != NULL && peer_key(&peer, &ipkey, &ipkey_len)) {
+                if (!dx_connlimit_acquire(w->climit, ipkey, ipkey_len, w->max_conns_per_ip)) {
+                    char peer_str[64];
+
+                    (void)close(fd);
+                    dx_fdcount_closed(DX_FD_CONN);
+                    w->rejected_total++;
+                    dx_status_conn_rejected(w->status);
+                    format_peer(&peer, peer_str, sizeof(peer_str));
+                    dx_log_write(w->log, DX_LOG_WARN,
+                                 "connection from %s refused: per-IP limit of %u reached", peer_str,
+                                 w->max_conns_per_ip);
+                    continue;
+                }
+                counted = true;
+            }
+            if (conn_open(w, fd, &peer, counted ? ipkey : NULL, counted ? ipkey_len : 0u) != 0) {
                 /*
                  * conn_open consumed the descriptor on every failure path, so
-                 * there is nothing left to close here.
+                 * there is nothing left to close here. Release the reservation
+                 * it never took over.
                  */
+                if (counted) {
+                    dx_connlimit_release(w->climit, ipkey, ipkey_len);
+                }
                 w->rejected_total++;
                 dx_status_conn_rejected(w->status);
             }

@@ -10,6 +10,7 @@
 
 #include "dantrix.h"
 #include "fcache.h"
+#include "connlimit.h"
 #include "fdcount.h"
 #include "file.h"
 #include "http_range.h"
@@ -373,6 +374,9 @@ void dx_conn_init(dx_conn_t *conn, int fd, const dx_http_limits_t *limits)
     memset(&conn->acc, 0, sizeof(conn->acc));
     conn->peer[0] = '-';
     conn->peer[1] = '\0';
+    conn->ip_key_len = 0u;
+    conn->ip_counted = false;
+    conn->climit = NULL;
     conn->bytes_in = 0;
     conn->bytes_out = 0;
 }
@@ -515,6 +519,19 @@ void dx_conn_reset(dx_conn_t *conn)
     conn->hdr_table = NULL;
     conn->hdr_mem = NULL;
     conn->interest = 0; /* no epoll registration until the fd is added */
+
+    /*
+     * Return the per-IP reservation, if this slot holds one. Doing it here
+     * rather than in each caller means a slot can never be recycled while still
+     * counting against its client: the release happens on every path, including
+     * the ones that bypass conn_close().
+     */
+    if (conn->ip_counted && conn->climit != NULL) {
+        dx_connlimit_release(conn->climit, conn->ip_key, conn->ip_key_len);
+    }
+    conn->ip_counted = false;
+    conn->ip_key_len = 0u;
+    conn->climit = NULL;
 
     /*
      * The streamed file belongs to the connection lifecycle and is closed by

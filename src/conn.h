@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "buffer.h"
+#include "connlimit.h"
 #include "fcache.h"
 #include "http_parser.h"
 #include "timer.h"
@@ -110,6 +111,22 @@ typedef struct {
     uint32_t interest;
     dx_access_t acc;
     char peer[64]; /* formatted client address, "-" when unknown */
+    /*
+     * Per-IP accounting. The raw key is stored (not the formatted string) so
+     * the release hashes exactly what the acquire hashed; ip_counted is false
+     * when the feature is off, in which case nothing is released.
+     */
+    unsigned char ip_key[16];
+    uint8_t ip_key_len;
+    bool ip_counted;
+    /*
+     * Borrowed per-IP table. Held here so dx_conn_reset() can return the
+     * reservation on ANY path that recycles the slot, including the ones that
+     * never reach conn_close(). Leaving the release to individual callers is
+     * how a leaked reservation would turn into a permanent ban for that
+     * address.
+     */
+    dx_connlimit_t *climit;
     uint64_t bytes_in;
     uint64_t bytes_out;
 } dx_conn_t;

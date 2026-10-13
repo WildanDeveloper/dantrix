@@ -39,6 +39,13 @@ typedef struct {
     /* Open-file cache sizing (0 = disabled, the pre-v0.7.3 behaviour). */
     size_t fcache_slots;
     uint64_t fcache_valid_ms;
+    /*
+     * Per-IP connection limit. 0 disables it. The tracking table is created by
+     * dx_server_run() and shared by every worker, because the limit must count
+     * the client, not one worker's share of it.
+     */
+    int max_conns_per_ip;
+    size_t connlimit_slots;
     /* Connection lifecycle. */
     dx_lifecycle_opts_t life; /* keep-alive budget and timeouts */
     /* Process and privileges (all optional; empty/NULL = off). */
