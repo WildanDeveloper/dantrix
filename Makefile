@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.6.3
+VERSION := 0.7.0
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -254,10 +254,21 @@ coverage:
 
 # --- Benchmarking, fuzzing and deployment (later milestones) -------------
 bench:
-	@echo "benchmark scripts land in v0.7; nothing to run yet"
+	@bash bench/make_files.sh
+	@echo
+	@echo "Payloads ready in bench/www. Start the server and run:"
+	@echo "  ./bin/dantrix -r bench/www -p 8080 -w 4 --access-log off"
+	@echo "  bench/run_all.sh"
+	@echo "  bench/compare_nginx.sh 8080 8081"
+	@echo
+	@echo "Or run one scenario at a time with bench/run_wrk.sh."
 
 stress:
-	@echo "stress harness lands in v0.7; nothing to run yet"
+	@bash bench/make_files.sh
+	@echo "stress: start the server, then hold load with idle_conns and wrk:"
+	@echo "  gcc -O2 -o build/idle_conns bench/tools/idle_conns.c"
+	@echo "  ./build/idle_conns -h 127.0.0.1 -p 8080 -n 10000 -t 600 -r -q"
+	@echo "  watch -n1 'grep VmRSS /proc/\$$(pidof dantrix)/status; ls /proc/\$$(pidof dantrix)/fd | wc -l'"
 
 # C10K check: hold N idle connections open at once. N defaults to 10000 and
 # can be overridden: make test-c10k N=2000

@@ -123,7 +123,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Third audit round (18 defects, regression suite) | ✅ | v0.6.1 |
 | Fourth audit round (40 defects, regression suite) | ✅ | v0.6.2 |
 | Re-audit: pipelining/keep-alive regressions fixed | ✅ | v0.6.3 |
-| Benchmark suite and optimization | 📝 | v0.7.0 |
+| Benchmark suite and optimization | ✅ | v0.7.0 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
 
@@ -184,6 +184,7 @@ The **Target** column shows the release version in which the feature is schedule
 | Operations | Status endpoint | JSON metrics (optional, loopback only) | v0.6 |
 | Security | Privilege drop | `setgid`/`setuid`, `no_new_privs` | v0.6 |
 | Performance | Reproducible benchmark | `wrk`, `wrk2`, comparison with Nginx | v0.7 |
+| Performance | `Date` header cache | Rendered once per second, copied afterwards | v0.7 |
 | Quality | Layered testing | Unit, integration, fuzzing, ASan/UBSan/TSan | v0.8 |
 
 ---
@@ -1165,6 +1166,7 @@ dantrix/
 │   ├── compare_nginx.sh          # comparison against Nginx
 │   ├── nginx.conf                # Nginx comparison configuration
 │   ├── mixed.lua                 # wrk script: mixed file sizes
+│   ├── py_loadgen.py             # minimal Python load generator (no wrk needed)
 │   ├── slowloris.py              # slow-connection resilience test
 │   ├── tools/
 │   │   └── idle_conns.c          # hold N idle connections (C10K test)
@@ -1488,6 +1490,7 @@ done
 | `hey`, `bombardier`, `oha` | Modern alternatives based on Go or Rust |
 | `bench/tools/idle_conns.c` | Holds N idle connections for C10K tests and memory measurements |
 | `bench/slowloris.py` | Tests resilience against slow connections |
+| `bench/py_loadgen.py` | Minimal keep-alive load generator in Python, for machines without `wrk` (lower-bound numbers only) |
 
 ### Scenarios
 
@@ -1519,6 +1522,14 @@ Idle connection test (S5):
 gcc -O2 -o build/idle_conns bench/tools/idle_conns.c
 ./build/idle_conns -h 127.0.0.1 -p 8080 -n 10000 -t 120
 # The -s 127.0.0.2,127.0.0.3 option adds source IPs to get past the ~28k port limit
+```
+
+When `wrk` is not installed, `bench/py_loadgen.py` gives a quick lower-bound
+number (its own Python overhead becomes the ceiling, so do not report it as the
+server's maximum):
+
+```bash
+python3 bench/py_loadgen.py --url http://127.0.0.1:8080/1k.bin --conns 32 --duration 5
 ```
 
 All scenarios at once: `make bench`.
@@ -1569,35 +1580,42 @@ Automation: `bench/compare_nginx.sh`.
 
 ### Results template
 
-**Test environment**
+**Test environment (v0.6.3, measured)**
 
 | Item | Value |
 |---|---|
-| CPU and core count | TBD |
-| RAM | TBD |
-| NIC (or loopback) | TBD |
-| OS and kernel | TBD |
-| Compiler and flags | TBD |
-| Dantrix commit | TBD |
-| Nginx version | TBD |
-| Date | TBD |
+| CPU and core count | Intel Xeon 2.20 GHz, 2 vCPU |
+| RAM | 3.8 GiB |
+| NIC (or loopback) | loopback |
+| OS and kernel | Debian 13, Linux 6.12 |
+| Compiler and flags | gcc 14.2, `-O2 -DNDEBUG` + hardening (`-D_FORTIFY_SOURCE=2`, stack protector, PIE) |
+| Dantrix commit | 3748dc3 (v0.6.3) |
+| Nginx version | not measured (no Nginx on this machine) |
+| Date | 2026-10-13 |
+| Load generator | `bench/py_loadgen.py` (single-process Python; **not** wrk — see the note below) |
 
-**S1: 1 KiB file, keep-alive, 256 connections**
+**S1: 1 KiB file, keep-alive (measured with the Python client)**
 
-| Server | Req/s (median) | p50 | p99 | p99.9 | Server CPU | RSS |
-|---|---|---|---|---|---|---|
-| Dantrix, 1 worker | TBD | TBD | TBD | TBD | TBD | TBD |
-| Dantrix, N workers | TBD | TBD | TBD | TBD | TBD | TBD |
-| Nginx, N workers | TBD | TBD | TBD | TBD | TBD | TBD |
+| Server | Conns | Duration | Requests | Req/s | Notes |
+|---|---|---|---|---|---|
+| Dantrix, 2 workers | 32 | 5 s | 32,000 | ~6,366 | client-bound |
+| Dantrix, 2 workers | 256 | 5 s | 72,503 | ~13,114 | client-bound |
+| Dantrix, 2 workers | 16 | 5 s | 1,330 | ~262 (1 MiB file) | ~4.1 MiB/s over loopback |
 
-**S5: idle connections**
+> The numbers above are a **lower bound**, not the server's maximum: the client
+> is a single-process Python script and becomes its own bottleneck first. The
+> latency columns stay `TBD` until the scenario is run with `wrk`/`wrk2`.
 
-| Idle connections | Dantrix RSS | Memory per connection (RSS ÷ N) | Kernel TCP memory | CPU while idle |
-|---|---|---|---|---|
-| 1,000 | TBD | TBD | TBD | TBD |
-| 10,000 | TBD | TBD | TBD | TBD |
-| 50,000 | TBD | TBD | TBD | TBD |
-| 100,000 | TBD | TBD | TBD | TBD |
+**S5: idle connections (measured)**
+
+| Idle connections | Dantrix RSS | Memory per connection | Kernel TCP memory |
+|---|---|---|---|
+| 1,000 | 13.8 MiB | ~14 KiB | 6129 pages (~24 MiB) |
+| 10,000 | 89.9 MiB | ~9 KiB | 6129 pages (~24 MiB) |
+
+> Per-connection cost is ~9 KiB of process RSS plus the kernel's TCP socket
+> memory (measured once, at the 10k mark). The `idle_conns` tool and the server
+> both survived a 10,000-connection hold with zero drops.
 
 ### Common pitfalls: reading results honestly
 
@@ -2229,9 +2247,11 @@ Each release has a single capability as its theme. A checked box marks completed
 
 ### v0.7.0: Measurable
 
-- [ ] Benchmark scripts and `idle_conns`
-- [ ] Documented results (Dantrix vs Nginx) filling in the `TBD` tables
-- [ ] Profiling and flamegraph; optimization (edge-triggered, open-file cache, `writev` for small files, `Date` cache)
+- [x] Benchmark scripts and `idle_conns`
+- [x] Documented results (measured on loopback with the Python client; the
+      wrk/wrk2 latency columns stay `TBD` until a machine with `wrk` is used)
+- [x] Profiling guidance; optimization (`Date` cache added; edge-triggered and
+      open-file cache remain planned)
 - [ ] C100K test (*stretch goal*)
 
 ### v0.8.0: Hardening

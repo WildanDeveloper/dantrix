@@ -82,4 +82,11 @@ bool dx_parse_size(const char *s, size_t *out);
  */
 size_t dx_http_date(char *out, size_t cap, long long when_ms);
 
+/*
+ * Same as dx_http_date(out, cap, -1) but served from a one-second cache: the
+ * fixdate only changes once per second, so the hot path pays a memcpy instead
+ * of a gmtime_r()+strftime() per response. Thread safe.
+ */
+size_t dx_http_date_cached(char *out, size_t cap);
+
 #endif /* DX_UTIL_H */

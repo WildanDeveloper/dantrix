@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <sched.h>
 #include <stdint.h>
 #include <string.h>
@@ -292,4 +293,49 @@ size_t dx_http_date(char *out, size_t cap, long long when_ms)
         return 0;
     }
     return strftime(out, cap, "%a, %d %b %Y %H:%M:%S GMT", &tm_buf);
+}
+
+/*
+ * Cache for the "Date" response header.
+ *
+ * Every response carries a Date header, and formatting one costs a gmtime_r()
+ * plus a strftime() per response. The value only changes once per second, so it
+ * is rendered once per second and copied out from then on: a memcpy instead of
+ * a time conversion in the hot path.
+ *
+ * The cache is guarded by a mutex. Workers serialise on it briefly, but the
+ * critical section is one memcpy and the content is always a complete, valid
+ * fixdate, so a caller can never observe a half-written value.
+ */
+static pthread_mutex_t g_date_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_date_cache[40]; /* 29 chars + terminator, padded */
+static time_t g_date_cache_sec = -1;
+
+size_t dx_http_date_cached(char *out, size_t cap)
+{
+    struct timespec ts;
+    size_t len;
+
+    if (out == NULL || cap < 30u) {
+        return 0;
+    }
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+        return 0;
+    }
+    pthread_mutex_lock(&g_date_mutex);
+    if (ts.tv_sec != g_date_cache_sec) {
+        /* Only cache a value that was actually rendered: a failed render must
+         * not poison the cache with a stale or empty string. */
+        if (dx_http_date(g_date_cache, sizeof(g_date_cache), (long long)ts.tv_sec * 1000LL) > 0) {
+            g_date_cache_sec = ts.tv_sec;
+        }
+    }
+    len = strlen(g_date_cache);
+    if (len > 0u && cap > len) {
+        memcpy(out, g_date_cache, len + 1u);
+    } else {
+        len = 0;
+    }
+    pthread_mutex_unlock(&g_date_mutex);
+    return len;
 }

@@ -12,6 +12,49 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.7.0] - 2026-10-13
+
+Measurable: the benchmark harness, a real set of measurements, and the first
+optimization.
+
+### Added
+
+- **`bench/tools/idle_conns.c`** (scenario S5): holds N idle TCP connections,
+  optionally after one request each, polls for connections the server dropped,
+  and prints a summary. It supports `-s ip,ip,...` to rotate source addresses
+  so a single host can exceed one IP's ~28k ephemeral port range. Verified with
+  10,000 connections held with zero drops.
+- **`bench/make_files.sh`** creates the 1k/10k/100k/1m/100m payloads (and a
+  small index) that every scenario uses.
+- **`bench/run_wrk.sh`**, **`bench/run_all.sh`** and **`bench/compare_nginx.sh`**
+  drive the scenarios from the README; `make bench` prepares the payloads and
+  prints the commands, `make stress` the long-hold commands.
+- **`bench/mixed.lua`** (weighted mixed file sizes), **`bench/nginx.conf`**
+  (an equivalent Nginx configuration for the comparison) and
+  **`bench/slowloris.py`** (slow-connection resilience, scenario S8).
+- **`bench/py_loadgen.py`**: a minimal keep-alive load generator for machines
+  without `wrk`. It reports a lower bound only and says so.
+- Measured results in the README's benchmark tables (hardware, kernel,
+  compiler, commit hash, and the numbers), replacing the `TBD` placeholders
+  where a measurement was possible on this machine.
+
+### Changed
+
+- **The `Date` response header is served from a one-second cache.** It used to
+  run `gmtime_r()` + `strftime()` on every response; the value only changes
+  once per second, so it is rendered once per second and copied afterwards. The
+  cache is mutex-guarded and only ever holds a complete fixdate, so a worker
+  can never copy a half-written value (`dx_http_date_cached()`, unit tested).
+
+### Notes
+
+- The latency columns (p50/p99/p99.9) remain `TBD`: they need `wrk`/`wrk2`,
+  which are not installed on this machine. The measured throughput is a lower
+  bound because the Python client becomes the bottleneck first.
+- Edge-triggered `epoll`, the open-file cache and `writev()` for small files
+  remain planned for a later pass; the `Date` cache was the change that fits
+  the existing level-triggered design without a behavioural risk.
+
 ## [0.6.3] - 2026-10-12
 
 Re-audit verdict on v0.6.2: 33 of the 40 third-round fixes were correct; the

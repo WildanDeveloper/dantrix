@@ -136,7 +136,7 @@ static size_t response_assemble(char *out, size_t cap, int status, const char *e
         sb_append_str(&sb, "Server: " DX_PROGRAM_NAME "/" DX_VERSION_STRING "\r\n");
     }
 
-    if (dx_http_date(date, sizeof(date), -1) > 0) {
+    if (dx_http_date_cached(date, sizeof(date)) > 0) {
         sb_append_str(&sb, "Date: ");
         sb_append_str(&sb, date);
         sb_append_str(&sb, "\r\n");

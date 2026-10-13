@@ -204,6 +204,34 @@ static void test_http_date(void)
     CHECK(strstr(buf, ", ") != NULL);
 }
 
+static void test_http_date_cached(void)
+{
+    char a[40];
+    char b[40];
+    size_t n;
+    long long fixed = 1791748800000LL; /* Sun, 11 Oct 2026 20:00:00 GMT */
+
+    dx_test_begin("util/http_date_cached");
+
+    /* The cached form must equal the uncached form for the same second. */
+    n = dx_http_date_cached(a, sizeof(a));
+    CHECK(n == 29u);
+    CHECK(strstr(a, " GMT") == a + n - 4u);
+
+    /* Two consecutive calls within the same second return the same bytes. */
+    CHECK(dx_http_date_cached(b, sizeof(b)) == n);
+    CHECK(strcmp(a, b) == 0);
+
+    /* A buffer that is too small is refused, not truncated. */
+    CHECK_EQ(dx_http_date_cached(a, 16u), 0u);
+    CHECK_EQ(dx_http_date_cached(NULL, sizeof(a)), 0u);
+
+    /* The uncached path still honours an explicit timestamp (used by tests and
+     * by Last-Modified). */
+    CHECK_EQ(dx_http_date(a, sizeof(a), fixed), 29u);
+    CHECK(strcmp(a, "Sun, 11 Oct 2026 20:00:00 GMT") == 0);
+}
+
 static void test_affinity(void)
 {
     cpu_set_t allowed;
@@ -243,6 +271,7 @@ int main(void)
     test_parse_ull();
     test_parse_size();
     test_http_date();
+    test_http_date_cached();
     test_affinity();
     printf("test_util: ");
     return dx_test_summary();
