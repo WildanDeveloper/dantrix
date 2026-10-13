@@ -266,6 +266,7 @@ void dx_fs_destroy(dx_fs_t *fs)
     }
     if (fs->root_fd >= 0) {
         (void)close(fs->root_fd);
+        dx_fdcount_closed(DX_FD_MISC);
     }
     free(fs);
 }

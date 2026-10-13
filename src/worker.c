@@ -152,6 +152,7 @@ void dx_worker_destroy(dx_worker_t *w)
     }
     if (w->epfd >= 0) {
         (void)close(w->epfd);
+        dx_fdcount_closed(DX_FD_EPOLL);
         w->epfd = -1;
     }
     /*
