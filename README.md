@@ -1611,16 +1611,19 @@ All scenarios at once: `make bench`.
 > is a single-process Python script and becomes its own bottleneck first. The
 > latency columns stay `TBD` until the scenario is run with `wrk`/`wrk2`.
 
-**S5: idle connections (measured)**
+**S5: idle connections (measured, v0.7.2)**
 
-| Idle connections | Dantrix RSS | Memory per connection | Kernel TCP memory |
-|---|---|---|---|
-| 1,000 | 13.8 MiB | ~14 KiB | 6129 pages (~24 MiB) |
-| 10,000 | 89.9 MiB | ~9 KiB | 6129 pages (~24 MiB) |
+| Idle connections | Dantrix RSS | Memory per connection |
+|---|---|---|
+| 1,000 | 3.1 MiB | ~3.1 KiB (dominated by the fixed baseline) |
+| 10,000 | 12.0 MiB | ~1.2 KiB (marginal cost ~1.0 KiB) |
 
-> Per-connection cost is ~9 KiB of process RSS plus the kernel's TCP socket
-> memory (measured once, at the 10k mark). The `idle_conns` tool and the server
-> both survived a 10,000-connection hold with zero drops.
+> Before the pooled header table (v0.7.1) the same 10,000-connection hold
+> measured 89.9 MiB of RSS (~9 KiB per connection): every connection carried an
+> 8 KiB header array whether or not a request was in flight. The kernel's TCP
+> socket memory is separate (a few KiB per connection, depending on `tcp_rmem`
+> and `tcp_wmem`). The `idle_conns` tool and the server both survived a
+> 10,000-connection hold with zero drops.
 
 ### Common pitfalls: reading results honestly
 
