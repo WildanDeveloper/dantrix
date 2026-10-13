@@ -2,7 +2,6 @@
 
 #include <errno.h>
 #include <limits.h>
-#include <pthread.h>
 #include <sched.h>
 #include <stdint.h>
 #include <string.h>
@@ -303,13 +302,14 @@ size_t dx_http_date(char *out, size_t cap, long long when_ms)
  * is rendered once per second and copied out from then on: a memcpy instead of
  * a time conversion in the hot path.
  *
- * The cache is guarded by a mutex. Workers serialise on it briefly, but the
- * critical section is one memcpy and the content is always a complete, valid
- * fixdate, so a caller can never observe a half-written value.
+ * The cache is thread-local rather than mutex-guarded: a shared buffer would
+ * serialise every worker on a single lock, which costs more than the
+ * conversion it avoids. Each thread renders its own copy once per second.
+ * The cache is only ever written by one thread, so a caller can never observe
+ * a half-written value.
  */
-static pthread_mutex_t g_date_mutex = PTHREAD_MUTEX_INITIALIZER;
-static char g_date_cache[40]; /* 29 chars + terminator, padded */
-static time_t g_date_cache_sec = -1;
+static _Thread_local char g_date_cache[40]; /* 29 chars + terminator, padded */
+static _Thread_local time_t g_date_cache_sec = -1;
 
 size_t dx_http_date_cached(char *out, size_t cap)
 {
@@ -322,7 +322,6 @@ size_t dx_http_date_cached(char *out, size_t cap)
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
         return 0;
     }
-    pthread_mutex_lock(&g_date_mutex);
     if (ts.tv_sec != g_date_cache_sec) {
         /* Only cache a value that was actually rendered: a failed render must
          * not poison the cache with a stale or empty string. */
@@ -333,9 +332,7 @@ size_t dx_http_date_cached(char *out, size_t cap)
     len = strlen(g_date_cache);
     if (len > 0u && cap > len) {
         memcpy(out, g_date_cache, len + 1u);
-    } else {
-        len = 0;
+        return len;
     }
-    pthread_mutex_unlock(&g_date_mutex);
-    return len;
+    return 0;
 }
