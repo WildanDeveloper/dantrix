@@ -1436,7 +1436,11 @@ nstat -az TcpExtListenOverflows TcpExtListenDrops
 ## Benchmark
 
 > [!IMPORTANT]
-> There are no official benchmark results yet. Every `TBD` cell below will be filled in once real measurements have been run with this method. **Do not publish numbers that have not been measured.**
+> The results below were measured on the machine described in the test
+> environment table. The latency columns remain `TBD` because they need
+> `wrk`/`wrk2`, which were not available; the throughput numbers come from the
+> Python client and are explicitly a lower bound. **Do not publish numbers
+> that have not been measured.**
 
 ### Principles
 
@@ -1580,7 +1584,7 @@ Automation: `bench/compare_nginx.sh`.
 
 ### Results template
 
-**Test environment (v0.6.3, measured)**
+**Test environment (v0.7.0, measured)**
 
 | Item | Value |
 |---|---|
@@ -1589,7 +1593,7 @@ Automation: `bench/compare_nginx.sh`.
 | NIC (or loopback) | loopback |
 | OS and kernel | Debian 13, Linux 6.12 |
 | Compiler and flags | gcc 14.2, `-O2 -DNDEBUG` + hardening (`-D_FORTIFY_SOURCE=2`, stack protector, PIE) |
-| Dantrix commit | 3748dc3 (v0.6.3) |
+| Dantrix commit | b2b9eb7 (v0.7.0) |
 | Nginx version | not measured (no Nginx on this machine) |
 | Date | 2026-10-13 |
 | Load generator | `bench/py_loadgen.py` (single-process Python; **not** wrk — see the note below) |
