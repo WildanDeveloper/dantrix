@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "dantrix.h"
+#include "fcache.h"
 #include "http_response.h"
 #include "net.h"
 #include "status.h"
@@ -118,6 +119,8 @@ int dx_worker_init(dx_worker_t *w, const dx_worker_opts_t *opts)
         errno = ENOMEM;
         return -1;
     }
+    /* NULL when disabled: the serving path then opens and stats every request. */
+    w->fcache = dx_fcache_create(opts->fcache_slots, opts->fcache_valid_ms);
     w->timers = dx_timer_wheel_create();
     if (w->timers == NULL) {
         errno = ENOMEM;
@@ -163,6 +166,8 @@ void dx_worker_destroy(dx_worker_t *w)
     w->bufs = NULL;
     dx_bufpool_destroy(w->hdrs);
     w->hdrs = NULL;
+    dx_fcache_destroy(w->fcache);
+    w->fcache = NULL;
     dx_timer_wheel_destroy(w->timers);
     w->timers = NULL;
 }
@@ -292,6 +297,9 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
         errno = saved;
         return -1;
     }
+    /* The fd is registered with EPOLLIN|EPOLLRDHUP: record it so later
+     * updates can skip the epoll_ctl when the mask does not change. */
+    conn->interest = (uint32_t)(EPOLLIN | EPOLLRDHUP);
 
     /* TCP_NODELAY only changes latency; a failure must not drop the client. */
     (void)dx_set_tcp_nodelay(fd);
@@ -376,11 +384,11 @@ static void conn_close(dx_worker_t *w, dx_conn_t *conn)
 static int conn_update_interest(dx_worker_t *w, dx_conn_t *conn)
 {
     struct epoll_event ev;
+    uint32_t want;
 
     if (w->epfd < 0 || conn->fd < 0) {
         return -1;
     }
-    memset(&ev, 0, sizeof(ev));
     if (conn->eof || dx_conn_has_work(conn)) {
         /*
          * Only EPOLLOUT while output is pending: on a level-triggered epoll
@@ -390,12 +398,28 @@ static int conn_update_interest(dx_worker_t *w, dx_conn_t *conn)
         if (!dx_conn_has_work(conn)) {
             return -1; /* nothing left to send: the caller closes */
         }
-        ev.events = EPOLLOUT;
+        want = EPOLLOUT;
     } else {
-        ev.events = EPOLLIN | EPOLLRDHUP;
+        want = EPOLLIN | EPOLLRDHUP;
     }
+    /*
+     * The mask is almost always the same one that is already registered: a
+     * request that arrives, is answered and is sent without the socket ever
+     * filling up goes IN -> OUT -> IN, but the epoll_ctl for the final IN is
+     * wasted because the level-triggered set is re-evaluated on every wait.
+     * Skipping the unchanged update removes a syscall per request.
+     */
+    if (conn->interest == want) {
+        return 0;
+    }
+    memset(&ev, 0, sizeof(ev));
+    ev.events = want;
     ev.data.u64 = dx_tag_conn(conn->index, conn->generation);
-    return epoll_ctl(w->epfd, EPOLL_CTL_MOD, conn->fd, &ev);
+    if (epoll_ctl(w->epfd, EPOLL_CTL_MOD, conn->fd, &ev) != 0) {
+        return -1;
+    }
+    conn->interest = want;
+    return 0;
 }
 
 /* Delay before the accept queue is retried after a resource failure. */

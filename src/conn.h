@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "buffer.h"
+#include "fcache.h"
 #include "http_parser.h"
 #include "timer.h"
 
@@ -65,6 +66,13 @@ typedef struct {
     uint64_t file_offset; /* next byte to read from file_fd */
     uint64_t file_left;   /* response body bytes still to send */
     /*
+     * When the streamed descriptor is borrowed from the worker's open-file
+     * cache, this points at the pinned entry and the connection must NOT close
+     * the descriptor: it unpins it instead. NULL means the connection owns
+     * file_fd and closes it.
+     */
+    dx_fcache_entry_t *file_cache_entry;
+    /*
      * In-memory response body (the directory listing). Owned by the
      * connection because it outlives the stack frame that built it,
      * and streamed through the same buffer as the headers.
@@ -93,6 +101,13 @@ typedef struct {
      */
     dx_http_header_t *hdr_table;
     unsigned char *hdr_mem;
+    /*
+     * The epoll interest mask currently registered for this fd (0 = not
+     * registered / unknown). epoll_ctl(MOD) is skipped when the desired mask
+     * already matches, which removes one syscall from every request that is
+     * read, answered and sent without the socket ever blocking.
+     */
+    uint32_t interest;
     dx_access_t acc;
     char peer[64]; /* formatted client address, "-" when unknown */
     uint64_t bytes_in;

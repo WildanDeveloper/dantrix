@@ -60,6 +60,7 @@ typedef struct dx_worker {
     dx_pool_t *pool;                        /* connection slots */
     dx_bufpool_t *bufs;                     /* per-connection read buffers */
     dx_bufpool_t *hdrs;                     /* per-connection HTTP header tables */
+    dx_fcache_t *fcache;                    /* open-file cache; NULL = disabled */
     dx_log_t *log;                          /* borrowed error logger */
     dx_log_t *access_log;                   /* borrowed access logger; NULL = off */
     dx_log_format_t log_format;             /* common or combined */
@@ -137,6 +138,12 @@ typedef struct {
     const dx_http_limits_t *limits;
     dx_fs_t *fs;
     dx_mime_t *mime;
+    /*
+     * Open-file cache sizing. slots == 0 (or valid_ms == 0) disables the cache
+     * and keeps the open+fstat-per-request path.
+     */
+    size_t fcache_slots;
+    uint64_t fcache_valid_ms;
     const dx_static_opts_t *static_opts;
     const dx_lifecycle_opts_t *life;
     dx_worker_reload_t *reload;

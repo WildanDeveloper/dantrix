@@ -944,6 +944,96 @@ def test_v071_header_table_pooling():
             proc.kill()
 
 
+def test_v073_fd_leak_and_file_cache():
+    """v0.7.3: two things.
+
+    1. A keep-alive connection used to leak one descriptor per file request:
+       the descriptor was only released in conn_close(), so a client asking for
+       a thousand files on one connection held a thousand open descriptors. This
+       asserts the descriptor count stays flat.
+    2. The open-file cache must serve the same bytes as the uncached path.
+    """
+    print("regression: v0.7.3 fd leak + open-file cache")
+
+    # --- Part 1: descriptor leak (cache disabled, the default).
+    port = PORT + 50
+    proc = subprocess.Popen([BIN, "-b", "127.0.0.1", "-p", str(port), "-r", ROOT, "-w", "1",
+                             "--access-log", "off", "--error-log", "/dev/null"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("fd leak: server started", False)
+            return
+        before = open_fd_count(proc.pid)
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            for i in range(300):
+                s.sendall(b"GET /f HTTP/1.1\r\nHost: x\r\n\r\n")
+                buf = b""
+                while b"\r\n\r\n" not in buf:
+                    buf += s.recv(65536)
+                head, _, rest = buf.partition(b"\r\n\r\n")
+                length = 0
+                for line in head.split(b"\r\n"):
+                    if line.lower().startswith(b"content-length:"):
+                        length = int(line.split(b":", 1)[1])
+                while len(rest) < length:
+                    rest += s.recv(65536)
+        finally:
+            s.close()
+        after = open_fd_count(proc.pid)
+        check(f"fd leak: {before} fds before, {after} after 300 requests",
+              after is not None and after <= before + 4, f"{before} -> {after}")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    # --- Part 2: the cache must serve correct bytes.
+    port = PORT + 51
+    proc = subprocess.Popen([BIN, "-b", "127.0.0.1", "-p", str(port), "-r", ROOT, "-w", "1",
+                             "--access-log", "off", "--error-log", "/dev/null",
+                             "-o", "open_file_cache=8", "-o", "open_file_cache_valid=60s"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("file cache: server started", False)
+            return
+        before = open_fd_count(proc.pid)
+        ok = True
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            for i in range(300):
+                s.sendall(b"GET /f HTTP/1.1\r\nHost: x\r\n\r\n")
+                buf = b""
+                while b"\r\n\r\n" not in buf:
+                    buf += s.recv(65536)
+                head, _, rest = buf.partition(b"\r\n\r\n")
+                length = 0
+                for line in head.split(b"\r\n"):
+                    if line.lower().startswith(b"content-length:"):
+                        length = int(line.split(b":", 1)[1])
+                while len(rest) < length:
+                    rest += s.recv(65536)
+                if rest[:length] != b"x" * length:
+                    ok = False
+                    break
+        finally:
+            s.close()
+        after = open_fd_count(proc.pid)
+        check("file cache: 300 requests return correct bytes", ok)
+        check(f"file cache: descriptors stay bounded ({before} -> {after})",
+              after is not None and after <= before + 10, f"{before} -> {after}")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def main():
     if not os.path.exists(BIN):
         print(f"  [FAIL] binary {BIN} not found - build it first "
@@ -973,6 +1063,8 @@ def main():
     test_v070_date_header_cache()
     print("regression: v0.7.1 per-connection memory (pooled header table)")
     test_v071_header_table_pooling()
+    print("regression: v0.7.3 fd leak + open-file cache")
+    test_v073_fd_leak_and_file_cache()
 
     print()
     if failures:

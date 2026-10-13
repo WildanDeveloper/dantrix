@@ -126,6 +126,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Benchmark suite and optimization | ✅ | v0.7.0 |
 | Listener tuning, fd auto-tune, host pre-flight | ✅ | v0.7.1 |
 | Pooled header table: ~1 KiB per idle connection | ✅ | v0.7.2 |
+| Fewer syscalls per request; fd-leak fix; open-file cache | ✅ | v0.7.3 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
 
@@ -851,11 +852,21 @@ daemonize = false
 | `sendfile` | bool | `true` | yes | Use `sendfile()`; `false` uses `pread()` + `send()` |
 | `sendfile_chunk` | size | `1m` | yes | Max bytes per `sendfile()` call (maintains fairness between connections) |
 | `etag` | bool | `true` | yes | Send and evaluate `ETag` |
+| `open_file_cache` | size | `0` | no | Descriptors kept open across requests. `0` = off (open and stat every request). Trades freshness for speed; see the note below |
+| `open_file_cache_valid` | duration | `0` | no | How long a cached descriptor is trusted. `0` = off |
 | `mime_types` | path | empty | no | Additional file mapping extensions to MIME types (`mime.types` format) |
 | `default_type` | string | `application/octet-stream` | yes | MIME type for unknown extensions |
 | `cache_control` | string | empty | yes | `Cache-Control` header value (not sent if empty) |
 | `server_tokens` | bool | `true` | yes | `true`: `Server: Dantrix/x.y.z`. `false`: `Server: Dantrix` |
 | `add_header` | string | empty | yes | Additional response header `Name: value`. May be repeated |
+
+> [!NOTE]
+> `open_file_cache` trades freshness for speed. Within the validity window a
+> file replaced on disk is still served from the cached descriptor, so a deploy
+> that swaps files in place needs the window short enough to tolerate -- or the
+> cache off. A cache hit costs no `openat2()` and no `fstat()`; a slot is
+> pinned while a transfer uses it and is never closed out from under a live
+> `sendfile()`. Off by default.
 
 **TCP socket options**
 
@@ -2267,6 +2278,14 @@ Each release has a single capability as its theme. A checked box marks completed
 - [x] Pooled HTTP header table: the 8 KiB table moved out of every connection
       slot, so an idle keep-alive connection costs ~1.2 KiB instead of ~9.2 KiB
 - [x] The documented "<= 1 KiB per idle connection" target is met and measured
+
+### v0.7.3: Fewer syscalls per request
+
+- [x] A keep-alive connection no longer leaks one descriptor per file request
+- [x] `epoll_ctl` is skipped when the interest mask does not change
+- [x] Optional per-worker open-file cache (`open_file_cache`) removes the
+      `openat2()` and `fstat()` from repeated requests: 7 -> 4 syscalls per
+      request, measured with `strace -c`
 
 ### v0.8.0: Hardening
 

@@ -36,6 +36,9 @@ typedef struct {
     dx_fs_t *fs;                  /* document root handle; NULL serves no files */
     dx_mime_t *mime;              /* extension mapping; NULL means octet-stream */
     dx_static_opts_t static_opts; /* sendfile, etag, cache-control, ... */
+    /* Open-file cache sizing (0 = disabled, the pre-v0.7.3 behaviour). */
+    size_t fcache_slots;
+    uint64_t fcache_valid_ms;
     /* Connection lifecycle. */
     dx_lifecycle_opts_t life; /* keep-alive budget and timeouts */
     /* Process and privileges (all optional; empty/NULL = off). */

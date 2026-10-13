@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "dantrix.h"
+#include "fcache.h"
 #include "net.h"
 #include "process.h"
 #include "status.h"
@@ -253,6 +254,8 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
     opts.stop_flag = NULL; /* the signalfd drives the stop */
     opts.limits = &cfg->limits;
     opts.fs = cfg->fs;
+    opts.fcache_slots = cfg->fcache_slots;
+    opts.fcache_valid_ms = cfg->fcache_valid_ms;
     opts.mime = cfg->mime;
     opts.static_opts = &cfg->static_opts;
     opts.life = &cfg->life;
@@ -528,6 +531,8 @@ static int server_run_multi(const dx_server_config_t *cfg, dx_logs_t *logs, int 
         ctxs[i].opts.stop_flag = NULL; /* worker threads stop through the eventfd */
         ctxs[i].opts.limits = &cfg->limits;
         ctxs[i].opts.fs = cfg->fs;
+        ctxs[i].opts.fcache_slots = cfg->fcache_slots;
+        ctxs[i].opts.fcache_valid_ms = cfg->fcache_valid_ms;
         ctxs[i].opts.mime = cfg->mime;
         ctxs[i].opts.static_opts = &cfg->static_opts;
         ctxs[i].opts.life = &cfg->life;

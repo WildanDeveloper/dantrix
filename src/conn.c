@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "dantrix.h"
+#include "fcache.h"
 #include "file.h"
 #include "http_range.h"
 #include "http_response.h"
@@ -356,12 +357,14 @@ void dx_conn_init(dx_conn_t *conn, int fd, const dx_http_limits_t *limits)
     conn->hold = NULL;
     conn->hold_len = 0;
     conn->file_fd = -1;
+    conn->file_cache_entry = NULL;
     conn->file_offset = 0;
     conn->file_left = 0;
     conn->body_left = 0;
     conn->requests = 0;
     conn->hdr_table = NULL;
     conn->hdr_mem = NULL;
+    conn->interest = 0;
     dx_timer_node_reset(&conn->timer);
     dx_buffer_init(&conn->buf, NULL, 0);
     /* No header table yet: it is acquired with the read buffer on first read. */
@@ -378,10 +381,18 @@ void dx_conn_release_file(dx_conn_t *conn)
     if (conn == NULL) {
         return;
     }
-    if (conn->file_fd >= 0) {
+    if (conn->file_cache_entry != NULL) {
+        /*
+         * A borrowed descriptor belongs to the open-file cache: unpin it and
+         * never close it, or the next request would sendfile() from a closed
+         * descriptor number that the kernel has already handed to someone else.
+         */
+        dx_fcache_release(conn->file_cache_entry);
+        conn->file_cache_entry = NULL;
+    } else if (conn->file_fd >= 0) {
         (void)close(conn->file_fd);
-        conn->file_fd = -1;
     }
+    conn->file_fd = -1;
     conn->file_offset = 0;
     conn->file_left = 0;
 }
@@ -501,6 +512,7 @@ void dx_conn_reset(dx_conn_t *conn)
      */
     conn->hdr_table = NULL;
     conn->hdr_mem = NULL;
+    conn->interest = 0; /* no epoll registration until the fd is added */
 
     /*
      * The streamed file belongs to the connection lifecycle and is closed by
@@ -510,6 +522,7 @@ void dx_conn_reset(dx_conn_t *conn)
      * straight back to the next connection.
      */
     conn->file_fd = -1;
+    conn->file_cache_entry = NULL;
     conn->file_offset = 0;
     conn->file_left = 0;
 
@@ -1027,6 +1040,25 @@ static int conn_finish_error(struct dx_worker *w, dx_conn_t *conn, int status,
 }
 
 /*
+ * Release a served descriptor. A borrowed one (from the open-file cache) is
+ * unpinned -- the cache owns it and hands it out again -- and an owned one is
+ * closed. Idempotent: both handles are cleared, so a double call is harmless.
+ */
+static void conn_serve_release(int *served_fd, dx_fcache_entry_t **fc)
+{
+    if (*fc != NULL) {
+        dx_fcache_release(*fc);
+        *fc = NULL;
+        *served_fd = -1;
+        return;
+    }
+    if (*served_fd >= 0) {
+        (void)close(*served_fd);
+        *served_fd = -1;
+    }
+}
+
+/*
  * Serve a static request end to end: resolve the target, open the file,
  * evaluate the conditional and Range headers, stage the response headers and
  * arm the file transfer.
@@ -1048,6 +1080,13 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
     dx_path_opts_t path_opts;
     dx_open_result_t opened;
     dx_open_t open_result;
+    /*
+     * Descriptor bookkeeping. served_fd is the file this response streams and
+     * fc is its open-file-cache entry: a non-NULL fc means the cache owns the
+     * descriptor and the connection may only unpin it, never close it.
+     */
+    int served_fd;
+    dx_fcache_entry_t *fc;
     bool keep_alive;
     const char *connection;
     size_t voff;
@@ -1065,11 +1104,40 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
         return conn_finish_error(w, conn, 404, NULL);
     }
 
-    /* 2. Open below the document root. */
-    open_result =
-        dx_fs_open(w->fs, resolved.path, resolved.had_trailing_slash, location, sizeof(location),
-                   &location_len, served_file, sizeof(served_file), &opened);
+    /* 2. Open below the document root, or reuse a cached descriptor. */
+    served_fd = -1;
+    fc = NULL;
+    memset(&opened, 0, sizeof(opened));
+    opened.fd = -1;
+    if (w->fcache != NULL && !resolved.had_trailing_slash && resolved.path[0] != '\0' &&
+        strcmp(resolved.path, ".") != 0) {
+        struct stat cached_st;
 
+        fc = dx_fcache_get(w->fcache, resolved.path, (uint64_t)dx_now_ms(), &cached_st);
+        if (fc != NULL) {
+            served_fd = fc->fd;
+            opened.fd = served_fd;
+            opened.st = cached_st;
+            open_result = DX_OPEN_OK;
+            dx_strlcpy(served_file, resolved.path, sizeof(served_file));
+        }
+    }
+    if (fc == NULL) {
+        open_result =
+            dx_fs_open(w->fs, resolved.path, resolved.had_trailing_slash, location,
+                       sizeof(location), &location_len, served_file, sizeof(served_file), &opened);
+        served_fd = opened.fd;
+        /*
+         * Cache a plain file only: when the path resolved to a directory index
+         * the served name differs from the requested one, and the next request
+         * for the directory would miss the cache anyway.
+         */
+        if (open_result == DX_OPEN_OK && w->fcache != NULL && !resolved.had_trailing_slash &&
+            strcmp(served_file, resolved.path) == 0) {
+            (void)dx_fcache_put(w->fcache, served_file, opened.fd, &opened.st,
+                                (uint64_t)dx_now_ms(), &fc);
+        }
+    }
     keep_alive =
         response_keeps_alive(w, conn, req, base, (open_result == DX_OPEN_REDIRECT) ? 301 : 200);
     connection = connection_value(keep_alive, req->minor_version);
@@ -1191,7 +1259,7 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
          * wrapped (huge) size.
          */
         if (extra_len >= sizeof(extra)) {
-            (void)close(opened.fd);
+            conn_serve_release(&served_fd, &fc);
             return conn_finish_error(w, conn, 500, NULL);
         }
 
@@ -1208,7 +1276,7 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
             access_fill(conn, req, base, 304, 0);
             len = dx_http_response_build_ex(tmp, sizeof(tmp), 304, extra, NULL, NULL, 0u, true,
                                             connection, w->static_opts.server_tokens);
-            (void)close(opened.fd);
+            conn_serve_release(&served_fd, &fc);
             return conn_finish(w, conn, consumed, tmp, len);
         }
 
@@ -1250,7 +1318,7 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
                                    (unsigned long long)size);
 
                 access_fill(conn, req, base, 416, 0);
-                (void)close(opened.fd);
+                conn_serve_release(&served_fd, &fc);
                 if (written < 0 || (size_t)written >= sizeof(extra) - extra_len) {
                     return conn_finish_error(w, conn, 500, NULL);
                 }
@@ -1274,7 +1342,7 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
                                    (unsigned long long)range.start, (unsigned long long)range.end,
                                    (unsigned long long)size);
                 if (written < 0 || (size_t)written >= sizeof(extra) - extra_len) {
-                    (void)close(opened.fd);
+                    conn_serve_release(&served_fd, &fc);
                     return conn_finish_error(w, conn, 500, NULL);
                 }
                 extra_len += (size_t)written;
@@ -1285,7 +1353,7 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
             }
             /* Same truncation guard as above: extra_len can exceed the buffer. */
             if (extra_len >= sizeof(extra)) {
-                (void)close(opened.fd);
+                conn_serve_release(&served_fd, &fc);
                 return conn_finish_error(w, conn, 500, NULL);
             }
 
@@ -1299,17 +1367,26 @@ static int conn_serve_static(struct dx_worker *w, dx_conn_t *conn, const dx_http
                                            (size_t)body_len, head, connection,
                                            w->static_opts.server_tokens);
             if (len == 0) {
-                (void)close(opened.fd);
+                conn_serve_release(&served_fd, &fc);
                 return conn_finish_error(w, conn, 500, NULL);
             }
 
             if (head) {
                 /* HEAD sends identical headers and no body. */
-                (void)close(opened.fd);
+                conn_serve_release(&served_fd, &fc);
                 return conn_finish(w, conn, consumed, tmp, len);
             }
             /* Arm the transfer; the body is streamed after the headers. */
-            conn->file_fd = opened.fd;
+            conn->file_fd = served_fd;
+            /*
+             * A non-NULL pin means the cache owns the descriptor and the
+             * connection must only unpin it -- whether it came from the cache
+             * or was just inserted into it. NULL means the connection owns the
+             * descriptor and closes it. Getting this wrong closes a cached fd
+             * and the cache later hands the stale number out.
+             */
+            conn->file_cache_entry = fc;
+            fc = NULL; /* ownership of the pin moved to the connection */
             conn->file_offset = start;
             conn->file_left = body_len;
         }
@@ -1463,6 +1540,16 @@ static int conn_after_response(struct dx_worker *w, dx_conn_t *conn)
     if (dx_conn_has_work(conn) || dx_conn_has_pending(conn)) {
         return 0; /* more to send */
     }
+    /*
+     * The body is fully out, so the file descriptor is dead weight from here on.
+     * Releasing it here -- not only in conn_close() -- is what keeps a
+     * keep-alive connection from leaking one descriptor per request: a client
+     * that asks for a thousand files on one connection used to hold a thousand
+     * descriptors open until it disconnected, which exhausts RLIMIT_NOFILE long
+     * before the connection limit is reached. For a cached descriptor this
+     * unpins it instead of closing it.
+     */
+    dx_conn_release_file(conn);
     /* The body is fully out: the scratch copy is dead weight from here on. */
     if (conn->mem_body != NULL) {
         dx_conn_release_scratch(conn);

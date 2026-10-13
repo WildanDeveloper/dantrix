@@ -12,6 +12,48 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.7.3] - 2026-10-13
+
+Fewer syscalls per request, and a descriptor leak that had been there all along.
+
+### Fixed
+
+- **A keep-alive connection leaked one file descriptor per request.** The
+  descriptor was released only when the connection closed, so a client asking
+  for a thousand files on a single connection held a thousand descriptors open
+  until it disconnected. That exhausts `RLIMIT_NOFILE` long before the
+  connection limit is reached, and it is why a low `ulimit -n` showed up as
+  requests failing after a few hundred. The descriptor is now released as soon
+  as the response body is on the wire (`conn_after_response`). Proven: 300
+  requests on one connection went from 308 open descriptors to 9.
+- Two defects in the new cache found while auditing it, before release: a
+  cached descriptor was closed by the connection that had just inserted it
+  (the cache then handed out a stale descriptor number), and `dx_fcache_put`
+  refused to fill a slot that held a different, unpinned path.
+
+### Added
+
+- **Per-worker open-file cache** (`open_file_cache`, `open_file_cache_valid`).
+  Off by default, because it trades staleness for speed: within the validity
+  window a file replaced on disk is still served from the cached descriptor.
+  When enabled it removes the `openat2()` and `fstat()` from every repeated
+  request. Direct-mapped and lock-free (one per worker), and a descriptor is
+  pinned while a transfer uses it, so it is never closed out from under a live
+  `sendfile()`.
+- **`epoll_ctl` is skipped when the interest mask does not change.** A request
+  that arrives, is answered and is sent without the socket ever blocking used
+  to issue a redundant `EPOLL_CTL_MOD` on every turn.
+
+### Performance (measured with `strace -c`, 1,000 keep-alive requests for 1 KiB)
+
+| | syscalls per request | breakdown |
+|---|---|---|
+| before | 7 | openat2, fstat, read, sendto, sendfile, epoll_ctl, epoll_wait |
+| after (cache on) | 4 | read, sendto, sendfile, epoll_wait |
+
+`openat2` and `fstat` drop from one per request to one at startup; `epoll_ctl`
+drops from one per request to two per 1,000.
+
 ## [0.7.2] - 2026-10-13
 
 The per-connection memory breakthrough: an idle keep-alive connection now costs

@@ -76,6 +76,8 @@ static const dx_key_t dx_keys[] = {
     K("sendfile", K_BOOL, sendfile, 0, 0),
     K("sendfile_chunk", K_SIZE, sendfile_chunk, 4096, 67108864),
     K("etag", K_BOOL, etag, 0, 0),
+    K("open_file_cache", K_SIZE, open_file_cache, 0, 65536),
+    K("open_file_cache_valid", K_DUR, open_file_cache_valid_ms, 0, 86400000),
     KS("mime_types", K_PATH, mime_types, 0, 0),
     KS("default_type", K_STR, default_type, 0, 0),
     KS("cache_control", K_STR, cache_control, 0, 0),
@@ -158,6 +160,8 @@ void dx_config_defaults(dx_settings_t *s)
     s->sendfile = true;
     s->sendfile_chunk = 1024u * 1024u;
     s->etag = true;
+    s->open_file_cache = 0;
+    s->open_file_cache_valid_ms = 0;
     s->mime_types[0] = '\0';
     dx_strlcpy(s->default_type, DX_DEFAULT_MIME, sizeof(s->default_type));
     s->cache_control[0] = '\0';

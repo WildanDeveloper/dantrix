@@ -62,6 +62,13 @@ typedef struct {
     bool sendfile;
     size_t sendfile_chunk;
     bool etag;
+    /*
+     * Open-file cache: number of slots and the validity window in
+     * milliseconds. Both default to 0, which disables the cache and preserves
+     * the pre-v0.7.3 behaviour (open+fstat on every request).
+     */
+    size_t open_file_cache;
+    uint64_t open_file_cache_valid_ms;
     char mime_types[DX_CFG_PATH_MAX];
     char default_type[DX_CFG_STR_MAX];
     char cache_control[DX_CFG_STR_MAX];
