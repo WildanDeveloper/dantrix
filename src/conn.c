@@ -10,6 +10,7 @@
 
 #include "dantrix.h"
 #include "fcache.h"
+#include "fdcount.h"
 #include "file.h"
 #include "http_range.h"
 #include "http_response.h"
@@ -391,6 +392,7 @@ void dx_conn_release_file(dx_conn_t *conn)
         conn->file_cache_entry = NULL;
     } else if (conn->file_fd >= 0) {
         (void)close(conn->file_fd);
+        dx_fdcount_closed(DX_FD_FILE);
     }
     conn->file_fd = -1;
     conn->file_offset = 0;
@@ -1054,6 +1056,7 @@ static void conn_serve_release(int *served_fd, dx_fcache_entry_t **fc)
     }
     if (*served_fd >= 0) {
         (void)close(*served_fd);
+        dx_fdcount_closed(DX_FD_FILE);
         *served_fd = -1;
     }
 }

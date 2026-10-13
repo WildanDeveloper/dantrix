@@ -1,3 +1,4 @@
+#include "fdcount.h"
 #include "mime.h"
 
 #include <stdio.h>

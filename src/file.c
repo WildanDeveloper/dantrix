@@ -1,5 +1,7 @@
 #include "file.h"
 
+#include "fdcount.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -231,6 +233,7 @@ dx_fs_t *dx_fs_create(const char *root, const char *index_name, bool directory_l
     if (root_fd < 0) {
         return NULL;
     }
+    dx_fdcount_opened(DX_FD_MISC); /* document root: held for the process life */
     if (fstat(root_fd, &st) != 0 || !S_ISDIR(st.st_mode)) {
         (void)close(root_fd);
         return NULL;
@@ -339,6 +342,7 @@ dx_open_t dx_fs_open(dx_fs_t *fs, const char *rel_path, bool had_trailing_slash,
                     if (S_ISREG(st.st_mode)) {
                         out->fd = index_fd;
                         out->st = st;
+                        dx_fdcount_opened(DX_FD_FILE);
                         if (served_path != NULL && served_cap > 0) {
                             (void)copy_bounded(served_path, served_cap, child);
                         }
@@ -365,6 +369,7 @@ dx_open_t dx_fs_open(dx_fs_t *fs, const char *rel_path, bool had_trailing_slash,
     }
     out->fd = fd;
     out->st = st;
+    dx_fdcount_opened(DX_FD_FILE);
     if (served_path != NULL && served_cap > 0) {
         (void)copy_bounded(served_path, served_cap, rel_path);
     }

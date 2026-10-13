@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "dantrix.h"
+#include "fdcount.h"
 
 struct dx_fcache {
     dx_fcache_entry_t *entries;
@@ -75,6 +76,7 @@ void dx_fcache_destroy(dx_fcache_t *c)
              * costs nothing and makes the invariant explicit. */
             if (c->entries[i].fd >= 0 && c->entries[i].refs == 0u) {
                 (void)close(c->entries[i].fd);
+                dx_fdcount_closed(DX_FD_CACHE);
             }
         }
         free(c->entries);
@@ -108,6 +110,7 @@ dx_fcache_entry_t *dx_fcache_get(dx_fcache_t *c, const char *path, uint64_t now_
          */
         if (e->refs == 0u) {
             (void)close(e->fd);
+            dx_fdcount_closed(DX_FD_CACHE);
             e->fd = -1;
         }
         return NULL;
@@ -139,6 +142,7 @@ bool dx_fcache_put(dx_fcache_t *c, const char *path, int fd, const struct stat *
      */
     if (slot_is_fresh_hit(e, path, len, now_ms)) {
         (void)close(fd);
+        dx_fdcount_closed(DX_FD_FILE); /* the caller opened it; it is redundant */
         e->refs++;
         *out_entry = e;
         return true;
@@ -153,7 +157,12 @@ bool dx_fcache_put(dx_fcache_t *c, const char *path, int fd, const struct stat *
             return false;
         }
         (void)close(e->fd);
+        dx_fdcount_closed(DX_FD_CACHE);
     }
+    /* Ownership of the caller's descriptor (counted as a served file) moves to
+     * the cache: reclassify it so the believed total stays correct. */
+    dx_fdcount_closed(DX_FD_FILE);
+    dx_fdcount_opened(DX_FD_CACHE);
     e->fd = fd;
     e->st = *st;
     e->expires_ms = now_ms + c->valid_ms;

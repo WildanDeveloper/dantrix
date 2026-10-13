@@ -12,6 +12,33 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.0] - 2026-10-13
+
+Hardening, and the first step of it: the server can now see its own descriptors.
+
+### Added
+
+- **Runtime descriptor accounting** (`src/fdcount.c`). Every descriptor the
+  server opens is counted under a tag (`conn`, `file`, `cache`, `listen`,
+  `epoll`, `wakeup`, `log`, `misc`), and every close decrements it. Two views
+  of the truth:
+  - `fds_believed` -- what the server's accounting says is open;
+  - `fds_actual` -- what the kernel reports in `/proc/self/fd`.
+  Both are exposed in the `/status` JSON as a `descriptors` object. Their
+  difference is a constant set of process-wide descriptors, so **if the gap
+  grows, descriptors are leaking**.
+- Proven on the exact bug class it targets: injecting an untracked
+  `open("/dev/null")` into the serving path makes the gap grow 205 -> 405, and
+  the regression test fails. Reverting the fix for the v0.7.3 descriptor leak
+  makes the absolute-count test fail (9 -> 308). The two checks are
+  complementary: one catches descriptors the accounting never saw, the other
+  catches tracked ones that are never released.
+
+### Changed
+
+- The status endpoint JSON gained a `descriptors` object. Nothing else about
+  the format changed.
+
 ## [0.7.3] - 2026-10-13
 
 Fewer syscalls per request, and a descriptor leak that had been there all along.

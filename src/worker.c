@@ -14,6 +14,7 @@
 
 #include "dantrix.h"
 #include "fcache.h"
+#include "fdcount.h"
 #include "http_response.h"
 #include "net.h"
 #include "status.h"
@@ -128,6 +129,9 @@ int dx_worker_init(dx_worker_t *w, const dx_worker_opts_t *opts)
     }
 
     w->epfd = epoll_create1(EPOLL_CLOEXEC);
+    if (w->epfd >= 0) {
+        dx_fdcount_opened(DX_FD_EPOLL);
+    }
     if (w->epfd < 0) {
         return -1;
     }
@@ -252,6 +256,7 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
     mem = (unsigned char *)dx_bufpool_acquire(w->bufs, DX_CONN_BUF_SIZE);
     if (mem == NULL) {
         (void)close(fd);
+        dx_fdcount_closed(DX_FD_CONN);
         dx_log_write(w->log, DX_LOG_WARN,
                      "connection rejected: read buffer pool exhausted "
                      "(%zu buffers in use)",
@@ -263,6 +268,7 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
     if (conn == NULL) {
         (void)dx_bufpool_release(w->bufs, mem);
         (void)close(fd);
+        dx_fdcount_closed(DX_FD_CONN);
         dx_log_write(w->log, DX_LOG_WARN, "connection rejected: limit of %zu connections reached",
                      w->max_conns);
         return -1;
@@ -289,6 +295,7 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
          */
         dx_timer_wheel_cancel(w->timers, &conn->timer);
         (void)close(fd);
+        dx_fdcount_closed(DX_FD_CONN);
         /* Buffer first: the slot must be given back while it still knows
          * whether its memory came from the pool. */
         (void)dx_bufpool_release(w->bufs, mem);
@@ -356,6 +363,7 @@ static void conn_close(dx_worker_t *w, dx_conn_t *conn)
     }
     if (fd >= 0) {
         (void)close(fd);
+        dx_fdcount_closed(DX_FD_CONN);
     }
 
     /* Any request that never reached a normal response is logged here. */
@@ -503,6 +511,7 @@ static void accept_loop(dx_worker_t *w)
                      SOCK_NONBLOCK | SOCK_CLOEXEC);
 
         if (fd >= 0) {
+            dx_fdcount_opened(DX_FD_CONN);
             if (conn_open(w, fd, &peer) != 0) {
                 /*
                  * conn_open consumed the descriptor on every failure path, so

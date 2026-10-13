@@ -1,5 +1,7 @@
 #include "status.h"
 
+#include "fdcount.h"
+
 #include <stdio.h>
 
 void dx_status_init(dx_status_t *st)
@@ -126,8 +128,8 @@ size_t dx_status_json(const dx_status_t *st, char *out, size_t cap, const char *
                  "    \"4xx\": %llu,\n"
                  "    \"5xx\": %llu\n"
                  "  },\n"
-                 "  \"bytes_sent_total\": %llu\n"
-                 "}\n",
+                 "  \"bytes_sent_total\": %llu,\n"
+                 "  \"descriptors\": {",
                  (version != NULL) ? version : "", (unsigned long long)uptime_seconds, workers,
                  (unsigned long long)active, (unsigned long long)accepted,
                  (unsigned long long)rejected, (unsigned long long)requests, (unsigned long long)r2,
@@ -136,5 +138,23 @@ size_t dx_status_json(const dx_status_t *st, char *out, size_t cap, const char *
     if (n < 0 || (size_t)n >= cap) {
         return 0;
     }
-    return (size_t)n;
+    {
+        size_t used = (size_t)n;
+        size_t wrote = dx_fdcount_json(out + used, cap - used);
+
+        if (wrote == 0u) {
+            return 0;
+        }
+        used += wrote;
+        /* Close the descriptors object, then the document. */
+        if (used + 3u >= cap) {
+            return 0;
+        }
+        out[used++] = '}';
+        out[used++] = '\n';
+        out[used++] = '}';
+        out[used++] = '\n';
+        out[used] = '\0';
+        return used;
+    }
 }

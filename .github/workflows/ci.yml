@@ -60,7 +60,7 @@ jobs:
           # The list is checked against the Makefile's wildcard so a newly
           # added unit test cannot silently miss this job.
           expected=$(ls tests/unit/test_*.c | sed 's#.*/test_##; s#\.c$##' | sort | tr '\n' ' ')
-          got="buffer config fcache file http_parser http_range http_response log mime net path pool process status timer util"
+          got="buffer config fcache fdcount file http_parser http_range http_response log mime net path pool process status timer util"
           if [ "$expected" != "$got " ]; then
             echo "::error::ASan unit-test list out of date. Expected: $expected"
             exit 1
@@ -70,7 +70,7 @@ jobs:
                 -O1 -g -fsanitize=address,undefined \
                 -fno-sanitize-recover=undefined \
                 -Isrc -Itests/unit tests/unit/test_$t.c src/buffer.c \
-                src/config.c src/conn.c src/fcache.c src/file.c src/http_parser.c src/http_range.c \
+                src/config.c src/conn.c src/fcache.c src/fdcount.c src/file.c src/http_parser.c src/http_range.c \
                 src/http_response.c src/log.c src/mime.c src/net.c \
                 src/path.c src/process.c src/server.c src/status.c src/timer.c \
                 src/util.c src/worker.c \

@@ -1,5 +1,7 @@
 #include "net.h"
 
+#include "fdcount.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -194,10 +196,15 @@ static int dx_listen_tcp_common(const char *addr, int port, int backlog, bool re
     if (listen(fd, backlog) != 0) {
         goto fail;
     }
+    dx_fdcount_opened(DX_FD_LISTEN);
     return fd;
 
 fail: {
     int saved = errno;
+    /*
+     * The socket was created but never counted: it only becomes a "listener"
+     * once listen() succeeds. Closing it here is therefore not a tracked close.
+     */
     (void)close(fd);
     errno = saved;
     return -1;

@@ -13,6 +13,7 @@ These cover defects that a single shared server cannot demonstrate:
 Usage: python3 tests/regression_test.py [path-to-binary]
 """
 
+import json
 import os
 import re
 import shutil
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "bin/dantrix"
 PORT = int(os.environ.get("DANTRIX_TEST_PORT", "18101"))
@@ -1034,6 +1036,75 @@ def test_v073_fd_leak_and_file_cache():
             proc.kill()
 
 
+def test_v080_fd_invariant():
+    """v0.8.0: the descriptor accounting must stay balanced.
+
+    fds_actual (what the kernel reports) minus fds_believed (the server's own
+    open/close accounting) is a constant set of untracked process-wide
+    descriptors. If that gap grows, descriptors are leaking outside the tracked
+    paths -- which is exactly the bug v0.7.3 fixed.
+    """
+    print("regression: v0.8.0 fd accounting invariant")
+
+    port = PORT + 55
+    proc = subprocess.Popen([BIN, "-b", "127.0.0.1", "-p", str(port), "-r", ROOT, "-w", "2",
+                             "--access-log", "off", "--error-log", "/dev/null",
+                             "--status-path", "/status",
+                             "-o", "open_file_cache=4", "-o", "open_file_cache_valid=60s"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("fd invariant: server started", False)
+            return
+
+        def gap():
+            """Return (actual - believed) and believed."""
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/status", timeout=5) as resp:
+                des = json.load(resp)["descriptors"]
+            return des["fds_actual"] - des["fds_believed"], des["fds_believed"]
+
+        baseline = None
+        baseline_believed = None
+        ok = True
+        detail = ""
+        for i in range(8):
+            s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            try:
+                for _ in range(200):
+                    s.sendall(b"GET /f HTTP/1.1\r\nHost: x\r\n\r\n")
+                    buf = b""
+                    while b"\r\n\r\n" not in buf:
+                        buf += s.recv(65536)
+                    head, _, rest = buf.partition(b"\r\n\r\n")
+                    length = 0
+                    for line in head.split(b"\r\n"):
+                        if line.lower().startswith(b"content-length:"):
+                            length = int(line.split(b":", 1)[1])
+                    while len(rest) < length:
+                        rest += s.recv(65536)
+            finally:
+                s.close()
+            cur, believed = gap()
+            if baseline is None:
+                baseline = cur
+                baseline_believed = believed
+            if cur != baseline:
+                ok = False
+                detail = f"gap {baseline} -> {cur} after {(i + 1) * 200} requests"
+                break
+        check(f"fd invariant: gap stays {baseline} across 1600 requests", ok, detail)
+        # believed may grow to the cache size (4) and stay there; it must not
+        # grow with the request count.
+        check("fd invariant: believed count does not grow with requests",
+              believed <= baseline_believed + 6, f"{baseline_believed} -> {believed}")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def main():
     if not os.path.exists(BIN):
         print(f"  [FAIL] binary {BIN} not found - build it first "
@@ -1065,6 +1136,8 @@ def main():
     test_v071_header_table_pooling()
     print("regression: v0.7.3 fd leak + open-file cache")
     test_v073_fd_leak_and_file_cache()
+    print("regression: v0.8.0 fd accounting invariant")
+    test_v080_fd_invariant()
 
     print()
     if failures:

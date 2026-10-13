@@ -127,6 +127,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Listener tuning, fd auto-tune, host pre-flight | ✅ | v0.7.1 |
 | Pooled header table: ~1 KiB per idle connection | ✅ | v0.7.2 |
 | Fewer syscalls per request; fd-leak fix; open-file cache | ✅ | v0.7.3 |
+| Runtime descriptor accounting (leak detection) | ✅ | v0.8.0 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
 
@@ -972,9 +973,22 @@ If `status_path` is set, Dantrix serves JSON metrics at that path, **only for cl
   "connections": { "active": 10231, "accepted_total": 1840211, "rejected_total": 0 },
   "requests_total": 9120044,
   "responses": { "2xx": 9100000, "3xx": 18000, "4xx": 2000, "5xx": 44 },
-  "bytes_sent_total": 123456789012
+  "bytes_sent_total": 123456789012,
+  "descriptors": {
+    "fds_believed": 1043,
+    "fds_actual": 1048,
+    "fds_by_kind": { "conn": 1024, "file": 0, "cache": 8, "listen": 4, "epoll": 4, "wakeup": 5, "log": 1, "misc": 1 }
+  }
 }
 ```
+
+> [!NOTE]
+> `fds_believed` is what the server's own open/close accounting says is open;
+> `fds_actual` is what the kernel reports. Their difference is a constant set
+> of process-wide descriptors (the standard streams, the working directory, the
+> descriptor used to enumerate `/proc/self/fd`). **If that difference grows
+> under load, descriptors are leaking** -- which is how a descriptor leak that
+> no functional test caught is now visible from outside.
 
 ---
 
@@ -2289,6 +2303,8 @@ Each release has a single capability as its theme. A checked box marks completed
 
 ### v0.8.0: Hardening
 
+- [x] Runtime descriptor accounting: `fds_believed` vs `fds_actual`, exposed in
+      the status endpoint, so a descriptor leak is visible and testable
 - [ ] Long-running fuzzing (≥ 24 hours) on all targets
 - [ ] ASan, UBSan, and TSan as mandatory parts of CI
 - [ ] `max_conns_per_ip`, `seccomp-bpf`, and optional `chroot`

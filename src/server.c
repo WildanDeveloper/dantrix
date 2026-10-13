@@ -10,6 +10,7 @@
 
 #include "dantrix.h"
 #include "fcache.h"
+#include "fdcount.h"
 #include "net.h"
 #include "process.h"
 #include "status.h"
@@ -48,6 +49,7 @@ static FILE *open_dest(const char *dest)
     f = fopen(dest, "a");
     if (f != NULL) {
         setvbuf(f, NULL, _IOLBF, 0);
+        dx_fdcount_opened(DX_FD_LOG);
     }
     return f;
 }
@@ -57,6 +59,7 @@ static void close_dest(FILE *f)
 {
     if (f != NULL && f != stdout && f != stderr) {
         (void)fclose(f);
+        dx_fdcount_closed(DX_FD_LOG);
     }
 }
 
@@ -218,6 +221,9 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
         return -1;
     }
     sig_fd = dx_signalfd_create(&mask, false);
+    if (sig_fd >= 0) {
+        dx_fdcount_opened(DX_FD_WAKEUP);
+    }
     if (sig_fd < 0) {
         dx_log_write(&logs->log, DX_LOG_ERROR, "signalfd: %s", dx_strerror(errno));
         return -1;
@@ -229,6 +235,8 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
         dx_log_write(&logs->log, DX_LOG_ERROR, "cannot listen on %s:%d: %s", cfg->bind_addr,
                      cfg->port, dx_strerror(errno));
         (void)close(sig_fd);
+        dx_fdcount_closed(DX_FD_WAKEUP);
+        dx_fdcount_closed(DX_FD_WAKEUP);
         return -1;
     }
     warn_refused_tuning(&logs->log, &refused);
@@ -274,6 +282,8 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
         dx_log_write(&logs->log, DX_LOG_ERROR, "worker init failed: %s", dx_strerror(errno));
         dx_worker_destroy(&worker);
         (void)close(sig_fd);
+        dx_fdcount_closed(DX_FD_WAKEUP);
+        dx_fdcount_closed(DX_FD_WAKEUP);
         pthread_mutex_destroy(&reload.mu);
         return -1;
     }
@@ -298,6 +308,8 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
 
     dx_worker_destroy(&worker);
     (void)close(sig_fd);
+    dx_fdcount_closed(DX_FD_WAKEUP);
+    dx_fdcount_closed(DX_FD_WAKEUP);
     pthread_mutex_destroy(&reload.mu);
     return rc;
 }
@@ -387,6 +399,7 @@ static int setup_listeners(const dx_server_config_t *cfg, dx_logs_t *logs, dx_wo
             while (i > 0) {
                 i--;
                 (void)close(ctxs[i].listen_fd);
+                dx_fdcount_closed(DX_FD_LISTEN);
                 ctxs[i].listen_fd = -1;
             }
             dx_log_write(&logs->log, DX_LOG_WARN,
@@ -494,6 +507,9 @@ static int server_run_multi(const dx_server_config_t *cfg, dx_logs_t *logs, int 
         goto out;
     }
     sig_fd = dx_signalfd_create(&mask, true);
+    if (sig_fd >= 0) {
+        dx_fdcount_opened(DX_FD_WAKEUP);
+    }
     if (sig_fd < 0) {
         dx_log_write(&logs->log, DX_LOG_ERROR, "signalfd: %s", dx_strerror(errno));
         goto out;
@@ -520,6 +536,7 @@ static int server_run_multi(const dx_server_config_t *cfg, dx_logs_t *logs, int 
             dx_log_write(&logs->log, DX_LOG_ERROR, "eventfd: %s", dx_strerror(errno));
             goto out;
         }
+        dx_fdcount_opened(DX_FD_WAKEUP);
         ctxs[i].ctl_fd = wfd;
         ctxs[i].opts.ctl_fd = wfd;
         ctxs[i].opts.ctl_is_signal = false;
@@ -674,22 +691,27 @@ out:
         for (i = 0; i < count; i++) {
             if (ctxs[i].listen_fd >= 0) {
                 (void)close(ctxs[i].listen_fd);
+                dx_fdcount_closed(DX_FD_LISTEN);
                 ctxs[i].listen_fd = -1;
             }
         }
     }
     if (shared_fd >= 0) {
         (void)close(shared_fd);
+        dx_fdcount_closed(DX_FD_LISTEN);
     }
     if (ctxs != NULL) {
         for (i = 0; i < count; i++) {
             if (ctxs[i].ctl_fd >= 0) {
                 (void)close(ctxs[i].ctl_fd);
+                dx_fdcount_closed(DX_FD_WAKEUP);
             }
         }
     }
     if (sig_fd >= 0) {
         (void)close(sig_fd);
+        dx_fdcount_closed(DX_FD_WAKEUP);
+        dx_fdcount_closed(DX_FD_WAKEUP);
     }
     pthread_mutex_destroy(&reload.mu);
     free(threads);
