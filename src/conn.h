@@ -37,6 +37,16 @@ struct dx_worker; /* defined in worker.h */
 #define DX_RESPONSE_TMP 2048u
 
 /*
+ * Bytes reserved in the staging buffer for the parts of a response that are not
+ * the configured add_header entries: the status line, the fixed headers
+ * (Server, Date, Content-Type, ETag, Last-Modified, Cache-Control, nosniff) and
+ * the per-response ones (Location, Content-Range, Allow). Measured at 271 bytes
+ * for a full response; 512 leaves room for the longest status line and the
+ * largest per-response header, and is what the add_header validation subtracts.
+ */
+#define DX_RESPONSE_HEADROOM 512u
+
+/*
  * What the access logger needs about the request that was served. Strings are
  * bounded copies of client input; escaping happens at log write time.
  */

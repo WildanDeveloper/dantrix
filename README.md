@@ -879,7 +879,7 @@ daemonize = false
 | `default_type` | string | `application/octet-stream` | yes | MIME type for unknown extensions |
 | `cache_control` | string | empty | yes | `Cache-Control` header value (not sent if empty) |
 | `server_tokens` | bool | `true` | yes | `true`: `Server: Dantrix/x.y.z`. `false`: `Server: Dantrix` |
-| `add_header` | string | empty | yes | Additional response header `Name: value`. May be repeated |
+| `add_header` | string | empty | yes | Additional response header `Name: value`. May be repeated (up to 16). Rejected: a name the server already owns, and any CR or LF |
 
 ### Per-IP connection limit: what it does and does not guarantee
 
@@ -986,7 +986,7 @@ as a warning and the server continues without the sandbox.
 - On `SIGHUP`, keys marked **Reload = yes** are applied to new requests or connections. Keys marked **no** require a restart; changes to them are ignored with a warning in the error log.
 
 > [!IMPORTANT]
-> Since v0.7.1 every key above is **applied**. The listener tunables
+> Since v0.8.10 every key above is **applied**. The listener tunables
 > (`tcp_defer_accept`, `tcp_fastopen`, `socket_rcvbuf`, `socket_sndbuf`) are set
 > on the listening socket before `listen()`; an option the kernel refuses is
 > reported as a warning and the server keeps running without it. The two keys

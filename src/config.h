@@ -161,6 +161,13 @@ int dx_config_check_root(const dx_settings_t *s, FILE *msg);
 /* Print the effective configuration in key = value form. */
 void dx_config_print(const dx_settings_t *s, FILE *out);
 
+/*
+ * True when value is a usable response header: "Name: value" with a non-empty
+ * token name, and no CR, LF or NUL anywhere. Used to validate add_header, whose
+ * value is written into a response verbatim.
+ */
+bool dx_header_value_valid(const char *value);
+
 /* Number of keys in the registry (including add_header). */
 size_t dx_config_key_count(void);
 

@@ -12,6 +12,7 @@
 #include "fcache.h"
 #include "connlimit.h"
 #include "fdcount.h"
+#include "http_response.h"
 #include "net.h"
 #include "process.h"
 #include "seccomp.h"
@@ -737,6 +738,16 @@ int dx_server_run(const dx_server_config_t *cfg)
     bool wrote_pid = false;
 
     dx_status_init(&status);
+    /*
+     * Point the response renderer at the operator's extra headers, once, before
+     * any worker exists. Doing it here rather than threading a parameter through
+     * every render call is what makes it impossible for a response path to
+     * forget them.
+     */
+    if (cfg != NULL) {
+        dx_http_response_set_extra_headers(cfg->static_opts.add_header,
+                                           cfg->static_opts.add_header_count);
+    }
     /*
      * One table for the whole server, shared by every worker: the limit has to
      * count the client, not one worker's share of it. NULL when the feature is

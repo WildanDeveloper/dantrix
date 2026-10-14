@@ -12,9 +12,23 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "config.h"
 #include "http_parser.h"
 
 /* Human readable reason phrase for the statuses Dantrix emits. Never NULL. */
+/*
+ * Configure the headers added to EVERY response (the `add_header` option).
+ *
+ * Called once, before any worker thread exists: the pointer and count are stored
+ * and read afterwards, so there is no synchronisation to get wrong. Passing NULL
+ * or count 0 disables the feature, which is also what the unit tests and the
+ * fuzzers get by default.
+ *
+ * Doing it here rather than as a parameter of every render call means a response
+ * path added later cannot forget it: all of them go through response_assemble().
+ */
+void dx_http_response_set_extra_headers(char (*headers)[DX_CFG_STR_MAX], size_t count);
+
 const char *dx_http_status_reason(int status);
 
 /*

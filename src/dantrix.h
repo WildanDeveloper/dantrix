@@ -10,8 +10,8 @@
 /* Version. Keep in sync with CHANGELOG.md and the README status table. */
 #define DX_VERSION_MAJOR 0
 #define DX_VERSION_MINOR 8
-#define DX_VERSION_PATCH 9
-#define DX_VERSION_STRING "0.8.9"
+#define DX_VERSION_PATCH 10
+#define DX_VERSION_STRING "0.8.10"
 #define DX_PROGRAM_NAME "Dantrix"
 
 /*

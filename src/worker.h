@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "buffer.h"
+#include "config.h"
 #include "connlimit.h"
 #include "conn.h"
 #include "dantrix.h"
@@ -29,6 +30,13 @@ typedef struct {
     bool server_tokens;        /* "Server: Dantrix/x.y.z" when true */
     bool hidden_files;         /* serve dot segments when true */
     const char *cache_control; /* Cache-Control value, "" to omit */
+    /*
+     * Extra response headers to add to every response, as "Name: value" strings
+     * without the CRLF. Borrowed from the configuration, which owns the storage;
+     * add_header_count == 0 disables the feature.
+     */
+    char (*add_header)[DX_CFG_STR_MAX];
+    size_t add_header_count;
 } dx_static_opts_t;
 
 /* Connection lifecycle options (v0.4), durations in milliseconds. */

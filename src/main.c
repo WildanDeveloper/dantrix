@@ -748,10 +748,6 @@ int main(int argc, char **argv)
     if (set.edge_triggered) {
         fprintf(stderr, "dantrix: edge_triggered is not implemented yet (planned for v0.7)\n");
     }
-    if (set.add_header_count > 0) {
-        fprintf(stderr, "dantrix: add_header is not implemented yet (%zu header(s) ignored)\n",
-                set.add_header_count);
-    }
 
     /*
      * A relative pid_file would be written under / after the daemon
@@ -899,6 +895,8 @@ int main(int argc, char **argv)
     cfg.static_opts.server_tokens = set.server_tokens;
     cfg.static_opts.hidden_files = set.hidden_files;
     cfg.static_opts.cache_control = set.cache_control;
+    cfg.static_opts.add_header = set.add_header;
+    cfg.static_opts.add_header_count = set.add_header_count;
     cfg.life.keepalive_requests = set.keepalive_requests;
     cfg.life.header_timeout_ms = set.header_timeout_ms;
     cfg.life.body_timeout_ms = set.body_timeout_ms;

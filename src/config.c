@@ -1,3 +1,4 @@
+#include "conn.h"
 #include "config.h"
 
 #include <ctype.h>
@@ -6,6 +7,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -194,6 +196,44 @@ void dx_config_defaults(dx_settings_t *s)
 
 /* ------------------------------- parsing ------------------------------- */
 
+/*
+ * A response header the operator configured: "Name: value".
+ *
+ * Rejected: an empty value, no colon, an empty name, whitespace inside the name,
+ * and any CR, LF or NUL. The last is the security-relevant one -- a configured
+ * header is written into the response verbatim, so a CRLF there would let the
+ * configuration split a response, the same class of bug the request parser
+ * refuses on the input side.
+ */
+bool dx_header_value_valid(const char *value)
+{
+    const char *colon;
+
+    if (value == NULL || value[0] == '\0') {
+        return false;
+    }
+    colon = strchr(value, ':');
+    if (colon == NULL || colon == value) {
+        return false; /* not "Name: value", or an empty name */
+    }
+    for (const char *p = value; *p != '\0'; p++) {
+        unsigned char c = (unsigned char)*p;
+
+        if (c == '\r' || c == '\n' || c == '\0') {
+            return false;
+        }
+    }
+    /* The name is a token: no spaces or tabs before the colon. */
+    for (const char *p = value; p < colon; p++) {
+        unsigned char c = (unsigned char)*p;
+
+        if (c == ' ' || c == '\t') {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool parse_bool(const char *v, bool *out)
 {
     if (strcmp(v, "true") == 0 || strcmp(v, "yes") == 0 || strcmp(v, "on") == 0 ||
@@ -356,6 +396,17 @@ static int apply_value(dx_settings_t *s, const dx_key_t *key, const char *value,
         if (s->add_header_count >= DX_CFG_MAX_ADD_HEADERS) {
             fprintf(msg, "dantrix: %s: at most %u add_header entries\n", src,
                     (unsigned)DX_CFG_MAX_ADD_HEADERS);
+            return -1;
+        }
+        /*
+         * The value goes into a response header verbatim, so it is validated
+         * here rather than trusted: a CR or LF in the configuration would split
+         * the response, which is the exact attack the parser rejects on the
+         * request side. The shape must also be "Name: value", because a value
+         * without a colon is not a header and would be emitted as a stray line.
+         */
+        if (!dx_header_value_valid(value)) {
+            fprintf(msg, "dantrix: %s: add_header must be 'Name: value' with no CR or LF\n", src);
             return -1;
         }
         if (dx_strlcpy(s->add_header[s->add_header_count], value, DX_CFG_STR_MAX) >=
@@ -608,6 +659,72 @@ int dx_config_validate(const dx_settings_t *s, FILE *msg)
     if (s->sendfile_chunk < 4096u) {
         fprintf(msg, "dantrix: sendfile_chunk must be at least 4096\n");
         return -1;
+    }
+    /*
+     * The configured extra headers are written into the same staging buffer as
+     * the rest of the response, so their total size is a hard limit, not a
+     * preference: a configuration whose headers cannot fit makes every response
+     * fail with 500. Checked here so it is a start-up error with the numbers
+     * named, rather than a server that accepts the config and then serves
+     * nothing. Measured: 14 headers of 250 bytes each (3,500 bytes) already
+     * exceeds the 2 KiB staging buffer.
+     */
+    {
+        size_t total = 0;
+
+        for (size_t i = 0; i < s->add_header_count; i++) {
+            total += strlen(s->add_header[i]) + 2u; /* + CRLF */
+        }
+        /*
+         * Two groups of names are handled differently, because the right answer
+         * is not the same for both.
+         *
+         * Framing headers are REFUSED: Content-Length and Connection decide how
+         * a message is delimited, and letting an operator override them from a
+         * config file would create a request-smuggling primitive in front of a
+         * proxy. Those are the server's to own.
+         *
+         * Headers the server already sends for its own reasons (Server, Date,
+         * X-Content-Type-Options) are a WARNING: sending them twice is legal and
+         * harmless, and an operator who copies a standard security-header set
+         * into the config should not have the server refuse to start. The
+         * warning names the header so it can be dropped.
+         */
+        for (size_t i = 0; i < s->add_header_count; i++) {
+            size_t name_len = strcspn(s->add_header[i], ":");
+            static const char *const forbidden[] = {"Content-Length", "Connection",
+                                                    "Transfer-Encoding"};
+            static const char *const duplicated[] = {"Server", "Date", "Keep-Alive",
+                                                     "X-Content-Type-Options"};
+
+            for (size_t k = 0; k < sizeof(forbidden) / sizeof(forbidden[0]); k++) {
+                if (strlen(forbidden[k]) == name_len &&
+                    strncasecmp(s->add_header[i], forbidden[k], name_len) == 0) {
+                    fprintf(msg,
+                            "dantrix: add_header must not set '%s': it decides how the message "
+                            "is framed\n",
+                            forbidden[k]);
+                    return -1;
+                }
+            }
+            for (size_t k = 0; k < sizeof(duplicated) / sizeof(duplicated[0]); k++) {
+                if (strlen(duplicated[k]) == name_len &&
+                    strncasecmp(s->add_header[i], duplicated[k], name_len) == 0) {
+                    fprintf(msg,
+                            "dantrix: warning: add_header '%s' is already sent by the server; "
+                            "it will appear twice\n",
+                            duplicated[k]);
+                }
+            }
+        }
+        if (total + DX_RESPONSE_HEADROOM > DX_RESPONSE_TMP) {
+            fprintf(msg,
+                    "dantrix: add_header total is %zu bytes but the response buffer holds %u "
+                    "(with %u reserved for the status line and the fixed headers); "
+                    "use fewer or shorter headers\n",
+                    total, (unsigned)DX_RESPONSE_TMP, (unsigned)DX_RESPONSE_HEADROOM);
+            return -1;
+        }
     }
     return 0;
 }

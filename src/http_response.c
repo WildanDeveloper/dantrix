@@ -106,6 +106,21 @@ const char *dx_http_status_reason(int status)
  * headers in this buffer; when false, content_length describes a body that is
  * streamed afterwards (sendfile) and nothing is appended.
  */
+/*
+ * Headers added to every response, configured once before the workers start (see
+ * dx_http_response_set_extra_headers). Kept here rather than threaded through
+ * every call site so a new response path cannot forget them: they are emitted in
+ * response_assemble(), which every path goes through.
+ */
+static char (*g_add_header)[DX_CFG_STR_MAX];
+static size_t g_add_header_count;
+
+void dx_http_response_set_extra_headers(char (*headers)[DX_CFG_STR_MAX], size_t count)
+{
+    g_add_header = headers;
+    g_add_header_count = (headers != NULL) ? count : 0u;
+}
+
 static size_t response_assemble(char *out, size_t cap, int status, const char *extra_headers,
                                 const char *content_type, const char *body, size_t content_length,
                                 bool omit_body, bool body_present, const char *connection,
@@ -172,6 +187,17 @@ static size_t response_assemble(char *out, size_t cap, int status, const char *e
 
     if (extra_headers != NULL) {
         sb_append_str(&sb, extra_headers);
+    }
+    /* The operator's configured headers, on every response. Validated at
+     * start-up, so they are emitted verbatim; a CR or LF here would split the
+     * response, which is why the configuration refuses one. */
+    for (size_t i = 0; i < g_add_header_count; i++) {
+        const char *h = g_add_header[i];
+
+        if (h != NULL && h[0] != '\0') {
+            sb_append_str(&sb, h);
+            sb_append_str(&sb, "\r\n");
+        }
     }
     sb_append_str(&sb, "\r\n");
 

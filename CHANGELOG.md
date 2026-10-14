@@ -12,6 +12,66 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.10] - 2026-10-14
+
+`add_header` implemented (it was accepted and ignored), and CONTRIBUTING.md.
+
+### Added
+
+- **`add_header` now works.** It was accepted by the configuration, printed by
+  `--print-config` and then **silently ignored** -- the only key in the registry
+  with no effect, announced by a start-up warning that most operators would never
+  read. It is emitted on every response now, on all eight response paths
+  (200/206/301/304/400/404/405/416/501 and the JSON status endpoint), verified by
+  a test that counts occurrences per path.
+- **`CONTRIBUTING.md`**: setup, the gate a change must pass, and the rules this
+  project actually cares about -- a test that can fail, a comment that explains
+  why, and honesty about what was measured.
+
+### Fixed
+
+- **A configured `add_header` could inject a response header.** The value was
+  written into the response verbatim and never validated, so a CR or LF in the
+  configuration split the response -- the same attack the request parser refuses
+  on the input side, reachable through a config file instead of a request.
+  `dx_header_value_valid()` now rejects CR, LF, NUL, a missing colon, an empty
+  name and whitespace in the name, and the shape must be `Name: value`.
+- **A valid configuration could make every response fail.** The staging buffer
+  is 2 KiB; fourteen headers of 250 bytes are 3,500 bytes, and the configuration
+  accepted that and then answered 500 to everything. Measured: the server
+  returned an empty response for a config it had just accepted. The total is now
+  checked at start-up against the buffer minus a 512-byte reserve for the status
+  line and the fixed headers (measured at 178 bytes for a full response), and the
+  error names both numbers.
+- **Framing headers are refused rather than warned about.** `Content-Length` and
+  `Connection` in the configuration would let a config file create a
+  request-smuggling primitive in front of a proxy, so they are a start-up error.
+  Headers the server already sends for its own reasons (`Server`, `Date`,
+  `X-Content-Type-Options`) are a warning: sending them twice is legal, and an
+  operator who copies a standard security-header set into the config should not
+  have the server refuse to start.
+- The first implementation emitted the configured headers **twice** on error
+  responses, because they were added in two places at once. They are added in
+  `response_assemble()` alone, which every response path goes through, so a path
+  added later cannot forget them and cannot double them either.
+
+### Tests
+
+- `test_add_header` (29 checks): validation, emission exactly once on success and
+  error responses, coexistence with the caller's own headers, and a configuration
+  that just fits the buffer still rendering completely.
+- A security test writes a real CRLF into a config file and asserts the server
+  refuses to start, and asserts a realistic security-header set reaches both a
+  200 and a 404 exactly once each.
+
+### Notes
+
+- Three assertions in the new tests were wrong before they were right: a trailing
+  newline expectation on a response that ends with a body, a "worst case fits"
+  check that contradicted the limit the validation enforces, and a CRLF test file
+  that contained the two characters `\r\n` literally instead of the bytes. Each
+  was fixed by measuring the real behaviour.
+
 ## [0.8.9] - 2026-10-14
 
 Re-measured with `wrk`: the syscall work finally has a number.

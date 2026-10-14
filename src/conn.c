@@ -1078,6 +1078,9 @@ static int conn_finish_error(struct dx_worker *w, dx_conn_t *conn, int status,
                              const char *extra_headers)
 {
     char tmp[DX_RESPONSE_TMP];
+    /* The operator's add_header entries are added inside response_assemble(), so
+     * they are not merged here: doing both emitted every configured header twice
+     * on error responses. */
     size_t len = dx_http_response_error_ex(tmp, sizeof(tmp), status, extra_headers, "close",
                                            w->static_opts.server_tokens);
 

@@ -159,6 +159,74 @@ def test_path_traversal(secret_path):
             proc.kill()
 
 
+def test_add_header_cannot_split_a_response():
+    """Claim: a configured response header cannot inject another header.
+
+    `add_header` is written into the response verbatim, so a CR or LF in the
+    configuration would split it -- the same attack the request parser refuses on
+    the input side. The configuration must reject that at start-up, because a
+    value that reaches the renderer has already been trusted.
+    """
+    print("security: add_header validation")
+
+    work = tempfile.mkdtemp(prefix="dantrix-addheader-")
+    root = os.path.join(work, "root")
+    os.makedirs(root, exist_ok=True)
+    with open(os.path.join(root, "f"), "w", encoding="ascii") as f:
+        f.write("x")
+
+    # A CRLF in the value, written as real bytes.
+    bad = os.path.join(work, "crlf.conf")
+    with open(bad, "wb") as f:
+        f.write(b"root = " + root.encode() + b"\n")
+        f.write(b"add_header = X-A: b\r\nX-Forged: yes\n")
+    proc = subprocess.run([BIN, "--test-config", "-c", bad], capture_output=True, text=True,
+                          timeout=30)
+    check("add_header: a CRLF in the value is refused at start-up", proc.returncode != 0,
+          f"rc={proc.returncode}")
+
+    # A framing header must be refused: it decides how the message is delimited.
+    framing = os.path.join(work, "framing.conf")
+    with open(framing, "w", encoding="ascii") as f:
+        f.write(f"root = {root}\nadd_header = Content-Length: 999\n")
+    proc = subprocess.run([BIN, "--test-config", "-c", framing], capture_output=True, text=True,
+                          timeout=30)
+    check("add_header: setting Content-Length is refused", proc.returncode != 0,
+          f"rc={proc.returncode}")
+
+    # A realistic security-header set must be accepted and must reach the client.
+    good = os.path.join(work, "good.conf")
+    with open(good, "w", encoding="ascii") as f:
+        f.write(f"root = {root}\n")
+        f.write("add_header = X-Frame-Options: DENY\n")
+        f.write("add_header = Referrer-Policy: no-referrer\n")
+        f.write("add_header = Permissions-Policy: geolocation=()\n")
+    port = PORT + 30
+    proc = subprocess.Popen(
+        [BIN, "-b", "127.0.0.1", "-p", str(port), "-c", good, "-w", "1",
+         "--access-log", "off", "--error-log", os.path.join(work, "err.log")],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("add_header: server started with a valid set", False)
+            return
+        for path in (b"/f", b"/missing"):
+            data = raw(port, b"GET " + path + b" HTTP/1.1\r\nHost: x\r\n"
+                             b"Connection: close\r\n\r\n")
+            head = data.split(b"\r\n\r\n", 1)[0]
+            for name in (b"X-Frame-Options: DENY", b"Referrer-Policy: no-referrer",
+                         b"Permissions-Policy: geolocation=()"):
+                check(f"add_header: {name.decode()} present exactly once on {path.decode()}",
+                      head.count(name) == 1, f"count={head.count(name)}")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    shutil.rmtree(work, ignore_errors=True)
+
+
 def test_symlink_policy():
     """Claim: follow_symlinks=false refuses every link that leaves the root, and
     follow_symlinks=true still refuses the escaping ones while allowing the
@@ -710,6 +778,7 @@ def main():
     secret = build_root()
     try:
         test_path_traversal(secret)
+        test_add_header_cannot_split_a_response()
         test_symlink_policy()
         test_hardlink_is_a_root_entry()
         test_hidden_files()
