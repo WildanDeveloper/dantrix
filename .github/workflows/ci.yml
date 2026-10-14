@@ -110,7 +110,7 @@ jobs:
           ./build/fuzz_path_asan
       - name: C10K check (2000 held connections)
         run: make test-c10k N=2000
-      - name: Soak check (short run: the leak verdict must not fire on a flat server)
+      - name: Soak check, short run (the leak verdict must not fire on a flat server)
         env:
           DANTRIX_SOAK_PORT: "18499"
         run: |
