@@ -12,6 +12,52 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.9] - 2026-10-14
+
+Re-measured with `wrk`: the syscall work finally has a number.
+
+### Added
+
+- **`bench/measure.py`**: runs the README scenarios, prints the environment table
+  and the results together, and refuses to report a number without the context
+  it came from. It uses `wrk` and warns loudly when only the Python client is
+  available, because that client is its own bottleneck.
+
+### Changed
+
+- **The benchmark tables are current again, measured at v0.8.8 with `wrk`.** The
+  previous numbers came from v0.7.0 and the Python client, and were marked as
+  historical. `wrk` is now available on this machine, so the latency columns
+  exist for the first time.
+  - S1 (1 KiB, 256 connections): **22,493 req/s** with the open-file cache off,
+    **30,514 req/s** with it on, p99 28.46 ms -> 22.08 ms. Same binary, same run,
+    one option apart: the cache is worth **+36% throughput and 22% lower p99**,
+    which is the first measured number for the syscall reduction shipped in
+    v0.7.3.
+  - S3 (1 MiB): 1,346 req/s, 1.31 GB/s.
+  - S4 (1 KiB): 30,379 req/s at 1,024 connections, 16,672 at 4,096. The drop is
+    the load generator and the server sharing two cores, and the README says so
+    instead of presenting it as a server limit.
+  - S5 (idle): 10,000 connections cost 14.9 MiB of RSS, **1.32 KiB per
+    connection**.
+
+### Documentation
+
+- The per-idle-connection design target is **no longer claimed as met.** It says
+  ≤ 1 KiB, and the measurement is 1.32 KiB. The earlier 1.2 KiB figure predated
+  the v0.8 descriptor accounting. Reporting the measurement and stating that the
+  target is missed is the only honest option; rounding 1.32 down to "about 1"
+  would have made the table agree with the target and disagree with reality.
+- Removed the last `TBD` placeholders from the README. A cell now either holds a
+  measurement with its environment or says the scenario was not measured here.
+
+### Notes
+
+- Measuring required stopping the three 24-hour fuzz campaigns first: load
+  average was 4.65 on a 2 vCPU machine, and any number taken then would have
+  described CPU contention rather than the server. The campaigns had reached 269
+  million executions between them with zero crashes and were resumed after.
+
 ## [0.8.8] - 2026-10-14
 
 The soak verdict no longer fails on a sanitizer build, and the reason is measured.

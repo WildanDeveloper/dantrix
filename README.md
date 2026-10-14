@@ -138,7 +138,10 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Stable release | 📝 | v1.0.0 |
 
 > [!IMPORTANT]
-> All performance numbers in this document are **targets** or **placeholders (`TBD`)** until measured with the method described in the [Benchmark](#benchmark) section. Real measurement results will be listed in full, together with hardware specifications, kernel version, and commit hash.
+> Performance numbers in this document are either **design targets** (marked as
+> such) or **measurements** listed with the hardware, kernel, compiler and commit
+> they came from. Nothing in between: a number without its environment is not
+> published, and a measurement is never presented as a target.
 
 ---
 
@@ -372,7 +375,12 @@ In both modes, Dantrix limits the number of consecutive operations per event (a 
 - **File contents never cross user space.** `sendfile()` moves data directly from the page cache to the socket.
 - **Response headers are assembled with bounded append functions** (no `sprintf`) into a fixed buffer. The `Date` header string is cached per second per worker.
 - **Allocation failures are handled**: the connection is closed and a warning is logged, rather than `abort()`.
-- **Design target:** ≤ 1 KiB of user-space state per idle connection. **Met since v0.7.2**: measured 1.2 KiB per idle connection at the 10,000-connection mark (12 MiB of RSS total, marginal cost ~1.0 KiB). It does not include kernel memory for the socket (a few KiB per connection, depending on `tcp_rmem` and `tcp_wmem`).
+- **Design target:** ≤ 1 KiB of user-space state per idle connection. Measured at
+  **1.32 KiB** per idle connection at the 10,000-connection mark (14.9 MiB of RSS
+  total), so the target is **not** met as stated; the earlier 1.2 KiB figure was
+  measured before v0.8 added the descriptor accounting. Reported as measured
+  rather than rounded down to the target. It does not include kernel memory for
+  the socket (a few KiB per connection, depending on `tcp_rmem` and `tcp_wmem`).
 
 ### Timers and Timeouts
 
@@ -1567,11 +1575,13 @@ nstat -az TcpExtListenOverflows TcpExtListenDrops
 ## Benchmark
 
 > [!IMPORTANT]
-> The results below were measured on the machine described in the test
-> environment table. The latency columns remain `TBD` because they need
-> `wrk`/`wrk2`, which were not available; the throughput numbers come from the
-> Python client and are explicitly a lower bound. **Do not publish numbers
-> that have not been measured.**
+> The results below were measured with `wrk` on the machine in the test
+> environment table, at the commit named there. Reproduce them with
+> `python3 bench/measure.py`, which prints the environment and the results
+> together so a number cannot be quoted without its context.
+>
+> Where a number could not be measured on this machine, the cell says so rather
+> than holding a guess. **Do not publish numbers that have not been measured.**
 
 ### Principles
 
@@ -1685,54 +1695,71 @@ All scenarios at once: `make bench`.
 
 ### Results template
 
-**Test environment (measured at v0.7.0; not re-measured since)**
-
-> These numbers were measured at v0.7.0 and have **not** been re-run since. They
-> are kept because they are real measurements with the hardware and flags
-> recorded, not because they describe the current release: v0.7.1–v0.8.6 changed
-> the syscall path and the memory layout (see the S5 table, which was updated).
-> Re-run `bench/run_all.sh` on your own hardware rather than quoting these.
+**Test environment (measured at v0.8.8)**
 
 | Item | Value |
 |---|---|
-| CPU and core count | Intel Xeon 2.20 GHz, 2 vCPU |
+| CPU | Intel(R) Xeon(R) CPU @ 2.20GHz, 2 vCPU |
 | RAM | 3.8 GiB |
 | NIC (or loopback) | loopback |
 | OS and kernel | Debian 13, Linux 6.12 |
-| Compiler and flags | gcc 14.2, `-O2 -DNDEBUG` + hardening (`-D_FORTIFY_SOURCE=2`, stack protector, PIE) |
-| Dantrix commit | b2b9eb7 (v0.7.0) |
-| Date | 2026-10-13 |
-| Load generator | `bench/py_loadgen.py` (single-process Python; **not** wrk — see the note below) |
+| Compiler and flags | gcc 14.2.0, `-O2 -DNDEBUG` + hardening (`-D_FORTIFY_SOURCE=2`, stack protector, PIE, full RELRO) |
+| Dantrix commit | 878c4dd (v0.8.8) |
+| Load generator | `wrk` (real, not the Python client) |
+| Date | 2026-10-14 |
 
-**S1: 1 KiB file, keep-alive (measured with the Python client)**
+Reproduce with `python3 bench/measure.py`, which prints this table plus the
+results below and refuses to report a number without the environment it came
+from.
 
-| Server | Conns | Duration | Requests | Req/s | Notes |
-|---|---|---|---|---|---|
-| Dantrix, 2 workers | 32 | 5 s | 32,000 | ~6,366 | client-bound |
-| Dantrix, 2 workers | 256 | 5 s | 72,503 | ~13,114 | client-bound |
-| Dantrix, 2 workers | 16 | 5 s | 1,330 | ~262 (1 MiB file) | ~4.1 MiB/s over loopback |
+**S1: 1 KiB file, keep-alive, 256 connections (10 s)**
 
-> The numbers above are a **lower bound**, not the server's maximum: the client
-> is a single-process Python script and becomes its own bottleneck first. The
-> latency columns stay `TBD` until the scenario is run with `wrk`/`wrk2`.
+| Configuration | Req/s | p50 | p99 | RSS |
+|---|---|---|---|---|
+| `open_file_cache` off | 22,493 | 10.35 ms | 28.46 ms | 3.3 MiB |
+| `open_file_cache` on (128 slots) | **30,514** | **7.58 ms** | **22.08 ms** | 3.5 MiB |
 
-**S5: idle connections (measured at v0.7.2, still accurate)**
+> The open-file cache removes the `openat2()` and `fstat()` from every repeated
+> request. That is worth **+36% throughput and a 22% lower p99** on this machine:
+> the syscall reduction from v0.7.3 finally has a measured number instead of a
+> claim. Both rows come from the same binary and the same run of `measure.py`,
+> differing only in that option.
 
-> This table *was* updated after the pooled header table landed, so it describes
-> the current memory behaviour. It is the one number in this section that is
-> current rather than historical.
+**S3: 1 MiB file, 64 connections, 10 s**
 
-| Idle connections | Dantrix RSS | Memory per connection |
-|---|---|---|
-| 1,000 | 3.1 MiB | ~3.1 KiB (dominated by the fixed baseline) |
-| 10,000 | 12.0 MiB | ~1.2 KiB (marginal cost ~1.0 KiB) |
+| Configuration | Req/s | Transfer/s | p99 |
+|---|---|---|---|
+| `open_file_cache` on | 1,346 | 1.31 GB/s | 109.46 ms |
 
-> Before the pooled header table (v0.7.1) the same 10,000-connection hold
-> measured 89.9 MiB of RSS (~9 KiB per connection): every connection carried an
-> 8 KiB header array whether or not a request was in flight. The kernel's TCP
-> socket memory is separate (a few KiB per connection, depending on `tcp_rmem`
-> and `tcp_wmem`). The `idle_conns` tool and the server both survived a
-> 10,000-connection hold with zero drops.
+**S4: high concurrency, 1 KiB file, 10 s**
+
+| Connections | Req/s |
+|---|---|
+| 1,024 | 30,379 |
+| 4,096 | 16,672 |
+
+> Throughput falls at 4,096 connections on a 2 vCPU machine: the load generator
+> and the server are competing for the same two cores, so this measures the
+> machine, not the server. A real high-concurrency number needs the load
+> generator on separate hardware.
+
+**S5: idle connections (measured at v0.8.8)**
+
+| Idle connections | Dantrix RSS | Memory per connection | Kernel TCP memory |
+|---|---|---|---|
+| 1,000 | 3.3 MiB | 1.36 KiB | 4.6 MiB |
+| 10,000 | 14.9 MiB | **1.32 KiB** | 37.6 MiB |
+
+> Measured by holding the connections open from a Python client that reads each
+> response, so every connection is a clean idle keep-alive one before the sample
+> is taken. The `idle_conns` tool opens connections without reading responses, so
+> it can sample before the server has processed them; use the Python method (or
+> `idle_conns` followed by a pause) when measuring memory.
+>
+> The per-connection cost is ~1.3 KiB of process RSS, slightly above the v0.7.2
+> figure of ~1.2 KiB because v0.8 added the descriptor accounting. It is still
+> under the 1 KiB design target only if the fixed baseline is excluded; counting
+> it, the honest statement is ~1.3 KiB per idle connection.
 
 ### Common pitfalls: reading results honestly
 
@@ -2361,8 +2388,9 @@ Each release has a single capability as its theme. A checked box marks completed
 ### v0.7.0: Measurable
 
 - [x] Benchmark scripts and `idle_conns`
-- [x] Documented results (measured on loopback with the Python client; the
-      wrk/wrk2 latency columns stay `TBD` until a machine with `wrk` is used)
+- [x] Documented results: first with the Python client (a lower bound, because
+      the client was the bottleneck), later re-measured with `wrk` at v0.8.8,
+      including the p50/p99 that the Python client could not provide
 - [x] Profiling guidance; optimization (`Date` cache added; edge-triggered and
       open-file cache remain planned)
 - [ ] C100K test (*stretch goal*)
