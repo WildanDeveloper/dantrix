@@ -12,6 +12,42 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.11] - 2026-10-14
+
+Status reporting while the long runs finish, and a v1.0 readiness analysis.
+
+### Added
+
+- **`docs/v1.0-readiness.md`**: an analysis of whether the public surface is ready
+  to freeze for v1.0, written before any decision rather than after. It counts the
+  surface (49 configuration keys, 45 CLI flags, 18 documented status codes, the
+  status JSON), lists the four things that still block a freeze, and separates
+  what has been stable for many releases from what is still moving.
+  The blockers are concrete and were each verified against the running binary:
+  `edge_triggered` is accepted and ignored with a warning that names v0.7 (nine
+  releases ago); `log_format = json` is documented and rejected at parse time;
+  multi-range requests are a deliberate, permanent-looking deviation from RFC
+  9110; and the `header_timeout` semantic only became a deadline seven releases
+  ago and has not run outside this machine.
+  The recommendation is **not to freeze yet**: a v1.0.0 tag now would promise a
+  dead key, an unusable documented value and an unexercised timeout, and fixing
+  any of them afterwards would need a major version.
+- **A live status section in the README** ("Where the project is right now"),
+  because a reader could previously only infer the state from a table of
+  checkmarks. It states the current release, what is complete, what is running,
+  and what is blocked on what -- and it says the checkpoint goes stale, so the
+  numbers carry the date they were taken.
+
+### Changed
+
+- The 24-hour fuzz campaign is reported as **in progress with its measured
+  numbers** (469 million executions, zero crashes, coverage still growing) rather
+  than as a ticked box. The roadmap item stays open until the runs finish; a
+  claim is not marked done because it is close to done.
+- The v1.0 definition of done now links the readiness analysis, and the
+  "frozen according to Semantic Versioning" item says plainly that it is not
+  ready and points at the specific reasons.
+
 ## [0.8.10] - 2026-10-14
 
 `add_header` implemented (it was accepted and ignored), and CONTRIBUTING.md.

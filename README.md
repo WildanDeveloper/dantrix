@@ -109,6 +109,22 @@ Dantrix is developed with a **README-driven development** approach: this documen
 
 **Legend:** ✅ done and tested · 🚧 in progress · 📝 planned
 
+### Where the project is right now
+
+The short version, so nothing has to be inferred from the tables below:
+
+| | |
+|---|---|
+| Current release | v0.8.10 (tagged, CI green on GCC and Clang with ASan/UBSan/TSan) |
+| Milestones complete | v0.1 through v0.8, except the two long runs below |
+| 🚧 Running now | **The 24-hour fuzz campaign** (three targets). At the last check: 469 million executions, zero crashes, zero artifacts, coverage still growing |
+| 🚧 Waiting on the above | **The 1-hour soak** (`make soak`). It cannot be run while the fuzzers hold the CPU: a soak judges the *trend* of RSS, and a server starved of CPU serves fewer requests, which would hide exactly the slow leak the test exists to find |
+| Next | Close v0.8, then decide whether the configuration and HTTP surface are ready to freeze for v1.0. The analysis and the blockers are in [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md) |
+
+A checkpoint like this goes stale, so the numbers above carry the date they were
+taken. Anything that looks like a claim without a measurement is a mistake in
+this document, not a promise.
+
 | Component | Status | Release target |
 |---|---|---|
 | Learning material: blocking echo, thread-per-connection, `epoll` echo (`examples/`) | ✅ | v0.1.0 |
@@ -2422,10 +2438,15 @@ Each release has a single capability as its theme. A checked box marks completed
 
 - [x] Runtime descriptor accounting: `fds_believed` vs `fds_actual`, exposed in
       the status endpoint, so a descriptor leak is visible and testable
-- [x] Long-running fuzzing on all three targets (`make fuzz-long HOURS=24`),
-      with the harness first shown to catch a real bug: the escape fuzzer's
-      original invariant missed a wrong-entity bug, so a round-trip check was
-      added and verified in both directions
+- [~] **In progress: the 24-hour fuzz campaign is running right now.** Three
+      targets (parser, path, escape) under libFuzzer with ASan+UBSan, started
+      from a seeded corpus. Checked so far: 469 million executions, **zero
+      crashes**, zero artifacts written, and coverage still growing (path 291 ->
+      312). The roadmap claim is not marked done until the runs finish; the
+      progress is reported here instead of the checkbox being ticked early.
+      Before the campaign was trusted, the harness was shown to catch a real bug:
+      the escape fuzzer's original invariant missed a wrong-entity bug, so a
+      round-trip check was added and verified in both directions.
 - [x] ASan, UBSan, and TSan as mandatory parts of CI (two required jobs run on
       every push; between them they found the descriptor leak, the per-IP slot
       race, and the sanitizer interaction with the seccomp filter)
@@ -2453,7 +2474,10 @@ Each release has a single capability as its theme. A checked box marks completed
 - [ ] The C10K test passes (10,000 idle connections plus 1,000 active connections)
 - [ ] Benchmark results documented and reproducible
 - [ ] `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `CHANGELOG.md` complete
-- [ ] Configuration keys and HTTP behavior frozen according to [Semantic Versioning](https://semver.org/)
+- [ ] Configuration keys and HTTP behavior frozen according to [Semantic Versioning](https://semver.org/).
+      **Not ready yet**, and the reasons are specific: [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md)
+      lists what is stable, what is still moving, and the four decisions that
+      belong to the maintainer rather than to the code
 
 ### Post-1.0 ideas
 
