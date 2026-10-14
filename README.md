@@ -2385,7 +2385,9 @@ Each release has a single capability as its theme. A checked box marks completed
       with the harness first shown to catch a real bug: the escape fuzzer's
       original invariant missed a wrong-entity bug, so a round-trip check was
       added and verified in both directions
-- [ ] ASan, UBSan, and TSan as mandatory parts of CI
+- [x] ASan, UBSan, and TSan as mandatory parts of CI (two required jobs run on
+      every push; between them they found the descriptor leak, the per-IP slot
+      race, and the sanitizer interaction with the seccomp filter)
 - [x] `max_conns_per_ip`: a shared, lock-free per-IP connection limit
 - [x] `seccomp-bpf` allow list: 79 syscalls, everything else kills the process
 - [x] Security review: every claim in `SECURITY.md` verified by
@@ -2394,7 +2396,10 @@ Each release has a single capability as its theme. A checked box marks completed
       kernel guarantee attached to the open call and is the stronger boundary;
       the reasoning is in SECURITY.md. The atomic claim is now tested by racing
       the filesystem against the server (`make test-toctou`).
-- [ ] Manual security review and `SECURITY.md`
+- [x] Manual security review and `SECURITY.md`: a threat model, a reporting
+      process, known limitations, and a table of 26 security claims each with how
+      it is verified. A claim that cannot be tested is listed as unverified
+      rather than assumed true.
 
 ### v1.0.0: Stable
 
