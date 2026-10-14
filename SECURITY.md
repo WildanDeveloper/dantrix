@@ -69,6 +69,8 @@ claim is checked.
 | After start-up the process runs as the configured user with `no_new_privs` | server started as root with `--user nobody`, then `/proc/<pid>/status` read | verified (needs root) |
 | The seccomp filter is active on the running process | `Seccomp: 2` in `/proc/<pid>/status` | verified |
 | A syscall outside the seccomp allow list kills the process | probe built from the same filter source; dies with `SIGSYS` | verified |
+| HTML escaping cannot be bypassed and emits the correct entity | `fuzz/fuzz_escape.c` decodes its own output and compares it with the input (a round-trip), so a wrong entity is caught as well as a missing one. The harness was verified to catch an injected wrong-entity bug before the campaign was trusted | verified |
+| URL encoding cannot carry CR, LF, a space or a non-printable byte into a header | the same fuzz target asserts every emitted byte is printable and every `%` is followed by two hex digits | verified |
 | The kernel enforces the document root atomically (`openat2(RESOLVE_BENEATH)`) | no check-then-open pattern exists in the serving path; the fallback walk uses `O_NOFOLLOW` per segment. The kernel API itself is not something this test suite can falsify | verified by construction, not falsified |
 | A slowloris client (one byte at a time) cannot hold a connection open | a 0.4s drip with `header_timeout=1s` is closed after 1.6s; the same drip held the connection for 12.3s before v0.8.3 | verified |
 | A slow but *complete* request inside the window is still served | the same request sent in two halves 0.3s apart answers `200` | verified |

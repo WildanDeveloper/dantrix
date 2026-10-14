@@ -60,7 +60,7 @@ jobs:
           # The list is checked against the Makefile's wildcard so a newly
           # added unit test cannot silently miss this job.
           expected=$(ls tests/unit/test_*.c | sed 's#.*/test_##; s#\.c$##' | sort | tr '\n' ' ')
-          got="buffer config connlimit fcache fdcount file http_parser http_range http_response log mime net path pool process seccomp status timer util"
+          got="buffer config connlimit escape fcache fdcount file http_parser http_range http_response log mime net path pool process seccomp status timer util"
           if [ "$expected" != "$got " ]; then
             echo "::error::ASan unit-test list out of date. Expected: $expected"
             exit 1
@@ -91,6 +91,23 @@ jobs:
               -DFUZZ_STANDALONE -Isrc fuzz/fuzz_http_parser.c \
               src/http_parser.c src/http_response.c src/util.c -o build/fuzz_asan
           ./build/fuzz_asan
+      - name: Escape fuzz harness (HTML escaping and URL encoding, ASan+UBSan)
+        run: |
+          mkdir -p build
+          clang -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wpedantic -Werror -O1 -g \
+              -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+              -DFUZZ_STANDALONE -Isrc fuzz/fuzz_escape.c \
+              src/file.c src/path.c src/http_range.c src/mime.c src/util.c src/fdcount.c \
+              -o build/fuzz_escape_asan
+          ./build/fuzz_escape_asan
+      - name: Path fuzz harness (path resolution, ranges, MIME, ASan+UBSan)
+        run: |
+          mkdir -p build
+          clang -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wpedantic -Werror -O1 -g \
+              -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+              -DFUZZ_STANDALONE -Isrc fuzz/fuzz_path.c \
+              src/path.c src/http_range.c src/mime.c -o build/fuzz_path_asan
+          ./build/fuzz_path_asan
       - name: C10K check (2000 held connections)
         run: make test-c10k N=2000
       - name: Seccomp sandbox (full workload with the filter armed + enforcement)

@@ -12,6 +12,72 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.5] - 2026-10-14
+
+The 24-hour fuzz campaign, and the harness weakness it exposed.
+
+### Added
+
+- **A third fuzz target, `fuzz/fuzz_escape.c`**, for the two functions the
+  security claims rest on: `dx_html_escape` (a file name becomes HTML in a
+  listing) and `dx_url_encode` (a request target becomes a `Location` header).
+  Neither was covered before, which is exactly the gap worth closing: they are
+  pure functions over attacker-influenced bytes.
+- **A seeded corpus** (`fuzz/seed_corpus.py`): 36 parser, 31 path and 20 escape
+  inputs, including the traversal, smuggling and injection payloads the security
+  tests use. A seeded corpus matters because libFuzzer reaches interesting code
+  far sooner from a meaningful starting point than from random bytes, and every
+  seed doubles as a regression input.
+- **`make fuzz-long`** runs a libFuzzer campaign (30 minutes per target by
+  default, `HOURS=24` for the full run) with a crash writing its reproducer to
+  `fuzz/artifacts/`. **`make fuzz-replay`** re-runs every saved corpus and
+  artifact input, so a finding stays a regression test.
+- `dx_url_encode` is now public API (`src/file.h`) rather than a file-static
+  helper, so it can be fuzzed and tested directly.
+- `test_escape` (49 checks) pins the exact output for the five HTML entities, the
+  percent-encoding rules, and the refusal-not-truncation behaviour on a small
+  buffer.
+
+### Fixed
+
+- **The escape fuzzer could not detect a wrong entity, only a missing one.** Its
+  invariant was "no raw `<`, `>`, `"` or `'` in the output", which is satisfied
+  by mapping `<` to `&gt;` -- the output is quote-free and renders the wrong
+  character. Demonstrated: with that bug injected, the driver ran 300,000
+  iterations clean. The invariant is now a round-trip: decode the output and
+  compare it with the input, which catches a wrong entity. Verified in both
+  directions -- the correct code passes, and the wrong-entity injection now
+  fails on the first seed.
+- Two defects in the new round-trip helper itself, both caught by running it
+  rather than by reading it: a capacity check that only guarded one branch, so a
+  large input wrote past the buffer; and an expectation that ignored
+  `dx_html_escape` dropping control bytes by design, which made the check fail on
+  correct code. The comparison now strips controls from the expectation, matching
+  the documented contract.
+
+### Fixed (harness and CI coverage)
+
+- **`fuzz_path` was never run by CI.** The sanitizer job built and ran the parser
+  and (since this release) escape harnesses, but the path harness -- which covers
+  path resolution, ranges and MIME, including the traversal payloads -- was only
+  reachable by hand. It now has its own CI step under ASan+UBSan, so all three
+  targets run on every push.
+- `test_escape` gained a fixed-input round-trip check, so the property the fuzzer
+  relies on is also enforced by `make test` and does not depend on a campaign
+  having been run.
+
+### Notes
+
+- The campaign result is only meaningful because the harness was shown to catch
+  a real bug first. "No crashes in 24 hours" from a harness that cannot fail is
+  not evidence, and this release is as much about making the harness falsifiable
+  as about the hours it ran.
+- Three assertions in the new tests were wrong before they were right (a
+  non-empty output expectation for an all-control-byte input, and twice
+  comparing the escaped length with the decoded length). Each was fixed by
+  measuring the actual behaviour rather than adjusting the code to match the
+  test.
+
 ## [0.8.4] - 2026-10-14
 
 A concurrency defect in the per-IP limit, found by the CI sanitizer job.

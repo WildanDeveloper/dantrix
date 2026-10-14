@@ -86,6 +86,12 @@ dx_open_t dx_fs_open(dx_fs_t *fs, const char *rel_path, bool had_trailing_slash,
  */
 size_t dx_fs_list(dx_fs_t *fs, const char *rel_path, char *out, size_t cap);
 
+/*
+ * Percent-encode src into out, leaving only unreserved characters and '/'.
+ * Returns the written length, or 0 when it would not fit.
+ */
+size_t dx_url_encode(const char *src, size_t len, char *out, size_t cap);
+
 /* HTML-escape text into out; returns the written length or 0 on overflow. */
 size_t dx_html_escape(const char *src, size_t len, char *out, size_t cap);
 

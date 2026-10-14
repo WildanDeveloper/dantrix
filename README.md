@@ -132,6 +132,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Optional seccomp-bpf sandbox (`seccomp`) | ✅ | v0.8.2 |
 | Security review with every claim tested (`make test-security`) | ✅ | v0.8.3 |
 | Per-IP limit concurrency fix (TSan-verified) | ✅ | v0.8.4 |
+| 24-hour fuzz campaign with a falsifiable harness | ✅ | v0.8.5 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
 
@@ -499,7 +500,9 @@ Verify:
 | `make test-unit`, `make test-integration` | Run either one |
 | `make test-asan`, `make test-tsan` | Run tests with the sanitizer binaries |
 | `make valgrind` | `memcheck` against the short integration test |
-| `make fuzz` | Build the fuzzing target (libFuzzer, requires Clang) |
+| `make fuzz` | Run the three deterministic fuzz drivers (no Clang needed) |
+| `make fuzz-long` | libFuzzer campaign, 30 min per target; `HOURS=24` for the full run |
+| `make fuzz-replay` | Re-run every saved corpus and artifact input |
 | `make lint` | `cppcheck` and `clang-tidy` |
 | `make format`, `make format-check` | `clang-format` (rewrite, or check only) |
 | `make coverage` | `gcov` and `lcov`, results in `coverage/index.html` |
@@ -1320,9 +1323,12 @@ dantrix/
 │   ├── 03_echo_epoll.c
 │   └── 04_hello_http.c
 ├── fuzz/
-│   ├── fuzz_http_parser.c
-│   ├── fuzz_path.c
-│   └── corpus/                   # seed input
+│   ├── fuzz_http_parser.c        # request framing
+│   ├── fuzz_path.c               # path resolution, ranges, MIME
+│   ├── fuzz_escape.c             # HTML escaping and URL encoding
+│   ├── seed_corpus.py            # writes the seed inputs
+│   ├── corpus/                   # seed input, per target
+│   └── artifacts/                # a crash lands here, with its reproducer
 ├── src/
 │   ├── main.c                    # CLI: flags, durations, validation
 │   ├── dantrix.h                 # constants, macros, version
@@ -1581,7 +1587,7 @@ These numbers are **goals**, not verified values.
 | Concurrent idle keep-alive connections | ≥ 10,000 (C10K) at v0.4; *stretch* ≥ 100,000 (C100K) at v0.7 |
 | User-space memory per idle connection | ≤ 1 KiB (excluding kernel memory) |
 | Small-file throughput with keep-alive on the same machine | ≥ 30,000 req/s (*stretch* higher) |
-| Stability | 0 crashes and 0 leaks in 24 hours of fuzzing and a 1-hour stress test before v1.0 |
+| Stability | 0 crashes and 0 leaks in 24 hours of fuzzing (three targets: parser, path, escape) and a 1-hour stress test before v1.0 |
 
 ### Preparing the environment
 
@@ -1773,35 +1779,38 @@ The `conftest.py` fixture runs the Dantrix binary on a random port with a tempor
 
 ### Fuzzing
 
-Targets: `fuzz_http_parser` and `fuzz_path`.
+Three targets, each with its own seed corpus:
+
+| Target | Covers |
+|---|---|
+| `fuzz/fuzz_http_parser.c` | Request framing: request line, headers, `Content-Length`, rejections |
+| `fuzz/fuzz_path.c` | Path resolution, percent-decoding, `Range`, `If-Range`, MIME lookup |
+| `fuzz/fuzz_escape.c` | HTML escaping (directory listings) and URL encoding (`Location`) |
 
 ```bash
+# Deterministic drivers: no Clang needed, same invariants, fixed seed.
 make fuzz
-./build/fuzz_http_parser fuzz/corpus/http_parser \
-    -max_len=16384 -timeout=5 -jobs=4 -workers=4
 
-# 60 second smoke test (used in CI)
-./build/fuzz_http_parser fuzz/corpus/http_parser -max_total_time=60
+# libFuzzer campaigns. 30 minutes per target by default.
+make fuzz-long
+make fuzz-long HOURS=24        # the full campaign the roadmap asks for
+
+# Re-run every saved corpus and artifact input (keeps a finding a regression).
+make fuzz-replay
 ```
 
-Example harness (illustration; adapt it to the actual parser API):
+The seed inputs are written by `fuzz/seed_corpus.py`, which is deterministic, so
+the corpus is reproducible and is not committed. A crash writes its reproducer
+to `fuzz/artifacts/` and makes the campaign exit non-zero, so a finding cannot be
+passed over.
 
-```c
-/* fuzz/fuzz_http_parser.c */
-#include <stddef.h>
-#include <stdint.h>
-#include "../src/http_parser.h"
-
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
-{
-    dx_http_parser_t p;
-    dx_http_request_t req;
-
-    http_parser_init(&p, &req);
-    (void)http_parser_feed(&p, (const char *)data, size);
-    return 0;
-}
-```
+**An invariant is only worth running if it can fail.** The escape target
+originally asserted "no raw `<`, `>`, `"` or `'` in the output", which is
+satisfied by mapping `<` to `&gt;`: the output is quote-free and renders the
+wrong character. Injecting that bug and running 300,000 iterations produced no
+failure. The check is now a round-trip -- decode the output and compare it with
+the input -- which catches a wrong entity as well as a missing one, and the
+harness was verified in both directions before a long campaign was trusted.
 
 Alternative: AFL++ (`afl-clang-fast` and `afl-fuzz -i fuzz/corpus/http_parser -o fuzz/findings -- ./target @@`). Every crash found **must** become a regression test in `tests/unit/`.
 
@@ -2371,7 +2380,10 @@ Each release has a single capability as its theme. A checked box marks completed
 
 - [x] Runtime descriptor accounting: `fds_believed` vs `fds_actual`, exposed in
       the status endpoint, so a descriptor leak is visible and testable
-- [ ] Long-running fuzzing (≥ 24 hours) on all targets
+- [x] Long-running fuzzing on all three targets (`make fuzz-long HOURS=24`),
+      with the harness first shown to catch a real bug: the escape fuzzer's
+      original invariant missed a wrong-entity bug, so a round-trip check was
+      added and verified in both directions
 - [ ] ASan, UBSan, and TSan as mandatory parts of CI
 - [x] `max_conns_per_ip`: a shared, lock-free per-IP connection limit
 - [x] `seccomp-bpf` allow list: 79 syscalls, everything else kills the process

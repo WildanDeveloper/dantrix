@@ -67,7 +67,6 @@ bool dx_fs_openat2_blocked(void)
 }
 
 /* Percent-encode a file name or path for use in a URI; defined further down. */
-static size_t url_encode(const char *src, size_t len, char *out, size_t cap);
 
 /* Map an open failure onto the response classes of the README. */
 static dx_open_t classify_errno(int err)
@@ -307,7 +306,7 @@ dx_open_t dx_fs_open(dx_fs_t *fs, const char *rel_path, bool had_trailing_slash,
                  * resource than the one being redirected to.
                  */
                 char encoded[DX_LOCATION_MAX];
-                size_t n = url_encode(rel_path, strlen(rel_path), encoded, sizeof(encoded) - 2u);
+                size_t n = dx_url_encode(rel_path, strlen(rel_path), encoded, sizeof(encoded) - 2u);
                 int w;
 
                 if (n == 0) {
@@ -432,7 +431,17 @@ size_t dx_html_escape(const char *src, size_t len, char *out, size_t cap)
 }
 
 /* Percent-encode a file name for the href attribute. */
-static size_t url_encode(const char *src, size_t len, char *out, size_t cap)
+/*
+ * Percent-encode src into out, leaving only unreserved characters and '/'.
+ * Returns the written length, or 0 when the output would not fit (never a
+ * partial escape: a half-written escape could leave a quote or a header
+ * unbalanced, so the caller gets a refusal instead).
+ *
+ * Public because the security claims depend on it: it is what keeps a request
+ * target from carrying CR/LF into a Location header, and it is fuzzed directly
+ * by fuzz/fuzz_escape.c.
+ */
+size_t dx_url_encode(const char *src, size_t len, char *out, size_t cap)
 {
     static const char hex[] = "0123456789ABCDEF";
     size_t o = 0;
@@ -565,7 +574,7 @@ size_t dx_fs_list(dx_fs_t *fs, const char *rel_path, char *out, size_t cap)
             is_dir = 0;
         }
         if (dx_html_escape(names[i], name_len, esc, sizeof(esc)) == 0 ||
-            url_encode(names[i], name_len, url, sizeof(url)) == 0) {
+            dx_url_encode(names[i], name_len, url, sizeof(url)) == 0) {
             free(names[i]);
             names[i] = NULL;
             continue;

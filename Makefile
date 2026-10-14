@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.8.4
+VERSION := 0.8.5
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -80,7 +80,7 @@ EX_BINS := $(patsubst $(EXAMPLES)/%.c,$(BUILD)/%,$(EX_SRC))
 
 .PHONY: all release debug profile asan tsan examples \
         test test-unit test-asan test-tsan test-regression test-c10k test-seccomp test-security \
-        lint format format-check coverage bench stress fuzz valgrind \
+        lint format format-check coverage bench stress fuzz fuzz-long fuzz-replay valgrind \
         install uninstall docker clean distclean help
 
 all: release
@@ -290,6 +290,7 @@ test-security: release
 # the same invariant checks with plain gcc.
 FUZZ_PARSER_SRCS := src/http_parser.c src/http_response.c src/util.c
 FUZZ_PATH_SRCS := src/path.c src/http_range.c src/mime.c
+FUZZ_ESCAPE_SRCS := src/file.c src/path.c src/http_range.c src/mime.c src/util.c src/fdcount.c
 
 $(BUILD)/fuzz_http_parser: fuzz/fuzz_http_parser.c $(FUZZ_PARSER_SRCS) $(HDRS)
 	@mkdir -p $(dir $@)
@@ -301,9 +302,62 @@ $(BUILD)/fuzz_path: fuzz/fuzz_path.c $(FUZZ_PATH_SRCS) $(HDRS)
 	$(CC) $(STD) $(DEFS) $(WARN) -O1 -g -DFUZZ_STANDALONE \
 	    -I$(SRC) $< $(FUZZ_PATH_SRCS) -o $@ $(LDFLAGS)
 
-fuzz: $(BUILD)/fuzz_http_parser $(BUILD)/fuzz_path
+$(BUILD)/fuzz_escape: fuzz/fuzz_escape.c $(FUZZ_ESCAPE_SRCS) $(HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(STD) $(DEFS) $(WARN) -O1 -g -DFUZZ_STANDALONE \
+	    -I$(SRC) $< $(FUZZ_ESCAPE_SRCS) -o $@ $(LDFLAGS)
+
+fuzz: $(BUILD)/fuzz_http_parser $(BUILD)/fuzz_path $(BUILD)/fuzz_escape
 	./$(BUILD)/fuzz_http_parser
 	./$(BUILD)/fuzz_path
+	./$(BUILD)/fuzz_escape
+
+# libFuzzer campaigns. These need clang; the CI runs the standalone drivers
+# above with plain gcc, which cover the same invariants with a fixed corpus.
+#
+#   make fuzz-long           30 minutes per target (a smoke campaign)
+#   make fuzz-long HOURS=24  the 24-hour campaign the roadmap asks for
+#
+# A crash writes a reproducer to fuzz/artifacts/ and the target's exit status
+# becomes non-zero, so the campaign cannot pass silently over a finding.
+FUZZ_CC ?= clang
+FUZZ_FLAGS := -std=c11 -D_GNU_SOURCE -O1 -g -fsanitize=fuzzer,address,undefined \
+              -fno-sanitize-recover=undefined -fno-omit-frame-pointer -I$(SRC)
+FUZZ_CORPUS := $(CURDIR)/fuzz/corpus
+FUZZ_ARTIFACTS := $(CURDIR)/fuzz/artifacts
+HOURS ?= 0
+FUZZ_SECONDS := $(shell if [ "$(HOURS)" != "0" ]; then echo $$(( $(HOURS) * 3600 )); else echo 1800; fi)
+
+$(BUILD)/fuzz_parser_libfuzzer: fuzz/fuzz_http_parser.c $(FUZZ_PARSER_SRCS) $(HDRS)
+	@mkdir -p $(dir $@) $(FUZZ_ARTIFACTS)/parser $(FUZZ_CORPUS)/parser
+	$(FUZZ_CC) $(FUZZ_FLAGS) $< $(FUZZ_PARSER_SRCS) -o $@
+
+$(BUILD)/fuzz_path_libfuzzer: fuzz/fuzz_path.c $(FUZZ_PATH_SRCS) $(HDRS)
+	@mkdir -p $(dir $@) $(FUZZ_ARTIFACTS)/path $(FUZZ_CORPUS)/path
+	$(FUZZ_CC) $(FUZZ_FLAGS) $< $(FUZZ_PATH_SRCS) -o $@
+
+$(BUILD)/fuzz_escape_libfuzzer: fuzz/fuzz_escape.c $(FUZZ_ESCAPE_SRCS) $(HDRS)
+	@mkdir -p $(dir $@) $(FUZZ_ARTIFACTS)/escape $(FUZZ_CORPUS)/escape
+	$(FUZZ_CC) $(FUZZ_FLAGS) $< $(FUZZ_ESCAPE_SRCS) -o $@
+
+fuzz-long: $(BUILD)/fuzz_parser_libfuzzer $(BUILD)/fuzz_path_libfuzzer $(BUILD)/fuzz_escape_libfuzzer
+	@echo "=== parser: $(FUZZ_SECONDS)s ==="
+	./$(BUILD)/fuzz_parser_libfuzzer -max_total_time=$(FUZZ_SECONDS) \
+	    -artifact_prefix=$(FUZZ_ARTIFACTS)/parser/ $(FUZZ_CORPUS)/parser
+	@echo "=== path: $(FUZZ_SECONDS)s ==="
+	./$(BUILD)/fuzz_path_libfuzzer -max_total_time=$(FUZZ_SECONDS) \
+	    -artifact_prefix=$(FUZZ_ARTIFACTS)/path/ $(FUZZ_CORPUS)/path
+	@echo "=== escape: $(FUZZ_SECONDS)s ==="
+	./$(BUILD)/fuzz_escape_libfuzzer -max_total_time=$(FUZZ_SECONDS) \
+	    -artifact_prefix=$(FUZZ_ARTIFACTS)/escape/ $(FUZZ_CORPUS)/escape
+	@echo "fuzz-long: $(FUZZ_SECONDS)s per target, no crash"
+
+fuzz-replay:
+	@echo "=== replaying every saved corpus and artifact ==="
+	./$(BUILD)/fuzz_parser_libfuzzer -runs=0 $(FUZZ_CORPUS)/parser $(FUZZ_ARTIFACTS)/parser
+	./$(BUILD)/fuzz_path_libfuzzer -runs=0 $(FUZZ_CORPUS)/path $(FUZZ_ARTIFACTS)/path
+	./$(BUILD)/fuzz_escape_libfuzzer -runs=0 $(FUZZ_CORPUS)/escape $(FUZZ_ARTIFACTS)/escape
+	@echo "fuzz-replay: every input still passes"
 
 docker:
 	docker build -f deploy/Dockerfile -t dantrix:latest .
