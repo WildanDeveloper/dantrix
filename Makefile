@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.8.6
+VERSION := 0.8.7
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -79,7 +79,7 @@ EX_SRC := $(wildcard $(EXAMPLES)/*.c)
 EX_BINS := $(patsubst $(EXAMPLES)/%.c,$(BUILD)/%,$(EX_SRC))
 
 .PHONY: all release debug profile asan tsan examples \
-        test test-unit test-asan test-tsan test-regression test-c10k test-seccomp test-security test-toctou \
+        test test-unit test-asan test-tsan test-regression test-c10k test-seccomp test-security test-toctou soak \
         lint format format-check coverage bench stress fuzz fuzz-long fuzz-replay valgrind \
         install uninstall docker clean distclean help
 
@@ -263,12 +263,12 @@ bench:
 	@echo
 	@echo "Or run one scenario at a time with bench/run_wrk.sh."
 
-stress:
-	@bash bench/make_files.sh
-	@echo "stress: start the server, then hold load with idle_conns and wrk:"
-	@echo "  gcc -O2 -o build/idle_conns bench/tools/idle_conns.c"
-	@echo "  ./build/idle_conns -h 127.0.0.1 -p 8080 -n 10000 -t 600 -r -q"
-	@echo "  watch -n1 'grep VmRSS /proc/\$$(pidof dantrix)/status; ls /proc/\$$(pidof dantrix)/fd | wc -l'"
+stress: release
+	@echo "stress: running the soak test (the previous version of this target"
+	@echo "        only printed instructions, so the roadmap claim it exists to"
+	@echo "        verify could never fail)"
+	@python3 tests/soak_test.py --seconds $(SOAK_SECONDS) --clients $(SOAK_CLIENTS) \
+	    --active $(SOAK_ACTIVE) --rate $(SOAK_RATE) $(BIN)/dantrix
 
 # C10K check: hold N idle connections open at once. N defaults to 10000 and
 # can be overridden: make test-c10k N=2000
@@ -291,6 +291,12 @@ test-security: release
 # TOCTOU_SECONDS extends it.
 test-toctou: release
 	@python3 tests/toctou_test.py $(BIN)/dantrix
+
+# The full one-hour soak the roadmap's definition of done asks for. This is the
+# same test `make stress` runs with a shorter default.
+soak: release
+	@python3 tests/soak_test.py --seconds 3600 --clients 200 --active 4 --rate 50 \
+	    $(BIN)/dantrix
 
 # Fuzzers. Without clang/libFuzzer the standalone deterministic drivers run
 # the same invariant checks with plain gcc.
@@ -332,6 +338,12 @@ FUZZ_FLAGS := -std=c11 -D_GNU_SOURCE -O1 -g -fsanitize=fuzzer,address,undefined 
 FUZZ_CORPUS := $(CURDIR)/fuzz/corpus
 FUZZ_ARTIFACTS := $(CURDIR)/fuzz/artifacts
 HOURS ?= 0
+
+# Soak test parameters. The roadmap's one-hour run is `make soak`.
+SOAK_SECONDS ?= 300
+SOAK_CLIENTS ?= 200
+SOAK_ACTIVE ?= 4
+SOAK_RATE ?= 50
 FUZZ_SECONDS := $(shell if [ "$(HOURS)" != "0" ]; then echo $$(( $(HOURS) * 3600 )); else echo 1800; fi)
 
 $(BUILD)/fuzz_parser_libfuzzer: fuzz/fuzz_http_parser.c $(FUZZ_PARSER_SRCS) $(HDRS)

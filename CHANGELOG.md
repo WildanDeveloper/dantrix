@@ -12,6 +12,46 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.7] - 2026-10-14
+
+The soak test the roadmap claimed existed.
+
+### Fixed
+
+- **`make stress` did not stress anything.** It ran `bench/make_files.sh` and
+  then *printed instructions* for a human to hold load and watch RSS by hand. No
+  load was generated, nothing was measured and nothing could fail -- so the
+  roadmap claim "a stable 1-hour stress test (RSS and fd count flat)" was never
+  verified by anything. This is the same pattern the rest of v0.8 kept turning
+  up: a claim that cannot fail is not evidence. The target now runs the soak
+  test.
+
+### Added
+
+- **`tests/soak_test.py`** (`make stress`, `make soak`): holds idle connections
+  open while active clients stream requests, samples RSS, the descriptor count
+  and the believed/actual accounting gap on a fixed interval, and judges the
+  **trend** rather than the difference between the first and last sample. A slow
+  leak is invisible in a start-versus-end comparison, because allocator churn
+  over a short run is larger than the leak, but it is unmistakable as a slope.
+- The verdict distinguishes a leak from measurement noise in two ways, both
+  learned by watching the test misjudge a flat server: a slope needs a minimum
+  run length before it means anything (a 60-second fit over a few MiB of noise
+  read as hundreds of MiB/hour while the process sat at exactly 2176 kB for a
+  full minute), and a short run is judged on absolute change instead, with the
+  substitution stated in the output rather than silently applied.
+- The soak run pins `keepalive_timeout` past its own length. Without it the
+  server closes the idle connections mid-run -- correct behaviour, but it made
+  the descriptor count fall and would have looked like a finding.
+
+### Verified
+
+- The soak test catches a real leak: injecting 4 KiB of leaked heap per request
+  turned a 2.1 MiB server into 11.5 MiB in 61 seconds and failed the run
+  (`+9.34 MiB, 2605 requests`). With the leak removed the same run passes.
+- A flat server is not flagged: measured 2,176 kB of RSS unchanged across a full
+  minute of sustained requests, with the descriptor count constant at 13.
+
 ## [0.8.6] - 2026-10-14
 
 Closing v0.8: the atomic document-root claim, falsified rather than assumed.

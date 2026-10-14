@@ -508,7 +508,8 @@ Verify:
 | `make format`, `make format-check` | `clang-format` (rewrite, or check only) |
 | `make coverage` | `gcov` and `lcov`, results in `coverage/index.html` |
 | `make bench` | Run the benchmark scripts in `bench/` |
-| `make stress` | Long-running stress test |
+| `make stress` | Soak test: mixed load with an RSS/fd **trend** verdict (300s by default) |
+| `make soak` | The same test at the roadmap's one-hour length |
 | `make install`, `make uninstall` | Install or remove |
 | `make docker` | Build the Docker image `dantrix:latest` |
 | `make clean`, `make distclean` | Clean build artifacts |
@@ -1588,7 +1589,7 @@ These numbers are **goals**, not verified values.
 | Concurrent idle keep-alive connections | ≥ 10,000 (C10K) at v0.4; *stretch* ≥ 100,000 (C100K) at v0.7 |
 | User-space memory per idle connection | ≤ 1 KiB (excluding kernel memory) |
 | Small-file throughput with keep-alive on the same machine | ≥ 30,000 req/s (*stretch* higher) |
-| Stability | 0 crashes and 0 leaks in 24 hours of fuzzing (three targets: parser, path, escape) and a 1-hour stress test before v1.0 |
+| Stability | 0 crashes and 0 leaks in 24 hours of fuzzing (three targets: parser, path, escape) and a 1-hour soak (`make soak`) before v1.0 |
 
 ### Preparing the environment
 
