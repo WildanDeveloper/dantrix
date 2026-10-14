@@ -56,3 +56,7 @@ compile_commands.json
 # tree, so the whole corpus directory is ignored.
 /fuzz/artifacts/
 /fuzz/corpus/
+
+# Python bytecode from the test suites
+__pycache__/
+*.pyc
