@@ -12,6 +12,39 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.8] - 2026-10-14
+
+The soak verdict no longer fails on a sanitizer build, and the reason is measured.
+
+### Fixed
+
+- **The soak test failed in CI on the sanitizer build with +12.90 MiB of RSS
+  growth, and that was a false positive.** CI runs the soak against the ASan
+  binary, and AddressSanitizer grows without bound by design: it keeps metadata
+  per allocation (shadow memory, allocation stacks) and a quarantine of freed
+  memory, so RSS climbs as new allocations appear. The growth tracks allocation
+  *uniqueness*, not a leak in the program.
+  Measured on this machine, same workload, same source:
+  - **release build**: 2,176 kB -> 8,284 kB and then **exactly flat for 32
+    seconds** (the one-off is the pools reaching steady state);
+  - **ASan build**: 21.8 MiB -> 33.4 MiB and still climbing at the end.
+  A threshold that fits the release build fails every sanitizer run; a threshold
+  that fits the sanitizer would miss a real leak. The soak therefore judges the
+  **release** build and reports a sanitizer build's trend without a verdict,
+  saying so in the output.
+- The sanitizer detection inspects the whole path, not just the file name:
+  `build/asan/dantrix` and `build/dantrix-asan` are both recognised, which the
+  first version missed for one of the two shapes.
+
+### Verified
+
+- The verdict still fails on a real leak in the release build: injecting 4 KiB of
+  leaked heap per request produced +6.68 MiB in 45 seconds and failed the run.
+- The release build passes the same run with +0.03 MiB.
+- This is the second time the soak test itself was the thing that was wrong, and
+  both times the fix came from measuring the server rather than adjusting the
+  threshold until it passed.
+
 ## [0.8.7] - 2026-10-14
 
 The soak test the roadmap claimed existed.
