@@ -93,6 +93,14 @@ jobs:
           ./build/fuzz_asan
       - name: C10K check (2000 held connections)
         run: make test-c10k N=2000
+      - name: Seccomp sandbox (full workload with the filter armed + enforcement)
+        env:
+          DANTRIX_TEST_PORT: "18496"
+        run: python3 tests/seccomp_test.py build/dantrix-asan
+      - name: Security claims (traversal, smuggling, splitting, injection, limits)
+        env:
+          DANTRIX_TEST_PORT: "18497"
+        run: python3 tests/security_test.py build/dantrix-asan
 
   lint:
     name: lint

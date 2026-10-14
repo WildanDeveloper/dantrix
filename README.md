@@ -131,6 +131,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Per-IP connection limit (`max_conns_per_ip`) | ✅ | v0.8.1 |
 | Optional seccomp-bpf sandbox (`seccomp`) | ✅ | v0.8.2 |
 | Security review with every claim tested (`make test-security`) | ✅ | v0.8.3 |
+| Per-IP limit concurrency fix (TSan-verified) | ✅ | v0.8.4 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
 
@@ -858,14 +859,42 @@ daemonize = false
 | `etag` | bool | `true` | yes | Send and evaluate `ETag` |
 | `open_file_cache` | size | `0` | no | Descriptors kept open across requests. `0` = off (open and stat every request). Trades freshness for speed; see the note below |
 | `open_file_cache_valid` | duration | `0` | no | How long a cached descriptor is trusted. `0` = off |
-| `max_conns_per_ip` | int | `0` | no | Maximum simultaneous connections from one client address. `0` = unlimited |
-| `connlimit_slots` | size | `8192` | no | Size of the per-IP tracking table (shared by every worker) |
+| `max_conns_per_ip` | int | `0` | no | Maximum simultaneous connections from one client address. `0` = unlimited. See the note below |
+| `connlimit_slots` | size | `8192` | no | Size of the per-IP tracking table (shared by every worker). Raise it if you expect many distinct client addresses at once |
 | `seccomp` | bool | `false` | no | Install the seccomp-bpf allow list after start-up. See [Sandbox](#sandbox-seccomp-bpf) |
 | `mime_types` | path | empty | no | Additional file mapping extensions to MIME types (`mime.types` format) |
 | `default_type` | string | `application/octet-stream` | yes | MIME type for unknown extensions |
 | `cache_control` | string | empty | yes | `Cache-Control` header value (not sent if empty) |
 | `server_tokens` | bool | `true` | yes | `true`: `Server: Dantrix/x.y.z`. `false`: `Server: Dantrix` |
 | `add_header` | string | empty | yes | Additional response header `Name: value`. May be repeated |
+
+### Per-IP connection limit: what it does and does not guarantee
+
+`max_conns_per_ip` bounds how many connections one client address may hold at
+once. It is a **tracking table**, not a firewall, and its behaviour under
+pressure is deliberate:
+
+- **A full table fails open.** The table is sharded and direct-mapped: an
+  address hashes into one slot per shard, and a slot is only claimed for an
+  exact key match. When every slot an address probes is already taken by other
+  addresses, that address is **not tracked and its connections are allowed** --
+  never refused on suspicion, and no existing counter is touched. This is the
+  deliberate trade: a connection limit is a fairness control, not an access
+  control, so letting an untrackable client through is better than refusing a
+  legitimate one. The consequence is that `max_conns_per_ip` is a *soft* bound
+  once the table is exhausted, not a hard one. Size `connlimit_slots` for the
+  number of distinct addresses you expect at once: the default 8192 tracks
+  thousands, and an address needs a collision in all 16 shards to be skipped.
+- **It counts concurrent connections, not request rate.** A client that opens
+  and closes connections in a loop is bounded by the accept path, not by this
+  feature. Pair it with a firewall or a proxy-level rate limit if you need that.
+- **The counter is shared by every worker**, so the limit applies to the client
+  as a whole rather than to one worker's share. This is why the table is shared
+  memory rather than per-worker.
+- **The reservation is released when the slot is recycled**, not by each caller:
+  a path that ends a connection without releasing would otherwise ban that
+  address permanently, so the release lives where the connection slot is
+  recycled.
 
 ### Sandbox (seccomp-bpf)
 
@@ -1848,7 +1877,7 @@ GCC can also be used as an additional analyzer: `make debug CFLAGS_EXTRA=-fanaly
 | Giant headers or URIs | Exhausting memory | `max_request_line`, `max_header_size`, `max_headers` |
 | Range DoS | Many overlapping ranges | Only a single range is served |
 | File descriptor exhaustion | A flood of connections | `max_connections`, `RLIMIT_NOFILE` checks, *backpressure* on accept |
-| Connection flood from one IP | One client monopolizing connections | `max_conns_per_ip` (v0.8.1) |
+| Connection flood from one IP | One client monopolizing connections | `max_conns_per_ip` (v0.8.1), a shared lock-free counter. A *soft* bound: an address that cannot be tracked once the table is exhausted is allowed (fail open) -- see the note under the configuration table |
 | Open redirect | `GET //evil.com` triggers a `301` to `Location: //evil.com/` | Consecutive slashes are folded before `Location` is built; always starts with a single `/` |
 | Reflected XSS | Client input appearing on error pages or listings | Fixed error body (no client input); the listing HTML-escapes names and percent-encodes URLs |
 | Log injection | Control characters in the path or user-agent forging log lines | Escaped in all log formats |

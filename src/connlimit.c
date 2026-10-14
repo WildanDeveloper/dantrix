@@ -18,8 +18,24 @@
 
 typedef struct {
     _Atomic uint64_t count;
-    unsigned char key[DX_CL_KEY_MAX];
     uint8_t key_len;
+    unsigned char key[DX_CL_KEY_MAX];
+    /*
+     * The publication flag, written LAST by the winner and read FIRST by a
+     * lookup. It must be separate from the key bytes: a lookup that sees the
+     * flag set is guaranteed to see the whole key, and until the flag is set the
+     * slot is invisible.
+     *
+     * The claim order matters and was wrong twice before it was right:
+     *   - writing the key and *then* checking whether the slot was free let a
+     *     loser overwrite the winner's key, so two addresses shared a counter
+     *     and one allowance doubled (found by the CI sanitizer job);
+     *   - marking the slot claimed and *then* writing the key let a lookup see
+     *     a claimed slot with an incomplete key, so that address was never
+     *     found and its counter was lost (a lookup miss).
+     * Only "write the key, then publish the flag" is correct.
+     */
+    _Atomic uint32_t state;
 } dx_cl_slot_t;
 
 struct dx_connlimit {
@@ -88,6 +104,45 @@ void dx_connlimit_destroy(dx_connlimit_t *cl)
  * no free slot in any shard (a full table). When create_slot is true a free
  * slot is claimed; otherwise only an existing entry is returned.
  */
+/*
+ * Claim an empty slot for this key. Returns the slot on success, NULL when
+ * another worker won the race for it.
+ *
+ * The order is: reserve the slot with a CAS, write the key, publish the flag.
+ * The reservation CAS is what makes exactly one worker the winner, so only the
+ * winner ever writes the key bytes -- a loser cannot clobber them. The flag is
+ * published last with release ordering, so a lookup that observes it is
+ * guaranteed to see the complete key.
+ */
+static dx_cl_slot_t *claim_slot(dx_cl_slot_t *s, const void *addr, size_t addr_len)
+{
+    uint32_t expected = 0u;
+
+    if (!atomic_compare_exchange_strong_explicit(&s->state, &expected, 1u, memory_order_relaxed,
+                                                 memory_order_relaxed)) {
+        return NULL; /* somebody else claimed it */
+    }
+    /*
+     * The slot is ours and invisible to lookups (state == 1 is not yet
+     * published as a usable entry; see slot_matches). Fill it in, then publish.
+     */
+    memcpy(s->key, addr, addr_len);
+    s->key_len = (uint8_t)addr_len;
+    atomic_store_explicit(&s->count, 0u, memory_order_relaxed);
+    atomic_store_explicit(&s->state, 2u, memory_order_release); /* 2 = ready */
+    return s;
+}
+
+/* True when this slot holds exactly this key. A slot is only comparable once
+ * its owner has published it (state == 2). */
+static bool slot_matches(const dx_cl_slot_t *s, const void *addr, size_t addr_len)
+{
+    if (atomic_load_explicit((_Atomic uint32_t *)&s->state, memory_order_acquire) != 2u) {
+        return false;
+    }
+    return s->key_len == (uint8_t)addr_len && memcmp(s->key, addr, addr_len) == 0;
+}
+
 static dx_cl_slot_t *find_slot(dx_connlimit_t *cl, const void *addr, size_t addr_len,
                                bool create_slot)
 {
@@ -97,22 +152,23 @@ static dx_cl_slot_t *find_slot(dx_connlimit_t *cl, const void *addr, size_t addr
     for (uint32_t shard = 0; shard < DX_CL_SHARDS; shard++) {
         uint32_t h = key_hash(addr, addr_len, shard);
         dx_cl_slot_t *s = &cl->slots[(size_t)shard * cl->per_shard + (h % cl->per_shard)];
-        uint8_t len = atomic_load_explicit((_Atomic uint8_t *)&s->key_len, memory_order_acquire);
 
-        if (len == (uint8_t)addr_len && memcmp(s->key, addr, addr_len) == 0) {
+        if (slot_matches(s, addr, addr_len)) {
             return s;
         }
-        if (create_slot && len == 0u) {
+        if (create_slot && atomic_load_explicit(&s->state, memory_order_relaxed) == 0u) {
+            dx_cl_slot_t *claimed = claim_slot(s, addr, addr_len);
+
+            if (claimed != NULL) {
+                return claimed;
+            }
             /*
-             * Claim the slot. The length is published last with release
-             * ordering, so another worker that sees a non-zero length is
-             * guaranteed to see the key bytes that go with it.
+             * Lost the race: the winner may have claimed it for this very key,
+             * so re-check before moving on to the next shard.
              */
-            memcpy(s->key, addr, addr_len);
-            atomic_store_explicit(&s->count, 0u, memory_order_relaxed);
-            atomic_store_explicit((_Atomic uint8_t *)&s->key_len, (uint8_t)addr_len,
-                                  memory_order_release);
-            return s;
+            if (slot_matches(s, addr, addr_len)) {
+                return s;
+            }
         }
     }
     return NULL;
@@ -180,10 +236,23 @@ void dx_connlimit_release(dx_connlimit_t *cl, const void *addr, size_t addr_len)
 
 uint64_t dx_connlimit_count(const dx_connlimit_t *cl, const void *addr, size_t addr_len)
 {
-    /* find_slot() takes a non-const table; this cast only reads. */
-    dx_cl_slot_t *s = find_slot((dx_connlimit_t *)cl, addr, addr_len, false);
+    /*
+     * A read-only lookup, written out here rather than reusing find_slot() with
+     * a cast that drops const: that cast would let a future edit write through
+     * a const handle, and it hid the fact that counting never claims a slot.
+     */
+    if (cl == NULL || addr_len == 0u || addr_len > DX_CL_KEY_MAX) {
+        return 0u;
+    }
+    for (uint32_t shard = 0; shard < DX_CL_SHARDS; shard++) {
+        uint32_t h = key_hash(addr, addr_len, shard);
+        const dx_cl_slot_t *s = &cl->slots[(size_t)shard * cl->per_shard + (h % cl->per_shard)];
 
-    return (s != NULL) ? atomic_load_explicit(&s->count, memory_order_relaxed) : 0u;
+        if (slot_matches(s, addr, addr_len)) {
+            return atomic_load_explicit(&s->count, memory_order_relaxed);
+        }
+    }
+    return 0u;
 }
 
 uint64_t dx_connlimit_total(const dx_connlimit_t *cl)
@@ -207,7 +276,10 @@ uint64_t dx_connlimit_distinct(const dx_connlimit_t *cl)
         return 0;
     }
     for (size_t i = 0; i < cl->cap; i++) {
-        if (atomic_load_explicit(&cl->slots[i].count, memory_order_relaxed) > 0u) {
+        /* A slot counts as tracked once it is published, even if its count has
+         * since returned to zero (the entry stays until it is reused). */
+        if (atomic_load_explicit((_Atomic uint32_t *)&cl->slots[i].state, memory_order_relaxed) ==
+            2u) {
             n++;
         }
     }

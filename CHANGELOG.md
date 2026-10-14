@@ -12,6 +12,57 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.4] - 2026-10-14
+
+A concurrency defect in the per-IP limit, found by the CI sanitizer job.
+
+### Fixed
+
+- **`max_conns_per_ip` could be exceeded under a multi-worker race.** Claiming an
+  empty slot in the tracking table wrote the key first and only then checked
+  whether the slot was still free. The thread that lost the race had already
+  overwritten the winner's key bytes, so two client addresses ended up sharing
+  one counter: one address's allowance silently doubled, which is the exact
+  failure the limit exists to prevent.
+  The claim is now a compare-and-swap on a dedicated state word, and the key is
+  written **only by the winner, after it has won**. Proven with a probe that
+  starts 16 threads on a barrier against a table sized to the number of keys and
+  compares each key's own grants with its own counter: with the old code the
+  counter halves for one key (grants 2000, counter 1000); with the fix it is
+  exact over repeated runs.
+- Found because the CI sanitizer job reported `per-ip: accepted 5` for a limit
+  of 4 -- once, under load, in a job that had just started running the security
+  tests. The race is narrow, so it took a purpose-built probe with a start
+  barrier to reproduce locally rather than a plain traffic test.
+- `dx_connlimit_count()` no longer casts away `const` to reuse the lookup: the
+  cast would have allowed a future edit to write through a const handle, and it
+  hid the fact that counting never claims a slot.
+- `dx_connlimit_distinct()` now reports claimed slots rather than non-zero
+  counters, so an address whose connections all closed is still counted as
+  tracked until its slot is reused.
+- **A second ordering bug, found while fixing the first.** Marking a slot
+  claimed *before* writing its key let a lookup observe a claimed slot with an
+  incomplete key: the address was never found, so its connections were counted
+  nowhere and its limit was lost. The slot now has an explicit publication flag
+  written last with release ordering, and a lookup only compares a slot once
+  that flag is set. The claim order is now: reserve with a CAS (so exactly one
+  worker owns the slot and a loser cannot clobber the key), fill in the key,
+  then publish. Both wrong orders are documented in the code, because each looks
+  reasonable on its own and the difference is a memory-ordering argument rather
+  than something visible in the control flow.
+  ThreadSanitizer caught this one directly, naming the exact lines
+  (`slot_matches` reading `key_len` and `memcmp`-ing the key against
+  `claim_slot` writing them), which is what turned a suspicion into a
+  reproduction.
+
+### Tests
+
+- `test_connlimit` gained `concurrent_slot_claim` (137 checks total): 16 threads,
+  16 distinct keys, a start barrier, three rounds, and a per-key comparison of
+  grants against the counter. The earlier concurrency test compared a single
+  total, which could not distinguish "two keys, two allowances" from "one key's
+  allowance doubled" -- the assertion was wrong, not the code.
+
 ## [0.8.3] - 2026-10-13
 
 Hardening step 4: a security review with the claims actually tested, and a
