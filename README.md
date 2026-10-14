@@ -134,7 +134,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Per-IP limit concurrency fix (TSan-verified) | ✅ | v0.8.4 |
 | 24-hour fuzz campaign with a falsifiable harness | ✅ | v0.8.5 |
 | TOCTOU claim falsified by racing the filesystem | ✅ | v0.8.6 |
-| Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
+| Hardening: fuzzing, sanitizer in CI, security review | ✅ | v0.8.0–v0.8.6 |
 | Stable release | 📝 | v1.0.0 |
 
 > [!IMPORTANT]
@@ -1684,7 +1684,13 @@ All scenarios at once: `make bench`.
 
 ### Results template
 
-**Test environment (v0.7.0, measured)**
+**Test environment (measured at v0.7.0; not re-measured since)**
+
+> These numbers were measured at v0.7.0 and have **not** been re-run since. They
+> are kept because they are real measurements with the hardware and flags
+> recorded, not because they describe the current release: v0.7.1–v0.8.6 changed
+> the syscall path and the memory layout (see the S5 table, which was updated).
+> Re-run `bench/run_all.sh` on your own hardware rather than quoting these.
 
 | Item | Value |
 |---|---|
@@ -1709,7 +1715,11 @@ All scenarios at once: `make bench`.
 > is a single-process Python script and becomes its own bottleneck first. The
 > latency columns stay `TBD` until the scenario is run with `wrk`/`wrk2`.
 
-**S5: idle connections (measured, v0.7.2)**
+**S5: idle connections (measured at v0.7.2, still accurate)**
+
+> This table *was* updated after the pooled header table landed, so it describes
+> the current memory behaviour. It is the one number in this section that is
+> current rather than historical.
 
 | Idle connections | Dantrix RSS | Memory per connection |
 |---|---|---|
@@ -1896,7 +1906,7 @@ GCC can also be used as an additional analyzer: `make debug CFLAGS_EXTRA=-fanaly
 | Integer overflow | Sizes, offsets, `Content-Length` | `__builtin_*_overflow`, `_FILE_OFFSET_BITS=64`, strict number validation |
 | HTTP response splitting | CR/LF in response headers | Raw client input is never placed into response headers |
 | TOCTOU on files | A gap between "check" and "open" | No check-then-open pattern: `openat2` enforces the boundary atomically |
-| Privilege escalation | A compromised process | Drop privileges, `no_new_privs`, 📝 `seccomp-bpf` |
+| Privilege escalation | A compromised process | Drop privileges, `no_new_privs`, optional `seccomp-bpf` allow list |
 
 ### Build-time hardening
 
@@ -1930,7 +1940,9 @@ CI uses `-Werror`.
 1. Perform the `bind` as root or with `CAP_NET_BIND_SERVICE`, then drop privileges: `setgroups(0, NULL)`, `setgid`, `setuid`, and verify that `setuid(0)` now **fails**.
 2. Enable `prctl(PR_SET_NO_NEW_PRIVS, 1)`.
 3. Run as a dedicated non-root user; the document root is read-only (`ReadOnlyPaths` on systemd, or a `ro` mount).
-4. 📝 `seccomp-bpf` containing a syscall allowlist and an optional `chroot` (v0.8).
+4. Enable the seccomp allow list (`--seccomp on`): 79 syscalls, everything else
+   kills the process. `chroot` is deliberately **not** used -- see
+   [Known limitations](#known-limitations-and-trade-offs) in `SECURITY.md`.
 5. Place it behind a reverse proxy with TLS and set `bind = 127.0.0.1`.
 6. Limit resources: `LimitNOFILE` and `MemoryMax` (systemd), or `--memory` (Docker).
 

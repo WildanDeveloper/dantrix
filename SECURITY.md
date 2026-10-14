@@ -5,14 +5,15 @@
 Dantrix has **not** had an independent security audit. It does not support TLS.
 Do not expose it directly to the internet for sensitive data.
 
-What it *does* have, as of v0.8.3:
+What it *does* have, as of v0.8.6:
 
 - a documented threat model (below);
 - build-time hardening and a strict parser;
 - an optional seccomp-bpf sandbox;
 - **a test suite that verifies the security claims empirically**:
-  `make test-security` runs 30+ checks that attack a live server the way an
-  untrusted client would. A claim that cannot be tested is listed as
+  `make test-security` attacks a live server the way an untrusted client would,
+  and `make test-toctou` races the filesystem against it to try to falsify the
+  atomic document-root claim. A claim that cannot be tested is listed as
   *unverified* in the table rather than assumed true.
 
 ## Reporting a vulnerability
