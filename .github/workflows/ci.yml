@@ -118,6 +118,11 @@ jobs:
         env:
           DANTRIX_TEST_PORT: "18497"
         run: python3 tests/security_test.py build/dantrix-asan
+      - name: TOCTOU attempt (race the filesystem against the server)
+        env:
+          DANTRIX_TEST_PORT: "18498"
+          TOCTOU_SECONDS: "10"
+        run: python3 tests/toctou_test.py build/dantrix-asan
 
   lint:
     name: lint

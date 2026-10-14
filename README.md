@@ -133,6 +133,7 @@ Dantrix is developed with a **README-driven development** approach: this documen
 | Security review with every claim tested (`make test-security`) | ✅ | v0.8.3 |
 | Per-IP limit concurrency fix (TSan-verified) | ✅ | v0.8.4 |
 | 24-hour fuzz campaign with a falsifiable harness | ✅ | v0.8.5 |
+| TOCTOU claim falsified by racing the filesystem | ✅ | v0.8.6 |
 | Hardening: fuzzing, sanitizer in CI, security review | 📝 | v0.8.0 |
 | Stable release | 📝 | v1.0.0 |
 
@@ -2389,7 +2390,10 @@ Each release has a single capability as its theme. A checked box marks completed
 - [x] `seccomp-bpf` allow list: 79 syscalls, everything else kills the process
 - [x] Security review: every claim in `SECURITY.md` verified by
       `make test-security`; the slowloris header-timeout hole found and fixed
-- [ ] optional `chroot`
+- [x] `chroot` deliberately **not** implemented: `openat2(RESOLVE_BENEATH)` is a
+      kernel guarantee attached to the open call and is the stronger boundary;
+      the reasoning is in SECURITY.md. The atomic claim is now tested by racing
+      the filesystem against the server (`make test-toctou`).
 - [ ] Manual security review and `SECURITY.md`
 
 ### v1.0.0: Stable

@@ -12,6 +12,48 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.6] - 2026-10-14
+
+Closing v0.8: the atomic document-root claim, falsified rather than assumed.
+
+### Added
+
+- **`tests/toctou_test.py`** (`make test-toctou`): races the filesystem against
+  the server to try to falsify the claim that the document root is enforced
+  atomically. A writer thread swaps the requested target between a legitimate
+  file and a symlink pointing outside the root as fast as it can while four
+  readers request it. If there were a check-then-open window, some request would
+  land in it. Measured: **4,188 requests against 41,786 swaps, no leak.** The
+  claim in SECURITY.md moves from "verified by construction, not falsified" to
+  verified by attempted falsification.
+- Security tests for the symlink policy: an absolute link out, a relative link
+  out and a link that stays inside, under both `follow_symlinks` settings. The
+  inside link is *served* when the option is on, so a blanket refusal cannot
+  pass the test -- the policy has to be right, not merely strict.
+- A test that pins the hard-link behaviour and asserts the documentation covers
+  it, so the note cannot drift away from what the code does.
+
+### Documentation
+
+- **SECURITY.md now states that a hard link inside the document root is
+  served**, and why that is not a bypass: a hard link *is* an entry of the root,
+  indistinguishable from a regular file to the kernel, and every server serves
+  it. The boundary this project guarantees is "nothing outside the root is
+  reachable through a path", which a hard link does not violate. Previously this
+  behaviour was undocumented, which is the one thing it should not have been.
+- **`chroot` is documented as deliberately not implemented** rather than left as
+  a roadmap gap: `RESOLVE_BENEATH` is a kernel guarantee attached to the open
+  call, so it cannot be defeated by a path that changes between the check and the
+  use, and it needs no privileged setup step. Adding `chroot` would be a second,
+  weaker boundary on top of one that already holds.
+
+### Notes
+
+- The symlink policy was verified to be *differentiating*, not merely strict: with
+  `follow_symlinks = false` even a link that stays inside is refused, and with it
+  true that same link is served while the escaping ones are still refused. A
+  blanket "deny everything" implementation would have passed a naive test.
+
 ## [0.8.5] - 2026-10-14
 
 The 24-hour fuzz campaign, and the harness weakness it exposed.

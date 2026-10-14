@@ -71,7 +71,8 @@ claim is checked.
 | A syscall outside the seccomp allow list kills the process | probe built from the same filter source; dies with `SIGSYS` | verified |
 | HTML escaping cannot be bypassed and emits the correct entity | `fuzz/fuzz_escape.c` decodes its own output and compares it with the input (a round-trip), so a wrong entity is caught as well as a missing one. The harness was verified to catch an injected wrong-entity bug before the campaign was trusted | verified |
 | URL encoding cannot carry CR, LF, a space or a non-printable byte into a header | the same fuzz target asserts every emitted byte is printable and every `%` is followed by two hex digits | verified |
-| The kernel enforces the document root atomically (`openat2(RESOLVE_BENEATH)`) | no check-then-open pattern exists in the serving path; the fallback walk uses `O_NOFOLLOW` per segment. The kernel API itself is not something this test suite can falsify | verified by construction, not falsified |
+| The kernel enforces the document root atomically (`openat2(RESOLVE_BENEATH)`) | `tests/toctou_test.py` races the filesystem against the server: a writer swaps the target between a legitimate file and an escaping symlink as fast as it can while four readers request it. 4,188 requests against 41,786 swaps produced no leak | verified (attempted falsification) |
+| A symlink that leaves the root is refused, and one that stays inside is served when `follow_symlinks = true` | both settings are exercised with an absolute link out, a relative link out and a link that stays inside, so a blanket refusal cannot pass | verified |
 | A slowloris client (one byte at a time) cannot hold a connection open | a 0.4s drip with `header_timeout=1s` is closed after 1.6s; the same drip held the connection for 12.3s before v0.8.3 | verified |
 | A slow but *complete* request inside the window is still served | the same request sent in two halves 0.3s apart answers `200` | verified |
 | The header timeout is a deadline, the body timeout a gap | documented in the timeout table; the difference is deliberate, because they protect different things (a stuck header phase vs. a slow genuine upload) | verified by test |
@@ -85,7 +86,19 @@ claim is checked.
    short on a host that swaps files in place, or leave the cache off (the
    default).
 3. **No `chroot`.** The document root is enforced by `openat2`, not by a
-   filesystem namespace.
+   filesystem namespace. That is deliberate: `RESOLVE_BENEATH` is a kernel
+   guarantee attached to the open call itself, so it cannot be defeated by a
+   path that changes between the check and the use, and it does not need a
+   privileged setup step. `chroot` would add a second, weaker boundary on top of
+   the one that already holds -- and it is not a security boundary for a process
+   that is already root inside it.
+4. **A hard link inside the document root is served.** It is not a bypass: a
+   hard link *is* an entry of the root, indistinguishable from a regular file to
+   the kernel, and every server serves it. The boundary this project guarantees
+   is "nothing outside the root is reachable through a path", and a hard link
+   does not violate it -- the file it points at is, by definition, reachable as a
+   root entry. Keep secrets out of any directory that shares a filesystem with
+   the document root if a local user can create links there.
 4. **The local filesystem is trusted.** A local user who can modify the document
    root can influence what is served.
 5. **LeakSanitizer cannot run under the seccomp sandbox** (it spins at exit).

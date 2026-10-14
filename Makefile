@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.8.5
+VERSION := 0.8.6
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -79,7 +79,7 @@ EX_SRC := $(wildcard $(EXAMPLES)/*.c)
 EX_BINS := $(patsubst $(EXAMPLES)/%.c,$(BUILD)/%,$(EX_SRC))
 
 .PHONY: all release debug profile asan tsan examples \
-        test test-unit test-asan test-tsan test-regression test-c10k test-seccomp test-security \
+        test test-unit test-asan test-tsan test-regression test-c10k test-seccomp test-security test-toctou \
         lint format format-check coverage bench stress fuzz fuzz-long fuzz-replay valgrind \
         install uninstall docker clean distclean help
 
@@ -285,6 +285,12 @@ test-seccomp: release
 
 test-security: release
 	@python3 tests/security_test.py $(BIN)/dantrix
+
+# Races the filesystem against the server to try to falsify the atomic
+# document-root claim (see SECURITY.md). Runs for 10 seconds by default;
+# TOCTOU_SECONDS extends it.
+test-toctou: release
+	@python3 tests/toctou_test.py $(BIN)/dantrix
 
 # Fuzzers. Without clang/libFuzzer the standalone deterministic drivers run
 # the same invariant checks with plain gcc.

@@ -23,6 +23,7 @@ PORT = int(os.environ.get("DANTRIX_TEST_PORT", "18101")) + 90
 failures = []
 unverified = []
 ROOT = tempfile.mkdtemp(prefix="dantrix-sec-")
+SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def check(name, cond, detail=""):
@@ -156,6 +157,111 @@ def test_path_traversal(secret_path):
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def test_symlink_policy():
+    """Claim: follow_symlinks=false refuses every link that leaves the root, and
+    follow_symlinks=true still refuses the escaping ones while allowing the
+    links that stay inside.
+
+    A blanket refusal would pass a naive test, so both settings are exercised
+    with three shapes at once: an absolute link out, a relative link out, and a
+    link that stays inside.
+    """
+    print("security: symlink policy")
+
+    work = tempfile.mkdtemp(prefix="dantrix-symlink-")
+    root = os.path.join(work, "root")
+    os.makedirs(os.path.join(root, "sub"), exist_ok=True)
+    secret = os.path.join(work, "secret.txt")
+    with open(secret, "w", encoding="ascii") as f:
+        f.write("SYMLINK-SECRET")
+    with open(os.path.join(root, "sub", "inner.txt"), "w", encoding="ascii") as f:
+        f.write("inner")
+    os.symlink(secret, os.path.join(root, "abs_out"))
+    os.symlink("../secret.txt", os.path.join(root, "rel_out"))
+    os.symlink("sub/inner.txt", os.path.join(root, "stays_in"))
+
+    for follow in ("false", "true"):
+        port = PORT + (20 if follow == "false" else 21)
+        proc = subprocess.Popen(
+            [BIN, "-b", "127.0.0.1", "-p", str(port), "-r", root, "-w", "1",
+             "--access-log", "off", "--error-log", "/dev/null",
+             "-o", f"follow_symlinks={follow}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            if not wait_ready(proc, port):
+                check(f"symlink(follow={follow}): server started", False)
+                continue
+            for path in (b"/abs_out", b"/rel_out"):
+                data = raw(port, b"GET " + path + b" HTTP/1.1\r\nHost: x\r\n"
+                                 b"Connection: close\r\n\r\n")
+                check(f"symlink(follow={follow}): {path.decode()} does not escape",
+                      b"SYMLINK-SECRET" not in data, data[:40].decode("latin1", "replace"))
+            data = raw(port, b"GET /stays_in HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            if follow == "true":
+                check("symlink(follow=true): a link that stays inside is served",
+                      b"inner" in data, data[:40].decode("latin1", "replace"))
+            else:
+                check("symlink(follow=false): a link is refused even when it stays inside",
+                      b"inner" not in data, data[:40].decode("latin1", "replace"))
+        finally:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    shutil.rmtree(work, ignore_errors=True)
+
+
+def test_hardlink_is_a_root_entry():
+    """A hard link is not a bypass, and the documentation must say so.
+
+    A hard link created inside the document root IS an entry of that root: the
+    kernel cannot distinguish it from a regular file, and every server serves it.
+    This test records the behaviour explicitly so the SECURITY.md note about it
+    cannot drift, and so a future reader does not mistake it for a defect.
+    """
+    print("security: hard link is a root entry (documented, not a bypass)")
+
+    work = tempfile.mkdtemp(prefix="dantrix-hardlink-")
+    root = os.path.join(work, "root")
+    os.makedirs(root, exist_ok=True)
+    outside = os.path.join(work, "outside.txt")
+    with open(outside, "w", encoding="ascii") as f:
+        f.write("HARD-LINK-CONTENT")
+    try:
+        os.link(outside, os.path.join(root, "hard"))
+        linked = True
+    except OSError:
+        linked = False  # cross-device: cannot test here
+
+    if not linked:
+        note_unverified("hard link behaviour", "the filesystem does not allow hard links here")
+        shutil.rmtree(work, ignore_errors=True)
+        return
+
+    port = PORT + 22
+    proc = subprocess.Popen(
+        [BIN, "-b", "127.0.0.1", "-p", str(port), "-r", root, "-w", "1",
+         "--access-log", "off", "--error-log", "/dev/null"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("hardlink: server started", False)
+            return
+        data = raw(port, b"GET /hard HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        check("hardlink: served, because it is a real entry of the root",
+              b"HARD-LINK-CONTENT" in data, data[:40].decode("latin1", "replace"))
+        check("hardlink: the document root note covers this case",
+              "hard link" in open(os.path.join(SRC, "SECURITY.md"), encoding="utf-8").read())
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def test_hidden_files():
@@ -604,6 +710,8 @@ def main():
     secret = build_root()
     try:
         test_path_traversal(secret)
+        test_symlink_policy()
+        test_hardlink_is_a_root_entry()
         test_hidden_files()
         test_request_smuggling()
         test_response_splitting()
