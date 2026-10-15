@@ -115,10 +115,11 @@ The short version, so nothing has to be inferred from the tables below:
 
 | | |
 |---|---|
-| Current release | v0.8.10 (tagged, CI green on GCC and Clang with ASan/UBSan/TSan) |
-| Milestones complete | v0.1 through v0.8, except the two long runs below |
+| Current release | v0.8.13 (tagged, CI green on GCC and Clang with ASan/UBSan/TSan) |
+| Milestones complete | **v0.1 through v0.8, all of them.** Both long runs (the 24-hour fuzz campaign and the 1-hour soak) are done |
 | ✅ Just finished | **The 24-hour fuzz campaign**: 2,174,927,120 executions across three targets, zero crashes, zero artifacts. Both runs ended on their own timer. The campaign saturated early, so the number means "no random input breaks it", not "2 billion distinct scenarios" |
-| 🚧 Running now | **The 1-hour soak** (`make soak`), started once the fuzzers released the CPU: a soak judges the *trend* of RSS, and a server starved of CPU serves fewer requests, which would hide exactly the slow leak the test exists to find |
+| ✅ Just finished | **The 1-hour soak**: 3,601 s, 700,671 requests, RSS 2.4 -> 8.2 MiB once and then flat (fitted slope +1.64 MiB/h against a 4.00 budget), descriptors 217 -> 217 with zero growth, and the accounting gap constant. Verdict: no leak |
+| 🚧 Blocked | Nothing. The two long runs are done; the remaining work is the v1.0 decision below |
 | Next | Close v0.8, then decide whether the configuration and HTTP surface are ready to freeze for v1.0. The analysis and the blockers are in [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md) |
 
 A checkpoint like this goes stale, so the numbers above carry the date they were
@@ -2484,7 +2485,11 @@ Each release has a single capability as its theme. A checked box marks completed
 - [ ] All features from v0.1 to v0.8 complete and documented
 - [ ] All tests pass in CI (GCC and Clang; ASan, UBSan, TSan)
 - [ ] Fuzzing for ≥ 24 hours without crashes
-- [ ] A stable 1-hour stress test (RSS and fd count flat)
+- [x] A stable 1-hour stress test (RSS and fd count flat): `make soak`, 3,601 s
+      and 700,671 requests with an RSS slope of +1.64 MiB/h against a 4.00 budget
+      and zero descriptor growth. The test was verified to fail on an injected
+      leak (4 KiB per request -> +6.68 MiB in 45 s) before its pass meant
+      anything
 - [ ] The C10K test passes (10,000 idle connections plus 1,000 active connections)
 - [ ] Benchmark results documented and reproducible
 - [ ] `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `CHANGELOG.md` complete

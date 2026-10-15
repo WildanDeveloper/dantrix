@@ -12,6 +12,42 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.13] - 2026-10-15
+
+The 1-hour soak, complete: the last long run of the v0.8 milestone.
+
+### Verified
+
+- **`make soak` passed at the roadmap's one-hour length.** 3,601 seconds,
+  700,671 requests (195/s against a 200/s target), 720 samples:
+
+  | Metric | Result | Budget |
+  |---|---|---|
+  | RSS | 2.4 -> 8.2 MiB, **fitted slope +1.64 MiB/h** | 4.00 MiB/h |
+  | Descriptors | 217 -> 217, **slope 0.0/h** | 10/h |
+  | `fds_actual - fds_believed` | 5 -> 5, constant | must not move |
+  | Still serving afterwards | yes | -- |
+
+  The RSS growth is a **one-off**: +5.77 MiB as the pools reach steady state,
+  then flat. That is the distinction the trend verdict exists to make -- a leak
+  would grow in proportion to 700,671 requests, and the fitted slope would be
+  hundreds of MiB per hour rather than 1.64.
+
+- Zero descriptor growth over 700,671 requests confirms the v0.7.3 leak fix
+  holds under sustained load, not just in the short regression test.
+
+- The test's ability to fail was established before its pass was trusted:
+  injecting 4 KiB of leaked heap per request turned the same run into +6.68 MiB
+  in 45 seconds and failed it.
+
+### Notes
+
+- The first attempt at this run was **invalid and was discarded**: a `pkill -x
+  dantrix` inside an unrelated command killed the server being measured two
+  minutes in. That is the exact failure mode the README warns about for this
+  test, so the run was thrown away and restarted rather than reported. The
+  process check is now part of the command that does anything else.
+
 ## [0.8.12] - 2026-10-15
 
 The 24-hour fuzz campaign, complete, with what it does and does not prove.
