@@ -30,3 +30,16 @@ only when it can be measured against the default with the v0.7 benchmark suite.
   permanently would busy loop even in level-triggered mode.
 - Per-connection read budgets (a bounded number of read syscalls per event)
   prevent one busy connection from starving the others.
+
+## Update (2026-10-15)
+
+The condition in the decision -- "only when it can be measured against the
+default with the v0.7 benchmark suite" -- was met when v0.7 shipped with
+`bench/`, but the option was never implemented. `edge_triggered` is accepted by
+the configuration, warned about at start-up and otherwise ignored; the server
+always runs level-triggered. The decision above still stands on its own
+(correctness first), and the open question is whether to delete the key or
+implement it -- recorded in
+[`docs/v1.0-readiness.md`](../v1.0-readiness.md). Until that is decided, the ADR
+is **accepted but partially unfulfilled**, which is stated here rather than
+implied.
