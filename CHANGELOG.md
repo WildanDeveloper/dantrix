@@ -12,6 +12,40 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.14] - 2026-10-15
+
+The C10K criterion, both halves of it.
+
+### Added
+
+- **`tests/c10k_test.py` now runs the roadmap's "plus 1,000 active" half**, not
+  only the idle half. Holding idle connections is the easy part: an idle
+  connection owns no read buffer. The claim worth testing is that 1,000 clients
+  can be served *while* thousands sit idle, because then the server is working
+  with a large descriptor table, timer wheel and connection pool at the same
+  time.
+- It samples RSS and the descriptor count before and after the active burst, so
+  the cost is attributed to the active clients rather than to the total.
+
+### Verified
+
+- **C10K passes at the roadmap's size**, 10,000 idle plus 1,000 active:
+
+  | Measurement | Result |
+  |---|---|
+  | 10,000 connections opened | 0.9 s, all accepted, all answering |
+  | 1,000 active clients, 10,000 held idle | 1,000/1,000 served in 0.1 s |
+  | RSS during the burst | 51.8 -> 52.8 MiB (**+1.05 MiB**, ~1.1 KiB per active client) |
+  | Descriptors | 10,008 -> 11,008 (**+1,000**, exactly the new clients) |
+  | The idle set | survived the burst |
+  | Shutdown with all 11,000 open | exit 0, clean |
+
+  The growth being proportional to the *active* clients is the point: a server
+  that allocated per open socket would have grown ten times as much.
+
+- CI runs the same test at 2,000 idle plus 1,000 active on every push, so the
+  active half is exercised continuously rather than once.
+
 ## [0.8.13] - 2026-10-15
 
 The 1-hour soak, complete: the last long run of the v0.8 milestone.

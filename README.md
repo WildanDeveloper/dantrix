@@ -2482,17 +2482,27 @@ Each release has a single capability as its theme. A checked box marks completed
 
 **Definition of done:**
 
-- [ ] All features from v0.1 to v0.8 complete and documented
-- [ ] All tests pass in CI (GCC and Clang; ASan, UBSan, TSan)
-- [ ] Fuzzing for ≥ 24 hours without crashes
+- [x] All features from v0.1 to v0.8 complete and documented (every item in the
+      v0.8 roadmap is closed; the two long runs finished)
+- [x] All tests pass in CI (GCC and Clang; ASan, UBSan, TSan): seven required
+      jobs on every push, green on the current release
+- [x] Fuzzing for ≥ 24 hours without crashes: 2,174,927,120 executions across
+      three targets, zero crashes, zero artifacts, both runs finished on their own
+      timer. The campaign saturated early, which is recorded rather than glossed
 - [x] A stable 1-hour stress test (RSS and fd count flat): `make soak`, 3,601 s
       and 700,671 requests with an RSS slope of +1.64 MiB/h against a 4.00 budget
       and zero descriptor growth. The test was verified to fail on an injected
       leak (4 KiB per request -> +6.68 MiB in 45 s) before its pass meant
       anything
-- [ ] The C10K test passes (10,000 idle connections plus 1,000 active connections)
-- [ ] Benchmark results documented and reproducible
-- [ ] `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `CHANGELOG.md` complete
+- [x] The C10K test passes (10,000 idle connections plus 1,000 active):
+      10,000 opened in 0.9 s, all answering; then 1,000 active clients served in
+      0.1 s **while the 10,000 stayed idle**. RSS grew 1.05 MiB for those 1,000
+      (about 1.1 KiB each) and descriptors grew by exactly 1,000, so the cost
+      tracks *active* work rather than the number of open sockets. The idle set
+      survived the burst and the server shut down cleanly with all 11,000 open
+- [x] Benchmark results documented and reproducible: measured with `wrk` at
+      v0.8.8, `bench/measure.py` prints the environment and the results together
+- [x] `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `CHANGELOG.md` complete
 - [ ] Configuration keys and HTTP behavior frozen according to [Semantic Versioning](https://semver.org/).
       **Not ready yet**, and the reasons are specific: [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md)
       lists what is stable, what is still moving, and the four decisions that

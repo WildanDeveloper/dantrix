@@ -108,7 +108,9 @@ jobs:
               -DFUZZ_STANDALONE -Isrc fuzz/fuzz_path.c \
               src/path.c src/http_range.c src/mime.c -o build/fuzz_path_asan
           ./build/fuzz_path_asan
-      - name: C10K check (2000 held connections)
+      - name: C10K check (2,000 held connections plus 1,000 active)
+        env:
+          C10K_ACTIVE: "1000"
         run: make test-c10k N=2000
       - name: Soak check, short run (the leak verdict must not fire on a flat server)
         env:

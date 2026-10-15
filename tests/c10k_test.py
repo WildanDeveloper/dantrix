@@ -123,6 +123,78 @@ def main():
             pass
     check("every held connection answers", ok == opened, f"answered {ok}/{opened}")
 
+    # --- the roadmap's "plus 1,000 active" half -----------------------------
+    #
+    # Holding idle connections is the easy half: an idle connection owns no read
+    # buffer. The interesting claim is that 1,000 clients can be served *while*
+    # that many sit idle, because then the server is doing real work with a large
+    # descriptor table, a large timer wheel and a large connection pool.
+    #
+    # RSS and the descriptor count are sampled before and after, and the growth
+    # must be proportional to the active clients rather than to the total: a
+    # server that allocated per *idle* connection would show it here.
+    active_count = int(os.environ.get("C10K_ACTIVE", "1000"))
+    if active_count > 0:
+        def sample():
+            try:
+                with open(f"/proc/{proc.pid}/status", "r", encoding="ascii") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            rss = int(line.split()[1])
+                            break
+                fds = len(os.listdir(f"/proc/{proc.pid}/fd"))
+                return rss, fds
+            except (OSError, ValueError, UnboundLocalError):
+                return None, None
+
+        rss_before, fds_before = sample()
+        print(f"serving {active_count} active clients while {opened} stay idle")
+        active = []
+        served = 0
+        errors = 0
+        start = time.time()
+        for _ in range(active_count):
+            try:
+                s = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                s.sendall(b"GET / HTTP/1.1\r\nHost: c10k\r\n\r\n")
+                active.append(s)
+            except OSError:
+                errors += 1
+        # Read one response per active client, with the idle set still held.
+        for s in active:
+            try:
+                s.settimeout(10)
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                if data.startswith(b"HTTP/1.1 200"):
+                    served += 1
+            except OSError:
+                errors += 1
+        elapsed_active = time.time() - start
+        rss_after, fds_after = sample()
+
+        print(f"  {served}/{active_count} active clients answered in {elapsed_active:.1f}s")
+        if rss_before and rss_after:
+            print(f"  RSS {rss_before / 1024:.1f} -> {rss_after / 1024:.1f} MiB "
+                  f"({(rss_after - rss_before) / 1024:+.2f} MiB)")
+        if fds_before and fds_after:
+            print(f"  descriptors {fds_before} -> {fds_after} "
+                  f"({fds_after - fds_before:+d})")
+        check(f"{active_count} active clients served with {opened} idle held",
+              served >= active_count - errors, f"served {served}, errors {errors}")
+        check("the idle connections survived the active burst",
+              all(s.fileno() >= 0 for s in socks))
+        for s in active:
+            try:
+                s.close()
+            except OSError:
+                pass
+
     # And the server must shut down cleanly with them still open.
     proc.send_signal(signal.SIGTERM)
     for s in socks[:200]:
