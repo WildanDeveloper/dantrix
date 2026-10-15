@@ -117,8 +117,8 @@ The short version, so nothing has to be inferred from the tables below:
 |---|---|
 | Current release | v0.8.10 (tagged, CI green on GCC and Clang with ASan/UBSan/TSan) |
 | Milestones complete | v0.1 through v0.8, except the two long runs below |
-| 🚧 Running now | **The 24-hour fuzz campaign** (three targets). At the last check: 469 million executions, zero crashes, zero artifacts, coverage still growing |
-| 🚧 Waiting on the above | **The 1-hour soak** (`make soak`). It cannot be run while the fuzzers hold the CPU: a soak judges the *trend* of RSS, and a server starved of CPU serves fewer requests, which would hide exactly the slow leak the test exists to find |
+| ✅ Just finished | **The 24-hour fuzz campaign**: 2,174,927,120 executions across three targets, zero crashes, zero artifacts. Both runs ended on their own timer. The campaign saturated early, so the number means "no random input breaks it", not "2 billion distinct scenarios" |
+| 🚧 Running now | **The 1-hour soak** (`make soak`), started once the fuzzers released the CPU: a soak judges the *trend* of RSS, and a server starved of CPU serves fewer requests, which would hide exactly the slow leak the test exists to find |
 | Next | Close v0.8, then decide whether the configuration and HTTP surface are ready to freeze for v1.0. The analysis and the blockers are in [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md) |
 
 A checkpoint like this goes stale, so the numbers above carry the date they were
@@ -2438,15 +2438,29 @@ Each release has a single capability as its theme. A checked box marks completed
 
 - [x] Runtime descriptor accounting: `fds_believed` vs `fds_actual`, exposed in
       the status endpoint, so a descriptor leak is visible and testable
-- [~] **In progress: the 24-hour fuzz campaign is running right now.** Three
-      targets (parser, path, escape) under libFuzzer with ASan+UBSan, started
-      from a seeded corpus. Checked so far: 469 million executions, **zero
-      crashes**, zero artifacts written, and coverage still growing (path 291 ->
-      312). The roadmap claim is not marked done until the runs finish; the
-      progress is reported here instead of the checkbox being ticked early.
-      Before the campaign was trusted, the harness was shown to catch a real bug:
-      the escape fuzzer's original invariant missed a wrong-entity bug, so a
-      round-trip check was added and verified in both directions.
+- [x] **24-hour fuzz campaign, complete.** Three targets (parser, path, escape)
+      under libFuzzer with ASan+UBSan, from a seeded corpus:
+
+      | Target | Runs in 24 h | Branches reached |
+      |---|---|---|
+      | parser | 1,148,809,658 | 239 |
+      | path | 657,222,568 | 313 |
+      | escape | 368,894,894 | 66 |
+      | **total** | **2,174,927,120** | |
+
+      **Zero crashes, zero artifacts written.** Both runs finished on their own
+      timer (`Done N runs in 86401 second(s)`), so the campaign was not truncated.
+
+      Two caveats, because a big number is not evidence by itself. First, the
+      harness had to be shown to fail before its success meant anything: the
+      escape fuzzer's original invariant missed a wrong-entity bug (`<` mapped to
+      `&gt;` produced no raw quote character, so it passed), and only a round-trip
+      check caught it. Second, the campaign **saturated**: coverage stopped
+      growing well before the end -- `cov 313` appeared 16 times in the last 2,856
+      milestones where earlier values appeared hundreds of times. The billions of
+      executions are mostly repeats of known paths, not billions of distinct
+      scenarios. The bugs found during v0.8 came from TSan, from purpose-built
+      tests and from reading the code, not from this campaign.
 - [x] ASan, UBSan, and TSan as mandatory parts of CI (two required jobs run on
       every push; between them they found the descriptor leak, the per-IP slot
       race, and the sanitizer interaction with the seccomp filter)

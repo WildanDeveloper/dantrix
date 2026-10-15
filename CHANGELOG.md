@@ -12,6 +12,45 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.12] - 2026-10-15
+
+The 24-hour fuzz campaign, complete, with what it does and does not prove.
+
+### Verified
+
+- **The 24-hour campaign finished on its own timer on all three targets:**
+
+  | Target | Runs in 24 h | Branches reached |
+  |---|---|---|
+  | parser | 1,148,809,658 | 239 |
+  | path | 657,222,568 | 313 |
+  | escape | 368,894,894 | 66 |
+  | **total** | **2,174,927,120** | |
+
+  Zero crashes and zero artifacts: `fuzz/artifacts/` contains the three empty
+  directories the campaigns were pointed at. Both runs ended with
+  `Done N runs in 86401 second(s)`, so neither was truncated.
+
+### Notes
+
+- **What the number does not mean.** The campaign saturated: coverage stopped
+  growing well before the end, with `cov 313` appearing 16 times in the last 2,856
+  milestones where earlier values appeared hundreds of times. The billions of
+  executions are mostly repeats of already-known paths, so "2.17 billion runs" is
+  not "2.17 billion distinct scenarios". The honest summary is: no random input
+  found a way to crash, hang or corrupt the server, and the search space was
+  exhausted early.
+- **What actually found the bugs.** Every defect fixed during v0.8 came from
+  somewhere other than this campaign: the descriptor leak from the accounting
+  audit, the per-IP slot race from TSan, the slowloris hole from a test written to
+  falsify the documentation, the `add_header` CRLF injection and the
+  valid-config-breaks-everything bug from implementing and reviewing the feature.
+  Fuzzing covers input handling; it cannot see concurrency, time, or a
+  configuration that is accepted and then ignored.
+- The harness was proven able to fail before the campaign was trusted: injecting
+  a wrong-entity bug made the escape fuzzer report it, after the original
+  invariant had missed the same bug across 300,000 iterations.
+
 ## [0.8.11] - 2026-10-14
 
 Status reporting while the long runs finish, and a v1.0 readiness analysis.
