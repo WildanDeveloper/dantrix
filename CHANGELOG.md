@@ -12,6 +12,33 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.18] - 2026-10-15
+
+The version-drift check: the class of defect that produced every fix in the last
+three releases, now caught by a test instead of by reading.
+
+### Fixed
+
+- The README's status table said **"Current release: v0.8.14"** while the binary
+  was at 0.8.17. This is the same drift the directory tree and the key counts had:
+  a number written once and never revisited. It is now v0.8.17, and a test keeps
+  it that way.
+- `docs/v1.0-readiness.md` had no statement of which release it describes, so a
+  reader could not tell whether its counts were history or a current claim. It now
+  carries a review marker (`Written at v0.8.11 and reviewed at v0.8.17`), and the
+  test requires that marker to name the release the binary reports.
+
+### Added
+
+- Two checks in `tests/config_test.py`:
+  - every "current release" mention in `README.md` and
+    `docs/v1.0-readiness.md` matches `dantrix --version`;
+  - the readiness document's review marker matches it too.
+- The suite now runs 22 checks, and every one of them has been shown able to fail
+  by injecting the defect it exists to catch: the stale version in the README,
+  the stale review marker, the "(45 keys)" claim, the "planned for v0.7" message,
+  and a nonexistent path in the directory tree.
+
 ## [0.8.16] - 2026-10-15
 
 The documentation audit that the new configuration test made possible. Two more

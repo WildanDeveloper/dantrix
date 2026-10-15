@@ -260,6 +260,36 @@ def main():
           all(f"{g}/" in block and "ignored" in block for g in generated))
     print(f"  (paths in the tree: {len(candidates)}, generated: {len(generated)})")
 
+    # --- 5d. Every document that names a version names the current one ------
+    # The status table said "Current release: v0.8.14" while the binary was at
+    # 0.8.17, and the readiness document carried the same stale version. A
+    # document that names the current release must name the one the binary
+    # reports; historical mentions ("since v0.8.10", "before v0.8.3") are fine and
+    # are not matched by this check, which only looks at the "current release"
+    # pattern.
+    version_out = subprocess.run([BIN, "--version"], capture_output=True, timeout=15,
+                                 cwd=REPO).stdout.decode("utf-8", "replace")
+    m = re.search(r"(\d+\.\d+\.\d+)", version_out)
+    check("the binary reports a version", bool(m), version_out.strip()[:80])
+    if m:
+        current = m.group(1)
+        for doc in ("README.md", "docs/v1.0-readiness.md"):
+            text = open(os.path.join(REPO, doc), "r", encoding="utf-8").read()
+            stale = re.findall(r"[Cc]urrent release[^\n|]*v(\d+\.\d+\.\d+)", text)
+            stale += re.findall(r"[Cc]urrent release\s*\|\s*v(\d+\.\d+\.\d+)", text)
+            check(f"{doc} names the current release as v{current}",
+                  all(v == current for v in stale) if stale else True,
+                  f"binary is {current}, document says {stale}")
+            # The readiness document states which release it was reviewed at. It
+            # is allowed to describe older releases as history (it does), so this
+            # looks specifically for the review marker and requires it to name the
+            # release the binary reports -- otherwise the document silently
+            # describes a surface that has moved.
+            marker = re.search(r"reviewed at v(\d+\.\d+\.\d+)", text)
+            if marker:
+                check(f"{doc}'s review marker names the current release",
+                      marker.group(1) == current,
+                      f"binary is {current}, marker says v{marker.group(1)}")
     # --- 6. A live key is honoured, not just accepted -----------------------
     # `add_header` is the key that was documented as unimplemented for two
     # releases. Acceptance is not enough: the header has to arrive.
