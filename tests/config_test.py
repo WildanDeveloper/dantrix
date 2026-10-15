@@ -38,6 +38,10 @@ import time
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "bin/dantrix"
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Same convention as the other standalone suites: the CI sets DANTRIX_TEST_PORT
+# per job so parallel jobs cannot collide on a fixed port. The offsets keep the
+# three ports this file uses apart from each other.
+PORT_BASE = int(os.environ.get("DANTRIX_TEST_PORT", "18076"))
 
 failures = []
 checks = 0
@@ -67,7 +71,7 @@ def run_config(conf_text, timeout=6):
         with open(os.path.join(docroot, "index.html"), "w", encoding="ascii") as f:
             f.write("<h1>cfg</h1>\n")
         conf = os.path.join(d, "dantrix.conf")
-        text = f"bind = 127.0.0.1\nport = 18077\nroot = {docroot}\n" + conf_text
+        text = f"bind = 127.0.0.1\nport = {PORT_BASE}\nroot = {docroot}\n" + conf_text
         with open(conf, "w", encoding="ascii") as f:
             f.write(text)
         proc = subprocess.Popen([BIN, "-c", conf], stdout=subprocess.PIPE,
@@ -162,7 +166,7 @@ def main():
         pidfile = os.path.join(d, "dantrix.pid")
         conf = os.path.join(d, "dantrix.conf")
         with open(conf, "w", encoding="ascii") as f:
-            f.write(f"bind = 127.0.0.1\nport = 18077\nroot = {docroot}\n"
+            f.write(f"bind = 127.0.0.1\nport = {PORT_BASE}\nroot = {docroot}\n"
                     f"access_log = {logfile}\npid_file = {pidfile}\n"
                     f"max_connections = not_a_number\n")
         proc = subprocess.run([BIN, "-c", conf], capture_output=True, timeout=10, cwd=REPO)
@@ -220,16 +224,25 @@ def main():
     # The tree claimed files that do not exist (CODE_OF_CONDUCT.md, .clang-tidy,
     # sanitizers.yml, four ADR files) for several releases, because it was written
     # as a target rather than a description and nothing checked it. This walks the
-    # drawing and looks for every path on disk.
+    # drawing and looks for every path.
+    #
+    # Three entries are git-ignored runtime directories (fuzz/corpus,
+    # fuzz/artifacts, bench/results). They are marked in the tree as generated and
+    # are exempt here: a fresh clone legitimately does not have them, and this
+    # check runs on a fresh clone in CI. CI caught exactly that -- the check
+    # failed there with ['artifacts', 'corpus', 'results'] while passing locally,
+    # which is the useful failure: it proved the check reads the clone rather than
+    # the author's working tree.
     readme = open(os.path.join(REPO, "README.md"), "r", encoding="utf-8").read()
     tree_start = readme.index("## Directory Structure")
     fence = readme.index("```text", tree_start)
     tree_end = readme.index("```", fence + 7)
     block = readme[fence:tree_end]
+    generated = {"corpus", "artifacts", "results"}
     candidates = set()
     for m in re.finditer(r"([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)/?\s*(?:#.*)?$", block, re.M):
         name = m.group(1).strip()
-        if name and name not in ("text", "dantrix"):
+        if name and name not in ("text", "dantrix") and name not in generated:
             candidates.add(name)
     dirs = [".", "src", "tests", "fuzz", "bench", "bench/tools", "conf", "deploy",
             "docs", "docs/adr", "examples", ".github/workflows", "tests/unit",
@@ -243,7 +256,9 @@ def main():
             missing.append(name)
     check("every path in the README's directory tree exists", not missing,
           f"claimed but absent: {missing}")
-    print(f"  (paths in the tree: {len(candidates)})")
+    check("the generated directories are marked as generated in the tree",
+          all(f"{g}/" in block and "ignored" in block for g in generated))
+    print(f"  (paths in the tree: {len(candidates)}, generated: {len(generated)})")
 
     # --- 6. A live key is honoured, not just accepted -----------------------
     # `add_header` is the key that was documented as unimplemented for two
@@ -255,7 +270,7 @@ def main():
         os.makedirs(docroot, exist_ok=True)
         with open(os.path.join(docroot, "index.html"), "w", encoding="ascii") as f:
             f.write("<h1>cfg</h1>\n")
-        port = 18076
+        port = PORT_BASE + 1
         conf = os.path.join(d, "dantrix.conf")
         with open(conf, "w", encoding="ascii") as f:
             f.write(f"bind = 127.0.0.1\nport = {port}\nroot = {docroot}\n"

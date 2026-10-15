@@ -1302,7 +1302,9 @@ Docker), rotation is handled by the platform.
 ## Directory Structure
 
 This is the structure as it exists on disk, verified against the working tree
-rather than planned. Every path below is a real file.
+rather than planned. Three entries are **generated at runtime** and therefore
+absent from a fresh clone (`fuzz/corpus/`, `fuzz/artifacts/`, `bench/results/`);
+they are marked below, and `.gitignore` explains why. Everything else is tracked.
 
 ```text
 dantrix/
@@ -1321,7 +1323,7 @@ dantrix/
 │   ├── slowloris.py              # slow-connection resilience test
 │   ├── tools/
 │   │   └── idle_conns.c          # hold N idle connections (C10K test)
-│   └── results/                  # results per date and commit
+│   └── results/                  # results per date and commit (written by make bench; git-ignored)
 ├── conf/
 │   ├── dantrix.conf              # full example configuration
 │   └── mime.types
@@ -1346,8 +1348,8 @@ dantrix/
 │   ├── fuzz_path.c               # path resolution, ranges, MIME
 │   ├── fuzz_escape.c             # HTML escaping and URL encoding
 │   ├── seed_corpus.py            # writes the seed inputs
-│   ├── corpus/                   # seed input, per target
-│   └── artifacts/                # a crash lands here, with its reproducer
+│   ├── corpus/                   # seed input per target (written by seed_corpus.py; git-ignored)
+│   └── artifacts/                # a crash lands here (created at runtime; git-ignored)
 ├── src/
 │   ├── main.c                    # CLI: flags, durations, validation
 │   ├── dantrix.h                 # constants, macros, version

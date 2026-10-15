@@ -40,12 +40,25 @@ classes of drift, both invisible to every test that starts a server.
 
 ### Added
 
-- Two more checks in `tests/config_test.py`, both shown able to fail:
+- More checks in `tests/config_test.py`, all shown able to fail:
   - **every path in the README's directory tree exists on disk** (injecting
     `.clang-tidy` into the tree fails the test);
+  - the three **runtime-generated directories** (`fuzz/corpus/`,
+    `fuzz/artifacts/`, `bench/results/`) are marked as generated in the tree,
+    because they are git-ignored and legitimately absent from a fresh clone;
   - every CLI flag has help text, and the flag count is counted rather than
     copied from prose.
-- The suite now runs 17 checks.
+- The suite now runs 18 checks.
+
+### Notes
+
+- **CI caught a real weakness in the new check, which is the useful part.** The
+  tree check passed locally and failed on the runner with
+  `claimed but absent: ['artifacts', 'corpus', 'results']` -- the three
+  git-ignored runtime directories. The failure proved the check reads the clone
+  rather than the author's working tree, so it was fixed by marking those three
+  entries as generated and exempting them, not by weakening the check. It was
+  then re-verified against a tree with those directories deleted.
 
 ## [0.8.15] - 2026-10-15
 
