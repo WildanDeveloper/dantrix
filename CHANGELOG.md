@@ -12,6 +12,52 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.15] - 2026-10-15
+
+A new test suite for the one surface nothing tested: the configuration itself.
+It found three stale claims on its first run.
+
+### Added
+
+- **`tests/config_test.py`** (`make test-config`), which reads the configuration
+  surface the way an operator does: it writes configuration files, starts the
+  binary and checks what the process does. It enforces four rules -- a documented
+  key must be registered; a key that is accepted but has no effect must say so on
+  stderr; a value that cannot be used must be rejected loudly rather than silently
+  downgraded; and a rejected configuration must exit 2 without leaving a log or
+  pid file behind. It also cross-checks the README's stated key count against the
+  rows in its table and confirms every CLI flag has help text.
+- The suite runs in CI on every push, against the ASan build, alongside the other
+  standalone suites.
+
+### Fixed
+
+- **Three stale claims, all found by the new suite:**
+  - `src/main.c` told the operator `edge_triggered is not implemented yet
+    (planned for v0.7)` -- a version that shipped nine releases earlier. The
+    message now states the key has no effect and names no release, because a
+    promise with a version in it goes stale.
+  - The README still listed `add_header` as "announced as not implemented" when
+    it has worked since v0.8.10 (verified: the header arrives). Only
+    `edge_triggered` is a no-op now, and the README says so.
+  - The README's reference table was announced as "(45 keys)" while it contains
+    50 rows, and `docs/v1.0-readiness.md` claimed 49 keys and 45 CLI flags. The
+    verified counts are **50 configuration keys** and **46 CLI flags**; the
+    readiness document now carries the method, not just the number.
+- The README's directory listing was missing five test files: `config_test.py`,
+  `security_test.py`, `seccomp_test.py`, `toctou_test.py` and `soak_test.py`.
+
+### Notes
+
+- The new suite was shown able to fail before it was trusted: restoring the
+  "planned for v0.7" message makes it fail, and restoring the "(45 keys)" claim
+  makes it fail. It also **fails against the v0.8.14 binary**, which is the
+  regression check that proves it tests the binary rather than itself.
+- This is the class of defect the rest of the suite could not see. Every other
+  test starts a server and makes requests; none of them read the documentation
+  against the binary, so prose could drift for releases without anything
+  contradicting it.
+
 ## [0.8.14] - 2026-10-15
 
 The C10K criterion, both halves of it.

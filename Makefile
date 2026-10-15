@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.8.14
+VERSION := 0.8.15
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -79,7 +79,7 @@ EX_SRC := $(wildcard $(EXAMPLES)/*.c)
 EX_BINS := $(patsubst $(EXAMPLES)/%.c,$(BUILD)/%,$(EX_SRC))
 
 .PHONY: all release debug profile asan tsan examples \
-        test test-unit test-asan test-tsan test-regression test-c10k test-seccomp test-security test-toctou soak \
+        test test-unit test-asan test-tsan test-regression test-c10k test-seccomp test-security test-toctou test-config soak \
         lint format format-check coverage bench stress fuzz fuzz-long fuzz-replay valgrind \
         install uninstall docker clean distclean help
 
@@ -282,6 +282,13 @@ test-c10k: release
 
 test-seccomp: release
 	@python3 tests/seccomp_test.py $(BIN)/dantrix
+
+# Reads the configuration surface the way an operator does: documented keys must
+# be registered, a no-op key must say so, a rejected config must leave nothing
+# behind. This is the suite that catches documentation drifting away from the
+# binary (it found the stale add_header and edge_triggered claims).
+test-config: release
+	@python3 tests/config_test.py $(BIN)/dantrix
 
 test-security: release
 	@python3 tests/security_test.py $(BIN)/dantrix

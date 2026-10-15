@@ -375,13 +375,13 @@ Principles that are maintained:
 
 ### Level-Triggered vs Edge-Triggered
 
-| Aspect | Level-triggered (default) | Edge-triggered (`edge_triggered = true`) |
+| Aspect | Level-triggered (default, the only mode implemented) | Edge-triggered (`edge_triggered = true`, **not implemented**) |
 |---|---|---|
 | Notification | As long as the fd is ready | Only when a change occurs (new data arrives) |
 | Application obligation | May read partially | **Must** read or write until `EAGAIN` |
 | Risk | More wakeups | Lost events if not drained; one busy connection can starve the others |
 | Complexity | Lower | Higher |
-| When to use | Default, debugging | Optimization experiments (v0.7), compared via benchmarks |
+| Status in Dantrix | In use | The key is accepted and start-up prints a warning that it has no effect. It is not on a release schedule; see [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md) |
 
 In both modes, Dantrix limits the number of consecutive operations per event (a per-connection *budget*) so that one busy connection does not hold up other connections.
 
@@ -839,7 +839,7 @@ daemonize = false
 ### Reference for all keys
 
 <details>
-<summary><strong>Open the reference table (45 keys)</strong></summary>
+<summary><strong>Open the reference table (50 keys)</strong></summary>
 
 &nbsp;
 
@@ -854,7 +854,7 @@ daemonize = false
 | `reuseport` | bool | `true` | no | One listener per worker with `SO_REUSEPORT`. `false` = one shared listener with `EPOLLEXCLUSIVE` |
 | `max_connections` | int | `16384` | no | Limit of active connections **per worker**. Total = `workers` × this value |
 | `cpu_affinity` | bool | `false` | no | Pin workers to CPU cores |
-| `edge_triggered` | bool | `false` | no | Use `EPOLLET` (see [Level-Triggered vs Edge-Triggered](#level-triggered-vs-edge-triggered)) |
+| `edge_triggered` | bool | `false` | no | **Accepted but has no effect**: the server always runs level-triggered and warns at start-up. See [Level-Triggered vs Edge-Triggered](#level-triggered-vs-edge-triggered) |
 
 **Timeouts** (seconds, supporting the `s`/`m`/`h` suffixes)
 
@@ -1007,12 +1007,13 @@ as a warning and the server continues without the sandbox.
 > Since v0.8.10 every key above is **applied**. The listener tunables
 > (`tcp_defer_accept`, `tcp_fastopen`, `socket_rcvbuf`, `socket_sndbuf`) are set
 > on the listening socket before `listen()`; an option the kernel refuses is
-> reported as a warning and the server keeps running without it. The two keys
-> still announced as not implemented are `edge_triggered` and `add_header`.
-> `log_format = json` is rejected with exit code 2 rather than silently
-> downgraded. `root`, `index` and `mime_types` open a file descriptor at
-> start-up and are therefore **not** re-applied on `SIGHUP`; everything else in
-> the table reloads live.
+> reported as a warning and the server keeps running without it. The one key
+> still announced as not implemented is `edge_triggered`, which is accepted,
+> warned about at start-up and otherwise ignored (verified: the server runs
+> level-triggered with it set). `log_format = json` is rejected with exit code 2
+> rather than silently downgraded. `root`, `index` and `mime_types` open a file
+> descriptor at start-up and are therefore **not** re-applied on `SIGHUP`;
+> everything else in the table reloads live.
 
 </details>
 
@@ -1387,6 +1388,11 @@ dantrix/
 │   │   └── test_status.c
 │   ├── smoke_test.py             # end-to-end integration (starts its own server)
 │   ├── regression_test.py        # regressions that need a separate server process
+│   ├── config_test.py            # documented config surface vs the binary
+│   ├── security_test.py          # attacks a live server; every SECURITY.md claim
+│   ├── seccomp_test.py           # the sandbox under a full workload
+│   ├── toctou_test.py            # races the filesystem against the server
+│   ├── soak_test.py              # RSS/fd trend over a long run
 │   ├── tsan_test.py              # concurrent traffic + ThreadSanitizer detection
 │   └── c10k_test.py              # N concurrent connections
 ├── .clang-format

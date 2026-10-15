@@ -131,6 +131,10 @@ jobs:
           DANTRIX_TEST_PORT: "18498"
           TOCTOU_SECONDS: "10"
         run: python3 tests/toctou_test.py build/dantrix-asan
+      - name: Configuration surface (documented keys, no-op warnings, rejection)
+        env:
+          DANTRIX_TEST_PORT: "18499"
+        run: python3 tests/config_test.py build/dantrix-asan
 
   lint:
     name: lint

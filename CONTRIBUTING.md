@@ -38,6 +38,7 @@ make test-regression   # the defect regression suite
 make test-security     # attacks a live server; every SECURITY.md claim
 make test-toctou       # races the filesystem against the server
 make test-seccomp      # the sandbox under a full workload
+make test-config       # the documented configuration surface vs the binary
 make lint              # cppcheck
 make format-check      # clang-format
 make fuzz              # the deterministic fuzz drivers (no Clang needed)

@@ -744,9 +744,16 @@ int main(int argc, char **argv)
         return DX_EXIT_USAGE;
     }
 
-    /* Features that are documented but not implemented yet stay explicit. */
+    /*
+     * Features that are documented but not implemented yet stay explicit: an
+     * accepted key that silently does nothing is worse than one that is
+     * rejected, so the operator is told at start-up. The message names no
+     * release, because the key has no schedule attached to it (see
+     * docs/v1.0-readiness.md).
+     */
     if (set.edge_triggered) {
-        fprintf(stderr, "dantrix: edge_triggered is not implemented yet (planned for v0.7)\n");
+        fprintf(stderr, "dantrix: edge_triggered is not implemented; the server runs "
+                        "level-triggered and this key has no effect\n");
     }
 
     /*
