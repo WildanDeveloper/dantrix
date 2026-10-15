@@ -115,12 +115,13 @@ The short version, so nothing has to be inferred from the tables below:
 
 | | |
 |---|---|
-| Current release | v0.8.13 (tagged, CI green on GCC and Clang with ASan/UBSan/TSan) |
-| Milestones complete | **v0.1 through v0.8, all of them.** Both long runs (the 24-hour fuzz campaign and the 1-hour soak) are done |
+| Current release | v0.8.14 (tagged, CI green on GCC and Clang with ASan/UBSan/TSan) |
+| Milestones complete | **v0.1 through v0.8, all of them.** Both long runs (the 24-hour fuzz campaign and the 1-hour soak) are done, and the C10K criterion is met |
 | ✅ Just finished | **The 24-hour fuzz campaign**: 2,174,927,120 executions across three targets, zero crashes, zero artifacts. Both runs ended on their own timer. The campaign saturated early, so the number means "no random input breaks it", not "2 billion distinct scenarios" |
 | ✅ Just finished | **The 1-hour soak**: 3,601 s, 700,671 requests, RSS 2.4 -> 8.2 MiB once and then flat (fitted slope +1.64 MiB/h against a 4.00 budget), descriptors 217 -> 217 with zero growth, and the accounting gap constant. Verdict: no leak |
-| 🚧 Blocked | Nothing. The two long runs are done; the remaining work is the v1.0 decision below |
-| Next | Close v0.8, then decide whether the configuration and HTTP surface are ready to freeze for v1.0. The analysis and the blockers are in [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md) |
+| ✅ Just finished | **C10K, both halves**: 10,000 idle connections opened in 0.9 s and all answering, then 1,000 active clients served in 0.1 s while the 10,000 stayed idle. RSS grew 1.05 MiB for the active 1,000 (about 1.1 KiB each) and descriptors grew by exactly 1,000 |
+| 🚧 Blocked | Nothing technical. Seven of the eight v1.0 criteria are met; the eighth is the API freeze, which is a maintainer decision |
+| Next | Decide the four open items in [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md): `edge_triggered` (remove or implement), `log_format = json` (implement or drop from the docs), multi-range (permanent deviation or implement), and whether to freeze v1.0 at all |
 
 A checkpoint like this goes stale, so the numbers above carry the date they were
 taken. Anything that looks like a claim without a measurement is a mistake in
