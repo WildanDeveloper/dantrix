@@ -216,6 +216,35 @@ def main():
           f"missing: {[f for f in flags if f'--{f}' not in help_out]}")
     print(f"  (CLI flags in the table: {len(flags)})")
 
+    # --- 5c. The directory tree in the README describes real files ----------
+    # The tree claimed files that do not exist (CODE_OF_CONDUCT.md, .clang-tidy,
+    # sanitizers.yml, four ADR files) for several releases, because it was written
+    # as a target rather than a description and nothing checked it. This walks the
+    # drawing and looks for every path on disk.
+    readme = open(os.path.join(REPO, "README.md"), "r", encoding="utf-8").read()
+    tree_start = readme.index("## Directory Structure")
+    fence = readme.index("```text", tree_start)
+    tree_end = readme.index("```", fence + 7)
+    block = readme[fence:tree_end]
+    candidates = set()
+    for m in re.finditer(r"([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)/?\s*(?:#.*)?$", block, re.M):
+        name = m.group(1).strip()
+        if name and name not in ("text", "dantrix"):
+            candidates.add(name)
+    dirs = [".", "src", "tests", "fuzz", "bench", "bench/tools", "conf", "deploy",
+            "docs", "docs/adr", "examples", ".github/workflows", "tests/unit",
+            ".github"]
+    missing = []
+    for name in sorted(candidates):
+        if "/" in name:
+            if not os.path.exists(os.path.join(REPO, name)):
+                missing.append(name)
+        elif not any(os.path.exists(os.path.join(REPO, d, name)) for d in dirs):
+            missing.append(name)
+    check("every path in the README's directory tree exists", not missing,
+          f"claimed but absent: {missing}")
+    print(f"  (paths in the tree: {len(candidates)})")
+
     # --- 6. A live key is honoured, not just accepted -----------------------
     # `add_header` is the key that was documented as unimplemented for two
     # releases. Acceptance is not enough: the header has to arrive.

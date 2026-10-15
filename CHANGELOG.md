@@ -12,6 +12,41 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.16] - 2026-10-15
+
+The documentation audit that the new configuration test made possible. Two more
+classes of drift, both invisible to every test that starts a server.
+
+### Fixed
+
+- **The README's directory tree described files that do not exist.** It was
+  written as a target ("some files are only created as the versions progress")
+  and never reconciled, so it claimed `CODE_OF_CONDUCT.md`, `.clang-tidy`,
+  `.github/workflows/sanitizers.yml`, `.github/workflows/release.yml`, four ADR
+  files and a `docs/` set (`ARCHITECTURE.md`, `PROTOCOL.md`, `TUNING.md`,
+  `BENCHMARKING.md`, `SECURITY_MODEL.md`) that were never created. It also
+  missed 11 real source files, five real test files and the two ADRs that do
+  exist. It is now generated from the working tree and says so.
+- **Three Indonesian fragments in English artifacts**, against the project's own
+  rule: a comment in the README's code sample (`indeks + generasi, bukan
+  pointer mentah`), the tree's `(GCC dan Clang)`, and the ADR filename
+  `0001-epoll-bukan-select-poll.md` -- which was also **wrong**, since the file
+  on disk is `0001-epoll-not-select-poll.md`.
+- ADR 0002 is now labelled **accepted but partially unfulfilled**: its decision
+  said edge-triggered would become an option "only when it can be measured
+  against the default with the v0.7 benchmark suite", v0.7 shipped with `bench/`,
+  and the option was never implemented. The original text is untouched; an
+  update section records what happened and points at the readiness document.
+
+### Added
+
+- Two more checks in `tests/config_test.py`, both shown able to fail:
+  - **every path in the README's directory tree exists on disk** (injecting
+    `.clang-tidy` into the tree fails the test);
+  - every CLI flag has help text, and the flag count is counted rather than
+    copied from prose.
+- The suite now runs 17 checks.
+
 ## [0.8.15] - 2026-10-15
 
 A new test suite for the one surface nothing tested: the configuration itself.

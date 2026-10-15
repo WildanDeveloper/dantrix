@@ -331,7 +331,7 @@ for (;;) {
     }
 
     for (int i = 0; i < n; i++) {
-        uint64_t tag = events[i].data.u64;   /* indeks + generasi, bukan pointer mentah */
+        uint64_t tag = events[i].data.u64;   /* index + generation, not a raw pointer */
         uint32_t ev  = events[i].events;
 
         switch (tag_kind(tag)) {
@@ -1301,25 +1301,21 @@ Docker), rotation is handled by the platform.
 
 ## Directory Structure
 
-This is the **target structure**; some files are only created as the versions progress.
+This is the structure as it exists on disk, verified against the working tree
+rather than planned. Every path below is a real file.
 
 ```text
 dantrix/
 ├── .github/
-│   ├── workflows/
-│   │   ├── ci.yml                # build, test, lint (GCC dan Clang)
-│   │   ├── sanitizers.yml        # ASan, UBSan, TSan
-│   │   └── release.yml           # artefak rilis
-│   ├── ISSUE_TEMPLATE/
-│   │   ├── bug_report.md
-│   │   └── feature_request.md
-│   └── PULL_REQUEST_TEMPLATE.md
+│   └── workflows/
+│       └── ci.yml                # the seven required jobs (build matrix, sanitizers, lint, TSan)
 ├── bench/
 │   ├── make_files.sh             # create the 1k, 10k, 100k, 1m, 100m test files
 │   ├── run_wrk.sh                # throughput and latency scenarios
 │   ├── run_all.sh                # every scenario (called by `make bench`)
 │   ├── compare_reference.sh      # measure against a reference instance
 │   ├── reference.conf            # reference configuration for the comparison
+│   ├── measure.py                # prints the environment and the results together
 │   ├── mixed.lua                 # wrk script: mixed file sizes
 │   ├── py_loadgen.py             # minimal Python load generator (no wrk needed)
 │   ├── slowloris.py              # slow-connection resilience test
@@ -1332,20 +1328,14 @@ dantrix/
 ├── deploy/
 │   ├── Dockerfile
 │   ├── docker-compose.yml
-│   ├── dantrix.service           # unit systemd
+│   ├── dantrix.service           # systemd unit
 │   ├── dantrix.logrotate
 │   └── sysctl-dantrix.conf
 ├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── PROTOCOL.md
-│   ├── TUNING.md
-│   ├── BENCHMARKING.md
-│   ├── SECURITY_MODEL.md
+│   ├── v1.0-readiness.md         # the surface inventory and the four open items
 │   └── adr/                      # architecture decision records
-│       ├── 0001-epoll-bukan-select-poll.md
-│       ├── 0002-level-triggered-default.md
-│       ├── 0003-reuseport-shared-nothing.md
-│       └── 0004-hashed-timing-wheel.md
+│       ├── 0001-epoll-not-select-poll.md
+│       └── 0002-level-triggered-default.md
 ├── examples/                     # learning material, one file per stage
 │   ├── 01_echo_blocking.c
 │   ├── 02_echo_thread_per_conn.c
@@ -1361,9 +1351,16 @@ dantrix/
 ├── src/
 │   ├── main.c                    # CLI: flags, durations, validation
 │   ├── dantrix.h                 # constants, macros, version
+│   ├── config.c / config.h       # key registry, INI parser, env, validation
 │   ├── server.c / server.h       # bring-up: listener, signals, worker lifecycle
 │   ├── worker.c / worker.h       # epoll event loop, accept, drain, timeouts
 │   ├── conn.c / conn.h           # connection slots, pool, per-connection HTTP flow
+│   ├── connlimit.c / connlimit.h # lock-free per-IP connection table
+│   ├── fcache.c / fcache.h       # optional open-file cache
+│   ├── fdcount.c / fdcount.h     # descriptor accounting (believed vs actual)
+│   ├── seccomp.c / seccomp.h     # the syscall allow list
+│   ├── status.c / status.h       # lock-free counters and the JSON snapshot
+│   ├── process.c / process.h     # pid file, daemonize, privilege drop
 │   ├── http_parser.c / http_parser.h
 │   ├── http_response.c / http_response.h
 │   ├── http_range.c / http_range.h
@@ -1376,16 +1373,7 @@ dantrix/
 │   ├── net.c / net.h
 │   └── util.c / util.h
 ├── tests/
-│   ├── unit/                     # minimal C harness, no dependencies
-│   │   ├── testing.h
-│   │   ├── test_http_parser.c    test_http_range.c
-│   │   ├── test_http_response.c  test_path.c
-│   │   ├── test_file.c           test_mime.c
-│   │   ├── test_timer.c          test_pool.c
-│   │   ├── test_buffer.c         test_log.c
-│   │   ├── test_util.c           test_net.c
-│   │   ├── test_config.c         test_process.c
-│   │   └── test_status.c
+│   ├── unit/                     # one C file per module, run by `make test`
 │   ├── smoke_test.py             # end-to-end integration (starts its own server)
 │   ├── regression_test.py        # regressions that need a separate server process
 │   ├── config_test.py            # documented config surface vs the binary
@@ -1396,11 +1384,9 @@ dantrix/
 │   ├── tsan_test.py              # concurrent traffic + ThreadSanitizer detection
 │   └── c10k_test.py              # N concurrent connections
 ├── .clang-format
-├── .clang-tidy
 ├── .editorconfig
 ├── .gitignore
 ├── CHANGELOG.md
-├── CODE_OF_CONDUCT.md
 ├── CONTRIBUTING.md
 ├── LICENSE
 ├── Makefile
