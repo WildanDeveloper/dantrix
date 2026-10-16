@@ -12,6 +12,56 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.19] - 2026-10-16
+
+The deployment artifacts and the copies of them embedded in the README had
+drifted apart, and the installed systemd unit never read the installed
+configuration.
+
+### Fixed
+
+- The systemd unit started the server with environment variables and without
+  `--config`, so the configuration that the install steps place at
+  `/etc/dantrix/dantrix.conf` was never read and `systemctl reload` could not
+  pick up an edit. `deploy/dantrix.service` now runs
+  `ExecStart=/usr/local/bin/dantrix --config /etc/dantrix/dantrix.conf` and
+  grants `CAP_NET_BIND_SERVICE`, so ports below 1024 work without root. The
+  grant was verified with `setpriv`: the same binary binds port 80 as `nobody`
+  only when the capability is ambient, and fails with `Permission denied`
+  without it.
+- The README's quick start ran the container with
+  `-v "$PWD/public:/var/www:ro"` while the image serves `/var/www/dantrix`
+  (`ENV DANTRIX_ROOT`): following it produced a server serving an empty
+  directory (404 for everything). Both `docker run` examples now mount
+  `"$PWD/public:/var/www/dantrix:ro"`.
+- All six files the README embeds differed from the files on disk. The embedded
+  Dockerfile still said `/var/www`, ran `make release` without `make clean` and
+  carried Indonesian comments; the embedded logrotate file was missing
+  `su dantrix dantrix` and `create 0640 dantrix dantrix`; the embedded systemd
+  unit was a different design from the installed one; the embedded example
+  configuration showed the compiled defaults while the heading claimed it was
+  `conf/dantrix.conf`, which deliberately differs from them; the compose copy
+  mounted `/var/www` and the sysctl copy lacked the comment header. The README
+  now shows every file byte-for-byte.
+- `conf/dantrix.conf` said it "deliberately differs from the compiled defaults
+  in a few places" without naming them, and its `edge_triggered` comment still
+  pointed at v0.7, which shipped without implementing the key. The header now
+  names the three differences and the key's comment matches the start-up
+  warning (no effect, warns at start-up).
+
+### Added
+
+- `conf/dantrix.conf` now also shows the optional `mime_types`, `cache_control`,
+  `add_header`, `socket_rcvbuf` and `socket_sndbuf` keys as comments, so the
+  file is the full example the README always described.
+- `tests/config_test.py`: the README must embed the example configuration and
+  every file in `deploy/` byte-for-byte (the list comes from the directory, so
+  a new artifact must be documented); every container example must mount the
+  document root where `DANTRIX_ROOT` points, read from the Dockerfile, and must
+  not mount an ancestor of it; the example configuration must validate from the
+  repository root and differ from the compiled defaults exactly where its
+  header says.
+
 ## [0.8.18] - 2026-10-15
 
 The version-drift check: the class of defect that produced every fix in the last

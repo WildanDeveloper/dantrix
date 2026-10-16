@@ -8,10 +8,9 @@ Wants=network-online.target
 Type=simple
 User=dantrix
 Group=dantrix
-Environment=DANTRIX_ROOT=/var/www/dantrix
-Environment=DANTRIX_BIND=0.0.0.0
-Environment=DANTRIX_PORT=8080
-ExecStart=/usr/local/bin/dantrix
+# The server reads the configuration that the install steps place at this path.
+# Keep daemonize = false in it: systemd needs a foreground process.
+ExecStart=/usr/local/bin/dantrix --config /etc/dantrix/dantrix.conf
 # SIGHUP reloads the reloadable configuration; SIGTERM is the stop signal.
 ExecReload=/bin/kill -HUP $MAINPID
 # Larger than shutdown_timeout so the graceful drain finishes before SIGKILL.
@@ -19,11 +18,17 @@ TimeoutStopSec=20
 Restart=on-failure
 RestartSec=1
 LimitNOFILE=1048576
+LogsDirectory=dantrix
+# Log files written to disk must live in /var/log/dantrix (created above) or in
+# a directory listed in ReadWritePaths=.
+# Binding ports below 1024 needs CAP_NET_BIND_SERVICE; harmless for the default
+# 8080.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-LogsDirectory=dantrix
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

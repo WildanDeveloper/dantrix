@@ -20,6 +20,11 @@ starts the binary, and checks what the process does. The rules it enforces are:
      rather than silently downgraded (that is the `log_format = json` case).
   4. A rejected configuration must exit with the documented code (2) and must
      not leave a log file or a pid file behind.
+  5. A file the README embeds (the example configuration and every file in
+     `deploy/`) must be the file on disk, byte for byte.
+  6. A container example must mount the document root where the image serves it.
+  7. The example configuration must validate and must differ from the compiled
+     defaults exactly where its own header says it does.
 
 The checks read the *documentation's own tables* for the key list where possible,
 so a key added to the README but not to the registry fails here.
@@ -119,6 +124,44 @@ def documented_keys():
     m = re.search(r"Open the reference table \((\d+) keys?\)", text)
     stated = int(m.group(1)) if m else -1
     return keys, stated
+
+
+def fenced_blocks(text):
+    """Every fenced code block in a Markdown document as (first line, body).
+
+    Line numbers are 1-based and point at the first line of the body, so a
+    failure can send the reader to the exact block.
+    """
+    out = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        if lines[i].lstrip().startswith("```"):
+            j = i + 1
+            while j < len(lines) and not lines[j].lstrip().startswith("```"):
+                j += 1
+            out.append((i + 1, "\n".join(lines[i + 1:j]).rstrip("\n")))
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
+def config_values_match(conf_value, default_value):
+    """Compare a value from a config file with the same key from --print-config.
+
+    The two spellings differ by design: the dump prints durations in
+    milliseconds (`10000ms`) where the file writes seconds (`10`), and sizes in
+    bytes (`8192`) where the file may use suffixes (`8k`). Only equality is
+    needed here, not canonicalisation.
+    """
+    if default_value.endswith("ms") and re.fullmatch(r"\d+", conf_value):
+        return int(conf_value) * 1000 == int(default_value[:-2])
+    m = re.fullmatch(r"(\d+)([kmg])", conf_value)
+    if m and re.fullmatch(r"\d+", default_value):
+        mult = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}[m.group(2)]
+        return int(m.group(1)) * mult == int(default_value)
+    return conf_value == default_value
 
 
 def main():
@@ -290,6 +333,98 @@ def main():
                 check(f"{doc}'s review marker names the current release",
                       marker.group(1) == current,
                       f"binary is {current}, marker says v{marker.group(1)}")
+
+    # --- 5e. Every file the README embeds matches the file on disk ----------
+    # The README embeds the example configuration and every file in deploy/ so
+    # readers can see them without opening another tab. All six copies had
+    # drifted: the embedded Dockerfile still said /var/www after the image moved
+    # to /var/www/dantrix, the embedded logrotate file was missing the `su` and
+    # `create` directives that make it work, and the embedded systemd unit was a
+    # different design from the installed one. A copy that is not the file is
+    # not documentation, it is a defect. The list of files is derived from the
+    # deploy/ directory, so a new artifact must either be documented or fail
+    # this check.
+    blocks = fenced_blocks(readme)
+    embedded_files = ["conf/dantrix.conf"]
+    deploy_dir = os.path.join(REPO, "deploy")
+    embedded_files += ["deploy/" + n for n in sorted(os.listdir(deploy_dir))
+                       if os.path.isfile(os.path.join(deploy_dir, n))]
+    for path in embedded_files:
+        content = open(os.path.join(REPO, path), "r", encoding="utf-8").read().rstrip("\n")
+        where = [lineno for lineno, body in blocks if body == content]
+        first = content.split("\n", 1)[0]
+        stale = [lineno for lineno, body in blocks
+                 if body != content and body.split("\n", 1)[0] == first]
+        check(f"the README embeds {path} byte-for-byte", bool(where),
+              f"no fenced block equals the file; a stale copy starts near line(s) {stale}")
+
+    # --- 5f. The container examples serve the image's document root ---------
+    # Every `docker run` example and the compose file must mount the served
+    # directory where the image looks for it. The quick start mounted
+    # `$PWD/public` at /var/www while ENV DANTRIX_ROOT points at
+    # /var/www/dantrix, so following it produced a server answering 404 for
+    # everything. The root is read from the Dockerfile instead of repeated, so
+    # the three files cannot disagree silently; mounting an ancestor of the root
+    # (the old defect) leaves the root itself empty and is rejected too.
+    dockerfile = open(os.path.join(REPO, "deploy", "Dockerfile"), "r", encoding="utf-8").read()
+    m = re.search(r"^ENV DANTRIX_ROOT=(\S+)", dockerfile, re.MULTILINE)
+    check("the image declares its document root", bool(m))
+    if m:
+        image_root = m.group(1).rstrip("\\")
+        run_targets = []
+        for lineno, body in blocks:
+            if "docker run" not in body:
+                continue
+            for vm in re.finditer(r'-v\s+"([^"]+)"', body):
+                parts = vm.group(1).split(":")
+                if len(parts) >= 2:
+                    run_targets.append((lineno, parts[1]))
+        mounted = {t for _, t in run_targets}
+        bad = sorted(t for t in mounted
+                     if t != image_root and image_root.startswith(t.rstrip("/") + "/"))
+        check("every docker run example mounts the document root into the image",
+              bool(run_targets) and image_root in mounted and not bad,
+              f"image serves {image_root}; mounts: {run_targets}")
+        compose = open(os.path.join(REPO, "deploy", "docker-compose.yml"),
+                       "r", encoding="utf-8").read()
+        compose_targets = re.findall(r"-\s+\S+:(/[^:\s]+):\w+", compose)
+        bad_compose = sorted(t for t in compose_targets
+                             if t != image_root and image_root.startswith(t.rstrip("/") + "/"))
+        check("compose mounts the document root where the image serves it",
+              image_root in compose_targets and not bad_compose,
+              f"image serves {image_root}; compose mounts: {compose_targets}")
+        print(f"  (image document root: {image_root}, docker run mounts: {len(run_targets)})")
+
+    # --- 5g. The shipped example configuration is valid and honest ----------
+    # The deployment instructions copy this file to /etc/dantrix/dantrix.conf;
+    # it must validate from the repository root, which is where a reader copies
+    # it from. Its header claims it differs from the compiled defaults in
+    # exactly three places, so the differences are computed from --print-config
+    # rather than trusted -- the header had already gone stale once, pointing at
+    # a v0.7 implementation of edge_triggered that never happened.
+    ex = subprocess.run([BIN, "--test-config", "-c", "conf/dantrix.conf"],
+                        capture_output=True, timeout=15, cwd=REPO)
+    check("the shipped example config validates from the repository root",
+          ex.returncode == 0,
+          f"exit {ex.returncode}: {ex.stderr.decode('utf-8', 'replace').strip()[:200]}")
+    defaults = {}
+    for line in out.splitlines():
+        if " = " in line:
+            key, value = line.split(" = ", 1)
+            defaults[key] = value
+    example = {}
+    for line in open(os.path.join(REPO, "conf", "dantrix.conf"), "r", encoding="utf-8"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, value = line.split("=", 1)
+        example[key.strip()] = value.split("#", 1)[0].strip()
+    differing = sorted(k for k in example
+                       if k in defaults and not config_values_match(example[k], defaults[k]))
+    check("the example differs from the compiled defaults exactly where the header says",
+          differing == ["access_log", "log_format", "workers"],
+          f"header claims workers/access_log/log_format; file differs in: {differing}")
+
     # --- 6. A live key is honoured, not just accepted -----------------------
     # `add_header` is the key that was documented as unimplemented for two
     # releases. Acceptance is not enough: the header has to arrive.

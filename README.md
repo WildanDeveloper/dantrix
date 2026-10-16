@@ -115,7 +115,7 @@ The short version, so nothing has to be inferred from the tables below:
 
 | | |
 |---|---|
-| Current release | v0.8.18 (tagged, CI green on GCC and Clang with ASan/UBSan/TSan) |
+| Current release | v0.8.19 (tagged, CI green on GCC and Clang with ASan/UBSan/TSan) |
 | Milestones complete | **v0.1 through v0.8, all of them.** Both long runs (the 24-hour fuzz campaign and the 1-hour soak) are done, and the C10K criterion is met |
 | ✅ Just finished | **The 24-hour fuzz campaign**: 2,174,927,120 executions across three targets, zero crashes, zero artifacts. Both runs ended on their own timer. The campaign saturated early, so the number means "no random input breaks it", not "2 billion distinct scenarios" |
 | ✅ Just finished | **The 1-hour soak**: 3,601 s, 700,671 requests, RSS 2.4 -> 8.2 MiB once and then flat (fitted slope +1.64 MiB/h against a 4.00 budget), descriptors 217 -> 217 with zero growth, and the accounting gap constant. Verdict: no leak |
@@ -561,7 +561,7 @@ make install DESTDIR=/tmp/pkgroot       # for packaging
 ```bash
 make docker
 docker run --rm -p 8080:8080 \
-  -v "$PWD/public:/var/www:ro" \
+  -v "$PWD/public:/var/www/dantrix:ro" \
   --ulimit nofile=1048576:1048576 \
   dantrix:latest
 ```
@@ -768,20 +768,33 @@ DANTRIX_PORT=9000 DANTRIX_WORKERS=2 ./bin/dantrix -r ./public
 
 ### Full example (`conf/dantrix.conf`)
 
-All the values below are the built-in defaults.
+The example configuration shipped with the source tree (and installed as
+`$(PREFIX)/share/dantrix/dantrix.conf.example`). It deliberately differs from
+the compiled defaults in three places (`workers`, `access_log`, `log_format`);
+`dantrix --print-config` prints the compiled defaults.
 
 ```ini
-# /etc/dantrix/dantrix.conf
+# Dantrix example configuration.
+#
+# Every key below is honoured except `edge_triggered`, which is marked below.
+# The `DANTRIX_<KEY>` environment variable and the `-o key=value` command line
+# override work on top of any file.
+# See `dantrix --help` and `dantrix --print-config`.
+
+# Note: this example deliberately differs from the compiled defaults in three
+# places (workers = auto, access_log = stdout, log_format = common). The
+# compiled defaults keep a bare `dantrix` single-threaded and quiet; they are
+# the values in `dantrix --print-config` with no -c.
 
 ## Network
-bind            = 0.0.0.0        # use :: for IPv6 dual-stack
+bind            = 0.0.0.0        # use :: for IPv6 dual stack
 port            = 8080
-workers         = 1              # 0 = one per online CPU
+workers         = auto           # auto = one worker per online core (compiled default: 1)
 backlog         = 4096           # capped by net.core.somaxconn
 reuseport       = true
 max_connections = 16384          # per worker
 cpu_affinity    = false
-edge_triggered  = false
+edge_triggered  = false          # accepted, has no effect (level-triggered always): warns at start-up
 
 ## Timeouts (seconds)
 header_timeout    = 10
@@ -807,7 +820,7 @@ sendfile          = true
 sendfile_chunk    = 1m
 etag              = true
 default_type      = application/octet-stream
-# mime_types      = /etc/dantrix/mime.types
+# mime_types      = /usr/local/share/dantrix/mime.types
 # cache_control   = public, max-age=3600
 server_tokens     = true
 # add_header      = X-Frame-Options: DENY
@@ -821,13 +834,13 @@ tcp_fastopen     = 0             # queue length; 0 = disabled
 # socket_sndbuf  = 0
 
 ## Logging
-access_log = off                 # off, stdout, stderr, or a file path
+access_log = stdout              # off, stdout, stderr, or a file path
 error_log  = stderr
 log_level  = info                # error, warn, info, debug
-log_format = combined            # common or combined
+log_format = common              # common or combined (json is not implemented yet)
 
 ## Process and privileges
-daemonize = false
+daemonize = false                # keep false under systemd and Docker: they need a foreground process
 # pid_file = /run/dantrix.pid
 # user     = dantrix
 # group    = dantrix
@@ -1500,6 +1513,9 @@ ls /proc/$(pidof dantrix)/fd | wc -l      # file descriptors in use
 The file `/etc/sysctl.d/99-dantrix.conf` (also available as `deploy/sysctl-dantrix.conf`):
 
 ```ini
+# Kernel tuning for Dantrix. Install as /etc/sysctl.d/99-dantrix.conf
+# and apply with: sudo sysctl --system
+
 fs.file-max = 2097152
 fs.nr_open = 1048576
 net.core.somaxconn = 65535
@@ -2158,34 +2174,35 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/dantrix --config /etc/dantrix/dantrix.conf
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=2
-TimeoutStopSec=15
 User=dantrix
 Group=dantrix
+# The server reads the configuration that the install steps place at this path.
+# Keep daemonize = false in it: systemd needs a foreground process.
+ExecStart=/usr/local/bin/dantrix --config /etc/dantrix/dantrix.conf
+# SIGHUP reloads the reloadable configuration; SIGTERM is the stop signal.
+ExecReload=/bin/kill -HUP $MAINPID
+# Larger than shutdown_timeout so the graceful drain finishes before SIGKILL.
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=1
 LimitNOFILE=1048576
-
-# Hardening
+LogsDirectory=dantrix
+# Log files written to disk must live in /var/log/dantrix (created above) or in
+# a directory listed in ReadWritePaths=.
+# Binding ports below 1024 needs CAP_NET_BIND_SERVICE; harmless for the default
+# 8080.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
+PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictAddressFamilies=AF_INET AF_INET6
 RestrictNamespaces=yes
-LockPersonality=yes
 MemoryDenyWriteExecute=yes
-SystemCallArchitectures=native
-ReadOnlyPaths=/var/www
-# If the logs are written to files, uncomment the following:
-# ReadWritePaths=/var/log/dantrix
 
 [Install]
 WantedBy=multi-user.target
@@ -2198,6 +2215,14 @@ WantedBy=multi-user.target
 `deploy/dantrix.logrotate` (only relevant when logs are written to files):
 
 ```text
+# Log rotation for Dantrix. Only relevant when the logs are written to files:
+# under systemd or Docker the platform rotates them.
+#
+# SIGUSR1 reopens the log files in place (implemented since v0.6), which is
+# what logrotate needs after renaming the old files: the server keeps its
+# descriptor open until it is told to reopen, so the signal must be sent
+# after the rotation. Dantrix never writes to stdout/stderr here, so the
+# signal cannot terminate the process.
 /var/log/dantrix/*.log {
     daily
     rotate 14
@@ -2205,6 +2230,8 @@ WantedBy=multi-user.target
     delaycompress
     missingok
     notifempty
+    su dantrix dantrix
+    create 0640 dantrix dantrix
     sharedscripts
     postrotate
         systemctl kill --kill-who=main --signal=SIGUSR1 dantrix.service >/dev/null 2>&1 || true
@@ -2219,21 +2246,21 @@ WantedBy=multi-user.target
 ```dockerfile
 # syntax=docker/dockerfile:1
 
-# --- Tahap build ---
+# --- Build stage ---
 FROM debian:bookworm-slim AS build
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN make release
+RUN make clean && make release
 
-# --- Tahap runtime ---
+# --- Runtime stage ---
 FROM debian:bookworm-slim
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin dantrix \
- && mkdir -p /var/www && chown dantrix:dantrix /var/www
+ && mkdir -p /var/www/dantrix && chown dantrix:dantrix /var/www/dantrix
 COPY --from=build /src/bin/dantrix /usr/local/bin/dantrix
-ENV DANTRIX_ROOT=/var/www \
+ENV DANTRIX_ROOT=/var/www/dantrix \
     DANTRIX_BIND=0.0.0.0 \
     DANTRIX_PORT=8080
 USER dantrix
@@ -2244,7 +2271,7 @@ ENTRYPOINT ["/usr/local/bin/dantrix"]
 ```bash
 docker build -f deploy/Dockerfile -t dantrix:latest .
 docker run --rm -p 8080:8080 \
-  -v "$PWD/public:/var/www:ro" \
+  -v "$PWD/public:/var/www/dantrix:ro" \
   --ulimit nofile=1048576:1048576 \
   dantrix:latest
 ```
@@ -2258,7 +2285,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./public:/var/www:ro
+      - ./public:/var/www/dantrix:ro
     ulimits:
       nofile:
         soft: 1048576
