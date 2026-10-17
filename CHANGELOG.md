@@ -12,6 +12,70 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.20] - 2026-10-17
+
+The first audit of `examples/` and `bench/`: every script was run instead of
+only compiled, which found three defects in the learning material and one
+promise the benchmark harness never kept.
+
+### Fixed
+
+- The examples table told the reader to test stage 4 with
+  `curl -i http://localhost:9000/`, but `04_hello_http.c` listens on **9003**
+  (9000 belongs to stage 1). Verified by running it: port 9000 does not answer,
+  9003 returns `200 OK`.
+- The compile snippet named `build/echo_epoll` and `build/echo_threads`, which
+  no command produces; `make examples` builds `build/03_echo_epoll` and
+  `build/02_echo_thread_per_conn`, after the source names. The snippet now lists
+  all four examples with the names that actually exist, and says which port each
+  one uses.
+- The advanced-stage table in the learning section had two rows fused into one
+  (`| v0.5 || Operations, ...`), so the `v0.6 to v0.8` row was not a table row.
+- The stage-2 comment documented `pidof 02_echo_thread_per_conn` to count
+  threads. Linux truncates the process name to 15 characters
+  (`02_echo_thread_`), so `pidof` and `pgrep` by name both find nothing — the
+  command that exists to prove the model does not scale printed an empty PID.
+  The comment now takes the PID from the listening socket, verified to work.
+
+### Added
+
+- `bench/measure.py --save` writes the record the README has always promised:
+  `bench/results/<date>-<commit>/` with `results.md`, `environment.txt`
+  (hardware, kernel, compiler, binary, commit, server flags) and `command.txt`.
+  Before this, no script wrote to `bench/results/` at all;
+  `compare_reference.sh` only told the reader to record the output by hand.
+  Verified by running it: the three files are written with the values measured.
+- `bench/results/README.md` described the format as a single `.txt` file, which
+  contradicted the README's directory format, and the file was not tracked
+  because `/bench/results/` was ignored wholesale. It now describes the
+  directory, and `.gitignore` keeps the directory ignored while tracking the
+  README (`/bench/results/*` plus a negation), so a fresh clone has it.
+- `tests/config_test.py` (38 checks, was 33): the examples table's port must
+  match the source's `#define PORT`; every example must use a distinct port;
+  the compile snippet's `-o build/<name>` must match the source's basename; the
+  benchmark harness must be able to save the record and `bench/results/README.md`
+  must describe it.
+
+### Verified while auditing
+
+- Stage 1 blocks a second client while the first is connected (measured: second
+  client got no echo for 1 s).
+- Stage 2 creates one thread per connection (measured: 8 connections = 9
+  threads, back to 1 when they close). With 10,000 idle connections it needed
+  42 s to accept them and reached 6,557 threads / 78 MiB RSS, against 14.9 MiB
+  for Dantrix at the same count — the "does not scale" claim is measured, not
+  asserted.
+- Stage 3 serves 20 concurrent clients with no `EPOLLET` anywhere in the
+  sources, matching the "level-triggered" label.
+- `bench/py_loadgen.py` (6,364 req/s at 32 connections) and
+  `bench/slowloris.py` (200 slow connections, server stayed responsive and
+  answered `200 OK` afterwards) both work as documented.
+- `bench/run_wrk.sh` ran every scenario it documents (S1 28,856; S2 10,348;
+  S3 5.79 req/s at 1.22 GB/s; S4 13,436; S7 12,361 req/s) and skipped S6 with a
+  message when `wrk2` is absent. `bench/compare_reference.sh` compared Dantrix
+  against `python3 -m http.server` on the same payloads and, as documented, did
+  not start or stop either server.
+
 ## [0.8.19] - 2026-10-16
 
 The deployment artifacts and the copies of them embedded in the README had

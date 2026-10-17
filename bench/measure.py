@@ -11,7 +11,14 @@ cannot be quoted without its context.
 
 Usage:
     python3 bench/measure.py [--duration 10s] [--conns 256] [--port 8080]
-                             [--binary bin/dantrix] [--out FILE]
+                             [--binary bin/dantrix] [--out FILE] [--save]
+
+`--save` writes the README's reproducible record: a directory
+`bench/results/<date>-<commit>/` holding `results.md` (the table printed here),
+`environment.txt` (hardware, kernel, compiler, binary, commit) and
+`command.txt` (the exact command line, so the run can be repeated). The README
+promises that a result is never quoted without its context; this is the code
+that keeps the promise.
 
 The scenarios match the README: S1 (small file, keep-alive), S3 (large file),
 S4 (high concurrency), plus an A/B of open_file_cache, which is the change that
@@ -100,6 +107,8 @@ def main():
     ap.add_argument("--port", type=int, default=20800)
     ap.add_argument("--binary", default=os.path.join(ROOT, "bin", "dantrix"))
     ap.add_argument("--out", default=None)
+    ap.add_argument("--save", action="store_true",
+                    help="write bench/results/<date>-<commit>/ (results, environment, command)")
     args = ap.parse_args()
 
     if not have("wrk"):
@@ -227,6 +236,31 @@ def main():
         with open(args.out, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
         print(f"\nmeasure: written to {args.out}")
+
+    if args.save:
+        # The README's reproducibility rule: results live in
+        # bench/results/<date>-<commit>/ together with the hardware
+        # specification and the configuration. Written last so a failed run
+        # leaves no record that looks like a result.
+        outdir = os.path.join(HERE, "results", f"{time.strftime('%Y-%m-%d')}-{commit or 'unknown'}")
+        os.makedirs(outdir, exist_ok=True)
+        with open(os.path.join(outdir, "results.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        with open(os.path.join(outdir, "environment.txt"), "w", encoding="utf-8") as f:
+            f.write(f"date: {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n")
+            f.write(f"commit: {commit}\n")
+            f.write(f"binary: {version}\n")
+            f.write(f"kernel: {uname.system} {uname.release}\n")
+            f.write(f"machine: {uname.machine}\n")
+            f.write(f"cpu_count: {os.cpu_count()}\n")
+            f.write(f"compiler: {gcc.splitlines()[0] if gcc else 'unknown'}\n")
+            f.write(f"load_generator: wrk ({'present' if have('wrk') else 'MISSING'})\n")
+            f.write("server_flags: -b 127.0.0.1 -w 2 --access-log off --error-log /dev/null\n")
+            f.write("server_overrides: open_file_cache=128 open_file_cache_valid=60s "
+                    "(cache-on rows); none for cache-off rows\n")
+        with open(os.path.join(outdir, "command.txt"), "w", encoding="utf-8") as f:
+            f.write("python3 " + " ".join(sys.argv) + "\n")
+        print(f"measure: saved to {os.path.relpath(outdir, ROOT)}/")
     return 0
 
 

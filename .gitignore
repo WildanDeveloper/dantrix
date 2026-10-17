@@ -17,7 +17,8 @@
 /build/*_seed_corpus/
 
 # Benchmark and test output
-/bench/results/
+/bench/results/*
+!/bench/results/README.md
 /bench/www/
 *.prof
 *.svg

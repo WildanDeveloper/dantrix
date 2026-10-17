@@ -115,7 +115,7 @@ The short version, so nothing has to be inferred from the tables below:
 
 | | |
 |---|---|
-| Current release | v0.8.19 (tagged, CI green on GCC and Clang with ASan/UBSan/TSan) |
+| Current release | v0.8.20 (tagged, CI green on GCC and Clang with ASan/UBSan/TSan) |
 | Milestones complete | **v0.1 through v0.8, all of them.** Both long runs (the 24-hour fuzz campaign and the 1-hour soak) are done, and the C10K criterion is met |
 | ✅ Just finished | **The 24-hour fuzz campaign**: 2,174,927,120 executions across three targets, zero crashes, zero artifacts. Both runs ended on their own timer. The campaign saturated early, so the number means "no random input breaks it", not "2 billion distinct scenarios" |
 | ✅ Just finished | **The 1-hour soak**: 3,601 s, 700,671 requests, RSS 2.4 -> 8.2 MiB once and then flat (fitted slope +1.64 MiB/h against a 4.00 budget), descriptors 217 -> 217 with zero growth, and the accounting gap constant. Verdict: no leak |
@@ -1453,7 +1453,7 @@ This project is deliberately built in stages. Each stage has a self-contained fi
 | 1 | `examples/01_echo_blocking.c` | Socket basics; the server only serves one client at a time | `socket`, `setsockopt`, `bind`, `listen`, `accept`, `read`, `write` | Open two `nc localhost 9000`: the second client must wait |
 | 2 | `examples/02_echo_thread_per_conn.c` | Thread per connection and why this model does not scale | `pthread_create`, `pthread_detach` | Hold 10,000 connections with `idle_conns`, observe memory and thread count |
 | 3 | `examples/03_echo_epoll.c` | Non-blocking I/O and level-triggered `epoll` | `accept4`, `fcntl`, `epoll_create1`, `epoll_ctl`, `epoll_wait`, `EAGAIN` | Repeat the 10,000-connection test and compare with stage 2 |
-| 4 | `examples/04_hello_http.c` | Static HTTP responses and detecting the end of headers (`\r\n\r\n`) | `recv`, `send` | `curl -i http://localhost:9000/` |
+| 4 | `examples/04_hello_http.c` | Static HTTP responses and detecting the end of headers (`\r\n\r\n`) | `recv`, `send` | `curl -i http://localhost:9003/` |
 
 After that, work on `src/` following the [Roadmap](#roadmap-roadmap):
 
@@ -1462,14 +1462,22 @@ After that, work on `src/` following the [Roadmap](#roadmap-roadmap):
 | Incremental HTTP parser | v0.2 |
 | Static files and `sendfile` | v0.3 |
 | Keep-alive and timers | v0.4 |
-| Multi-thread with `SO_REUSEPORT` | v0.5 || Operations, benchmarks, hardening | v0.6 to v0.8 |
+| Multi-thread with `SO_REUSEPORT` | v0.5 |
+| Operations, benchmarks, hardening | v0.6 to v0.8 |
 
 Compiling the examples:
 
 ```bash
-gcc -O2 -Wall -Wextra -o build/echo_epoll examples/03_echo_epoll.c
-gcc -O2 -Wall -Wextra -pthread -o build/echo_threads examples/02_echo_thread_per_conn.c
+gcc -O2 -Wall -Wextra -o build/01_echo_blocking examples/01_echo_blocking.c
+gcc -O2 -Wall -Wextra -pthread -o build/02_echo_thread_per_conn \
+    examples/02_echo_thread_per_conn.c
+gcc -O2 -Wall -Wextra -o build/03_echo_epoll examples/03_echo_epoll.c
+gcc -O2 -Wall -Wextra -o build/04_hello_http examples/04_hello_http.c
 ```
+
+Each example listens on its own port, so all four can run at once: 9000, 9001,
+9002 and 9003 in file order. `make examples` builds them with the same names
+under `build/`.
 
 **Companion reading:** *Beej's Guide to Network Programming* (socket basics) for stage 1; *The Linux Programming Interface* chapters 56 to 61 (sockets and server design) and chapter 63 (*Alternative I/O Models*, including `epoll`) for stages 2 and 3. The full list is in [References](#references).
 
@@ -1605,8 +1613,9 @@ nstat -az TcpExtListenOverflows TcpExtListenDrops
 > [!IMPORTANT]
 > The results below were measured with `wrk` on the machine in the test
 > environment table, at the commit named there. Reproduce them with
-> `python3 bench/measure.py`, which prints the environment and the results
-> together so a number cannot be quoted without its context.
+> `python3 bench/measure.py --save`, which prints the environment and the
+> results together and writes them to `bench/results/<date>-<commit>/`, so a
+> number cannot be quoted without its context.
 >
 > Where a number could not be measured on this machine, the cell says so rather
 > than holding a guess. **Do not publish numbers that have not been measured.**
@@ -1736,9 +1745,9 @@ All scenarios at once: `make bench`.
 | Load generator | `wrk` (real, not the Python client) |
 | Date | 2026-10-14 |
 
-Reproduce with `python3 bench/measure.py`, which prints this table plus the
-results below and refuses to report a number without the environment it came
-from.
+Reproduce with `python3 bench/measure.py --save`, which prints this table plus
+the results below, writes the record to `bench/results/<date>-<commit>/`, and
+refuses to report a number without the environment it came from.
 
 **S1: 1 KiB file, keep-alive, 256 connections (10 s)**
 

@@ -425,6 +425,61 @@ def main():
           differing == ["access_log", "log_format", "workers"],
           f"header claims workers/access_log/log_format; file differs in: {differing}")
 
+    # --- 5h. The examples table matches the example sources ---------------
+    # The table told readers to `curl http://localhost:9000/` for stage 4,
+    # which listens on 9003 (9000 belongs to stage 1), and the compile snippet
+    # named build/echo_epoll and build/echo_threads, which nothing produces.
+    # Both were copied once and never checked against the code.
+    ex_dir = os.path.join(REPO, "examples")
+    ports = {}
+    for name in sorted(os.listdir(ex_dir)):
+        if not name.endswith(".c"):
+            continue
+        src = open(os.path.join(ex_dir, name), "r", encoding="utf-8").read()
+        m = re.search(r"^#define PORT (\d+)", src, re.MULTILINE)
+        if m:
+            ports[name] = int(m.group(1))
+    check("every example defines a distinct port", bool(ports) and
+          len(set(ports.values())) == len(ports),
+          f"ports: {ports}")
+    # The table rows name a file and a `curl ...localhost:<port>` command.
+    table_bad = []
+    for m in re.finditer(r"^\| \d+ \| `examples/([0-9A-Za-z_.-]+\.c)` \|.*?\| `([^`]*)` \|$",
+                         readme, re.MULTILINE):
+        name, howto = m.group(1), m.group(2)
+        pm = re.search(r"localhost:(\d+)", howto)
+        if pm and name in ports and int(pm.group(1)) != ports[name]:
+            table_bad.append(f"{name}: table says {pm.group(1)}, source says {ports[name]}")
+    check("the examples table's port matches the source", not table_bad,
+          "; ".join(table_bad))
+    # Every `-o build/<name>` in the compile snippet must be what the file
+    # actually builds to, which is the source's own basename.
+    compile_bad = []
+    for m in re.finditer(r"-o build/([A-Za-z0-9_.-]+) examples/([0-9A-Za-z_.-]+\.c)", readme):
+        out_name, src_name = m.group(1), m.group(2)
+        if out_name != src_name[:-2]:
+            compile_bad.append(f"{src_name} -> build/{out_name}")
+    check("the compile snippet's output names match the sources", not compile_bad,
+          "; ".join(compile_bad))
+    print(f"  (example ports: {ports})")
+
+    # --- 5i. The benchmark harness keeps the README's reproducibility promise
+    # The README says results are saved in bench/results/<date>-<commit>/
+    # together with the hardware and the configuration. No script wrote there:
+    # compare_reference.sh only told the reader to do it by hand, and
+    # measure.py wrote a single file when asked. The promise is now a flag, and
+    # this checks the flag exists and that the results README describes it.
+    measure = open(os.path.join(REPO, "bench", "measure.py"), "r", encoding="utf-8").read()
+    check("bench/measure.py can save a reproducible record",
+          '"--save"' in measure and "results.md" in measure
+          and "environment.txt" in measure and "command.txt" in measure,
+          "the README promises bench/results/<date>-<commit>/; the harness must write it")
+    results_readme = open(os.path.join(REPO, "bench", "results", "README.md"),
+                          "r", encoding="utf-8").read()
+    check("bench/results/README.md describes the directory format",
+          "<date>-<commit>/" in results_readme and "environment.txt" in results_readme,
+          results_readme[:120])
+
     # --- 6. A live key is honoured, not just accepted -----------------------
     # `add_header` is the key that was documented as unimplemented for two
     # releases. Acceptance is not enough: the header has to arrive.

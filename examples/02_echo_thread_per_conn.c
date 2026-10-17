@@ -11,8 +11,12 @@
  *   ./build/02_echo_thread_per_conn &
  *   # from another shell, hold connections open:
  *   for i in $(seq 1 2000); do nc 127.0.0.1 9001 </dev/null & done
- *   grep -c . /proc/$(pidof 02_echo_thread_per_conn)/task
- *   grep VmRSS /proc/$(pidof 02_echo_thread_per_conn)/status
+ *   # The process name is truncated to 15 characters in /proc, so `pidof`
+ *   # and `pgrep` by name do not find it; take the PID from the listening
+ *   # socket instead.
+ *   pid=$(ss -ltnp | sed -n 's/.*:9001 .*pid=\([0-9]*\).*/\1/p' | head -1)
+ *   ls /proc/$pid/task | wc -l
+ *   grep VmRSS /proc/$pid/status
  */
 #include <arpa/inet.h>
 #include <errno.h>
