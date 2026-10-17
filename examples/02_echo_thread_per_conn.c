@@ -6,15 +6,15 @@
  * its own scheduling cost. Hold 10,000 connections open and watch memory and
  * the scheduler suffer:
  *
- *   gcc -std=c11 -Wall -Wextra -O2 -pthread \
- *       -o build/02_echo_thread_per_conn examples/02_echo_thread_per_conn.c
+ *   gcc -std=c11 -Wall -Wextra -O2 -pthread -o build/02_echo_thread_per_conn
+ *       examples/02_echo_thread_per_conn.c
  *   ./build/02_echo_thread_per_conn &
  *   # from another shell, hold connections open:
  *   for i in $(seq 1 2000); do nc 127.0.0.1 9001 </dev/null & done
  *   # The process name is truncated to 15 characters in /proc, so `pidof`
  *   # and `pgrep` by name do not find it; take the PID from the listening
- *   # socket instead.
- *   pid=$(ss -ltnp | sed -n 's/.*:9001 .*pid=\([0-9]*\).*/\1/p' | head -1)
+ *   # socket instead (awk avoids sed's backslashes inside a C comment):
+ *   pid=$(ss -ltnp | awk -F'pid=' '/:9001 /{split($2,a,","); print a[1]; exit}')
  *   ls /proc/$pid/task | wc -l
  *   grep VmRSS /proc/$pid/status
  */
