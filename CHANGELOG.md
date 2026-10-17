@@ -12,6 +12,29 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [0.8.21] - 2026-10-17
+
+One commit after v0.8.20: the comment added to the stage-2 example did not
+compile.
+
+### Fixed
+
+- `examples/02_echo_thread_per_conn.c`: the comment explaining how to find the
+  PID contained a `sed` expression, `s/.*:9001 .*pid=\([0-9]*\).*/\1/p`. The
+  `*/` inside that expression closed the block comment early, so the rest of
+  the line became code: both gcc and clang reported a stray backslash, an
+  unterminated character constant and an unknown type name from the header
+  chain. Every CI build job failed on v0.8.20. The comment now uses `awk` and
+  contains no `*/`; all four examples build with gcc and clang under `-Werror`,
+  and the documented one-liner was run against a live server.
+
+### Note
+
+v0.8.20's tag points at the commit whose build jobs failed. v0.8.21 is the
+first green release in this series and carries the same changes plus this fix.
+The local gate list did not include `make examples`; that is why a change to an
+example could reach CI unbuilt.
+
 ## [0.8.20] - 2026-10-17
 
 The first audit of `examples/` and `bench/`: every script was run instead of

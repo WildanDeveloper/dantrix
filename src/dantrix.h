@@ -11,7 +11,7 @@
 #define DX_VERSION_MAJOR 0
 #define DX_VERSION_MINOR 8
 #define DX_VERSION_PATCH 18
-#define DX_VERSION_STRING "0.8.20"
+#define DX_VERSION_STRING "0.8.21"
 #define DX_PROGRAM_NAME "Dantrix"
 
 /*

@@ -24,7 +24,7 @@ SRC   := src
 TESTS := tests/unit
 EXAMPLES := examples
 
-VERSION := 0.8.20
+VERSION := 0.8.21
 
 # --- Architecture specific hardening -------------------------------------
 ARCH := $(shell uname -m)
@@ -156,7 +156,11 @@ $(BUILD)/test_%: $(TESTS)/test_%.c $(LIB_SRCS) $(HDRS)
 	$(CC) $(STD) $(DEFS) $(WARN) -O1 -g $(CFLAGS_EXTRA) \
 	    -I$(SRC) -I$(TESTS) $(filter %.c,$^) -o $@ $(LDFLAGS) -lpthread
 
-test: test-unit
+# `test` is the gate list a contributor is expected to run before pushing. It
+# builds the examples too: v0.8.20 shipped an example that did not compile, and
+# every local gate passed because none of them compiled it -- the failure only
+# appeared in CI's "Build examples" job.
+test: test-unit examples
 
 test-unit: $(TEST_BINS)
 	@fail=0; for t in $(TEST_BINS); do \
