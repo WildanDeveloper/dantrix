@@ -481,6 +481,33 @@ def main():
           "<date>-<commit>/" in results_readme and "environment.txt" in results_readme,
           results_readme[:120])
 
+    # --- 5j. The documents agree with the release they describe -------------
+    # v1.0.0 shipped while the README still said "Configuration keys and HTTP
+    # behavior frozen ... Not ready yet" and the roadmap row said the stable
+    # release was still planned. A reader would have been told two opposite
+    # things by one document. The rule enforced here: once the binary reports a
+    # 1.x version, no document may describe the freeze as pending.
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", version_out)
+    if m and int(m.group(1)) >= 1:
+        pending = []
+        for doc in ("README.md", "docs/v1.0-readiness.md"):
+            text = open(os.path.join(REPO, doc), "r", encoding="utf-8").read()
+            for pat in (r"Not ready yet", r"not ready yet", r"the four decisions",
+                        r"four open items", r"still pre-alpha"):
+                if re.search(pat, text):
+                    pending.append(f"{doc}: {pat}")
+        check("no document still describes the v1.0 freeze as pending",
+              not pending, "; ".join(pending))
+        # The roadmap's v1.0 checklist is the definition of done. At 1.x every
+        # box in it must be closed, or the release is claiming a milestone it
+        # did not meet.
+        start = readme.index("### v1.0.0: Stable")
+        nxt = readme.find("\n### ", start + 1)
+        section = readme[start:nxt if nxt != -1 else len(readme)]
+        open_boxes = re.findall(r"^- \[ \] (.+)$", section, re.MULTILINE)
+        check("every v1.0 definition-of-done box is closed at 1.x",
+              not open_boxes, f"still open: {open_boxes}")
+
     # --- 6. A live key is honoured, not just accepted -----------------------
     # `add_header` is the key that was documented as unimplemented for two
     # releases. Acceptance is not enough: the header has to arrive.

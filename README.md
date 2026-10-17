@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Language: C11](https://img.shields.io/badge/language-C11-informational.svg)](#system-requirements)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](#system-requirements)
-[![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#project-status)
+[![Status: stable API, not audited](https://img.shields.io/badge/status-stable%20API%20%C2%B7%20unaudited-orange.svg)](#project-status)
 [![PR Welcome](https://img.shields.io/badge/PR-welcome-brightgreen.svg)](#contributing)
 
 [Quick Start](#quick-start) · [Architecture](#architecture) · [Configuration](#configuration) · [Benchmark](#benchmark) · [Roadmap](#roadmap-roadmap) · [Contributing](#contributing)
@@ -21,7 +21,11 @@
 ---
 
 > [!WARNING]
-> **Dantrix is a learning project that is still pre-alpha.** There has been no security audit and it is not suitable for production. See [Project Status](#project-status) and [Security](#security).
+> **Dantrix is a learning project with a frozen v1.0 API.** The public surface
+> (configuration keys, CLI flags, HTTP behaviour, log formats) is stable and will
+> not break without a major version. It has **not** had an independent security
+> audit and is **not** recommended for production: no TLS, no HTTP/2, no rate
+> limiting. See [Project Status](#project-status) and [Security](#security).
 
 ## Table of Contents
 
@@ -153,7 +157,7 @@ this document, not a promise.
 | 24-hour fuzz campaign with a falsifiable harness | ✅ | v0.8.5 |
 | TOCTOU claim falsified by racing the filesystem | ✅ | v0.8.6 |
 | Hardening: fuzzing, sanitizer in CI, security review | ✅ | v0.8.0–v0.8.6 |
-| Stable release | 📝 | v1.0.0 |
+| Stable release | ✅ | v1.0.0 |
 
 > [!IMPORTANT]
 > Performance numbers in this document are either **design targets** (marked as
@@ -1345,7 +1349,7 @@ dantrix/
 │   ├── dantrix.logrotate
 │   └── sysctl-dantrix.conf
 ├── docs/
-│   ├── v1.0-readiness.md         # the surface inventory and the four open items
+│   ├── v1.0-readiness.md         # the frozen surface and how the open items were resolved
 │   └── adr/                      # architecture decision records
 │       ├── 0001-epoll-not-select-poll.md
 │       └── 0002-level-triggered-default.md
@@ -1940,7 +1944,7 @@ GCC can also be used as an additional analyzer: `make debug CFLAGS_EXTRA=-fanaly
 ## Security
 
 > [!WARNING]
-> Dantrix has not been audited and does not support TLS yet. Do not expose it directly to the internet for sensitive data. If you still want to experiment, run it behind a reverse proxy with TLS, as a non-root user, with a read-only document root.
+> Dantrix has not had an independent audit and does not support TLS yet. Do not expose it directly to the internet for sensitive data. If you still want to experiment, run it behind a reverse proxy with TLS, as a non-root user, with a read-only document root.
 
 ### Threat model
 
@@ -2142,7 +2146,7 @@ If it keeps rising, build with `make asan` (LeakSanitizer comes with it) or run 
 ## Deployment
 
 > [!WARNING]
-> Because it is still pre-alpha, this section is intended for **experiments and test environments**. For real production use, use a mature server.
+> Because the project has not had an independent security audit, this section is intended for **experiments and test environments**. For real production use, use a mature server.
 
 ### Recommended layout
 
@@ -2532,10 +2536,14 @@ Each release has a single capability as its theme. A checked box marks completed
 - [x] Benchmark results documented and reproducible: measured with `wrk` at
       v0.8.8, `bench/measure.py` prints the environment and the results together
 - [x] `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `CHANGELOG.md` complete
-- [ ] Configuration keys and HTTP behavior frozen according to [Semantic Versioning](https://semver.org/).
-      **Not ready yet**, and the reasons are specific: [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md)
-      lists what is stable, what is still moving, and the four decisions that
-      belong to the maintainer rather than to the code
+- [x] Configuration keys and HTTP behavior frozen according to [Semantic Versioning](https://semver.org/).
+      **Frozen in v1.0.0.** The surface is 49 configuration keys, 46 CLI
+      flags, the HTTP behaviour, the status JSON field names and the access-log
+      formats (`common`, `combined`, `json`); a breaking change to any of them
+      needs a major version. [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md)
+      records what the freeze covers and how each of the three open items was
+      resolved (`edge_triggered` removed, `log_format = json` implemented,
+      multi-range documented as a permanent deviation)
 
 ### Post-1.0 ideas
 
@@ -2584,7 +2592,7 @@ Ten thousand threads means ten thousand stacks and lots of context switches. `ex
 Not natively. Use WSL2 (Windows), or Docker/a Linux VM (macOS). A `kqueue` backend is on the long-term idea list.
 
 **Is it safe to use in production?**
-Not yet. It is pre-alpha, unaudited, and does not support TLS. Use a production-grade server for production.
+Not recommended. The v1.0 API is frozen and tested (CI on GCC and Clang with ASan/UBSan/TSan, 24 h of fuzzing, a 1-hour soak, C10K), but there has been no independent security audit, and TLS, HTTP/2 and rate limiting are absent. Use a production-grade server for production.
 
 **Why is there no HTTPS yet?**
 TLS adds substantial complexity (a non-blocking OpenSSL API, certificates, and `sendfile` cannot be used without kTLS). The v1.0 priority is a correct and tested HTTP/1.1 foundation. For now, TLS termination is done at a reverse proxy.
