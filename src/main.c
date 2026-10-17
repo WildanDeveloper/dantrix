@@ -745,18 +745,6 @@ int main(int argc, char **argv)
     }
 
     /*
-     * Features that are documented but not implemented yet stay explicit: an
-     * accepted key that silently does nothing is worse than one that is
-     * rejected, so the operator is told at start-up. The message names no
-     * release, because the key has no schedule attached to it (see
-     * docs/v1.0-readiness.md).
-     */
-    if (set.edge_triggered) {
-        fprintf(stderr, "dantrix: edge_triggered is not implemented; the server runs "
-                        "level-triggered and this key has no effect\n");
-    }
-
-    /*
      * A relative pid_file would be written under / after the daemon
      * chdir("/")s, so it is made absolute here while the cwd is still the
      * one the operator ran from.

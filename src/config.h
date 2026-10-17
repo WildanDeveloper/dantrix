@@ -37,7 +37,6 @@ typedef struct {
     bool reuseport;
     size_t max_connections;
     bool cpu_affinity;
-    bool edge_triggered;
 
     /* Timeouts, milliseconds internally */
     uint64_t header_timeout_ms;

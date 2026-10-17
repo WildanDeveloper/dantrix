@@ -56,7 +56,6 @@ static const dx_key_t dx_keys[] = {
     K("reuseport", K_BOOL, reuseport, 0, 0),
     K("max_connections", K_SIZE, max_connections, 1, 1000000),
     K("cpu_affinity", K_BOOL, cpu_affinity, 0, 0),
-    K("edge_triggered", K_BOOL, edge_triggered, 0, 0),
 
     K("header_timeout", K_DUR, header_timeout_ms, 1, 86400000),
     K("body_timeout", K_DUR, body_timeout_ms, 1, 86400000),
@@ -143,7 +142,6 @@ void dx_config_defaults(dx_settings_t *s)
     s->reuseport = true;
     s->max_connections = DX_DEFAULT_MAX_CONNS;
     s->cpu_affinity = false;
-    s->edge_triggered = false;
 
     s->header_timeout_ms = 10000u;
     s->body_timeout_ms = 30000u;
@@ -386,6 +384,8 @@ static int apply_value(dx_settings_t *s, const dx_key_t *key, const char *value,
             *(dx_log_format_t *)field = DX_LOG_FMT_COMMON;
         } else if (strcmp(value, "combined") == 0) {
             *(dx_log_format_t *)field = DX_LOG_FMT_COMBINED;
+        } else if (strcmp(value, "json") == 0) {
+            *(dx_log_format_t *)field = DX_LOG_FMT_JSON;
         } else {
             fprintf(msg, "dantrix: %s: unknown log format '%s'\n", src, value);
             return -1;
@@ -780,10 +780,15 @@ static void print_value(const dx_settings_t *s, const dx_key_t *key, FILE *out)
     case K_LOGLEVEL:
         fprintf(out, "%s", dx_log_level_name(*(const dx_log_level_t *)field));
         break;
-    case K_LOGFORMAT:
+    case K_LOGFORMAT: {
+        dx_log_format_t f = *(const dx_log_format_t *)field;
+
         fprintf(out, "%s",
-                (*(const dx_log_format_t *)field == DX_LOG_FMT_COMBINED) ? "combined" : "common");
+                f == DX_LOG_FMT_COMBINED ? "combined"
+                : f == DX_LOG_FMT_JSON   ? "json"
+                                         : "common");
         break;
+    }
     case K_ADDHEADER:
         break;
     default:

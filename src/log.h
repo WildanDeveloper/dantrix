@@ -65,7 +65,11 @@ void dx_log_write(dx_log_t *log, dx_log_level_t level, const char *fmt, ...) DX_
 
 /* --------------------------- Access log -------------------------------- */
 
-typedef enum { DX_LOG_FMT_COMMON = 0, DX_LOG_FMT_COMBINED = 1 } dx_log_format_t;
+typedef enum {
+    DX_LOG_FMT_COMMON = 0,
+    DX_LOG_FMT_COMBINED = 1,
+    DX_LOG_FMT_JSON = 2
+} dx_log_format_t;
 
 /*
  * Emit one access log line for a completed request.

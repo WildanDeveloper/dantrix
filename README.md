@@ -115,13 +115,13 @@ The short version, so nothing has to be inferred from the tables below:
 
 | | |
 |---|---|
-| Current release | v0.8.21 (tagged, CI green on GCC and Clang with ASan/UBSan/TSan) |
+| Current release | v1.0.0 (frozen; CI green on GCC and Clang with ASan/UBSan/TSan) |
 | Milestones complete | **v0.1 through v0.8, all of them.** Both long runs (the 24-hour fuzz campaign and the 1-hour soak) are done, and the C10K criterion is met |
 | ✅ Just finished | **The 24-hour fuzz campaign**: 2,174,927,120 executions across three targets, zero crashes, zero artifacts. Both runs ended on their own timer. The campaign saturated early, so the number means "no random input breaks it", not "2 billion distinct scenarios" |
 | ✅ Just finished | **The 1-hour soak**: 3,601 s, 700,671 requests, RSS 2.4 -> 8.2 MiB once and then flat (fitted slope +1.64 MiB/h against a 4.00 budget), descriptors 217 -> 217 with zero growth, and the accounting gap constant. Verdict: no leak |
 | ✅ Just finished | **C10K, both halves**: 10,000 idle connections opened in 0.9 s and all answering, then 1,000 active clients served in 0.1 s while the 10,000 stayed idle. RSS grew 1.05 MiB for the active 1,000 (about 1.1 KiB each) and descriptors grew by exactly 1,000 |
-| 🚧 Blocked | Nothing technical. Seven of the eight v1.0 criteria are met; the eighth is the API freeze, which is a maintainer decision |
-| Next | Decide the four open items in [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md): `edge_triggered` (remove or implement), `log_format = json` (implement or drop from the docs), multi-range (permanent deviation or implement), and whether to freeze v1.0 at all |
+| 🚧 Blocked | Nothing. The v1.0 surface is frozen; every open item was resolved in this release |
+| Next | Post-1.0 work: any breaking change now needs a major version. See [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md) for what the freeze covers |
 
 A checkpoint like this goes stale, so the numbers above carry the date they were
 taken. Anything that looks like a claim without a measurement is a mistake in
@@ -192,7 +192,7 @@ The **Target** column shows the release version in which the feature is schedule
 
 | Category | Feature | Description | Target |
 |---|---|---|---|
-| Core | `epoll` event loop | Level-triggered by default, edge-triggered optional | v0.1 |
+| Core | `epoll` event loop | Level-triggered | v0.1 |
 | Core | Full non-blocking sockets | `accept4`, `SOCK_NONBLOCK`, `SOCK_CLOEXEC` | v0.1 |
 | Core | Connection pool | Slab and free-list, no `malloc` per connection | v0.1 |
 | Security | Build hardening | PIE, RELRO, stack protector, `_FORTIFY_SOURCE` | v0.1 |
@@ -375,13 +375,13 @@ Principles that are maintained:
 
 ### Level-Triggered vs Edge-Triggered
 
-| Aspect | Level-triggered (default, the only mode implemented) | Edge-triggered (`edge_triggered = true`, **not implemented**) |
+| Aspect | Level-triggered (the only mode) | Edge-triggered (not available) |
 |---|---|---|
 | Notification | As long as the fd is ready | Only when a change occurs (new data arrives) |
 | Application obligation | May read partially | **Must** read or write until `EAGAIN` |
 | Risk | More wakeups | Lost events if not drained; one busy connection can starve the others |
 | Complexity | Lower | Higher |
-| Status in Dantrix | In use | The key is accepted and start-up prints a warning that it has no effect. It is not on a release schedule; see [`docs/v1.0-readiness.md`](docs/v1.0-readiness.md) |
+| Status in Dantrix | In use | **Not implemented, and not configurable.** There is no `edge_triggered` key: setting one is an unknown-key error (exit code 2). An unimplemented switch that looks like it works is a trap, so it was removed rather than kept as a no-op. See [`docs/adr/0002-level-triggered-default.md`](docs/adr/0002-level-triggered-default.md) |
 
 In both modes, Dantrix limits the number of consecutive operations per event (a per-connection *budget*) so that one busy connection does not hold up other connections.
 
@@ -776,7 +776,7 @@ the compiled defaults in three places (`workers`, `access_log`, `log_format`);
 ```ini
 # Dantrix example configuration.
 #
-# Every key below is honoured except `edge_triggered`, which is marked below.
+# Every key below is honoured.
 # The `DANTRIX_<KEY>` environment variable and the `-o key=value` command line
 # override work on top of any file.
 # See `dantrix --help` and `dantrix --print-config`.
@@ -794,7 +794,6 @@ backlog         = 4096           # capped by net.core.somaxconn
 reuseport       = true
 max_connections = 16384          # per worker
 cpu_affinity    = false
-edge_triggered  = false          # accepted, has no effect (level-triggered always): warns at start-up
 
 ## Timeouts (seconds)
 header_timeout    = 10
@@ -837,7 +836,7 @@ tcp_fastopen     = 0             # queue length; 0 = disabled
 access_log = stdout              # off, stdout, stderr, or a file path
 error_log  = stderr
 log_level  = info                # error, warn, info, debug
-log_format = common              # common or combined (json is not implemented yet)
+log_format = common              # common, combined, or json
 
 ## Process and privileges
 daemonize = false                # keep false under systemd and Docker: they need a foreground process
@@ -852,7 +851,7 @@ daemonize = false                # keep false under systemd and Docker: they nee
 ### Reference for all keys
 
 <details>
-<summary><strong>Open the reference table (50 keys)</strong></summary>
+<summary><strong>Open the reference table (49 keys)</strong></summary>
 
 &nbsp;
 
@@ -867,7 +866,6 @@ daemonize = false                # keep false under systemd and Docker: they nee
 | `reuseport` | bool | `true` | no | One listener per worker with `SO_REUSEPORT`. `false` = one shared listener with `EPOLLEXCLUSIVE` |
 | `max_connections` | int | `16384` | no | Limit of active connections **per worker**. Total = `workers` × this value |
 | `cpu_affinity` | bool | `false` | no | Pin workers to CPU cores |
-| `edge_triggered` | bool | `false` | no | **Accepted but has no effect**: the server always runs level-triggered and warns at start-up. See [Level-Triggered vs Edge-Triggered](#level-triggered-vs-edge-triggered) |
 
 **Timeouts** (seconds, supporting the `s`/`m`/`h` suffixes)
 
@@ -1020,11 +1018,11 @@ as a warning and the server continues without the sandbox.
 > Since v0.8.10 every key above is **applied**. The listener tunables
 > (`tcp_defer_accept`, `tcp_fastopen`, `socket_rcvbuf`, `socket_sndbuf`) are set
 > on the listening socket before `listen()`; an option the kernel refuses is
-> reported as a warning and the server keeps running without it. The one key
-> still announced as not implemented is `edge_triggered`, which is accepted,
-> warned about at start-up and otherwise ignored (verified: the server runs
-> level-triggered with it set). `log_format = json` is rejected with exit code 2
-> rather than silently downgraded. `root`, `index` and `mime_types` open a file
+> reported as a warning and the server keeps running without it. There is no
+> key without an effect: `edge_triggered` was removed in v1.0.0 rather than kept
+> as a switch that does nothing (setting it is an unknown-key error, exit code
+> 2). `log_format = json` is implemented and emits one JSON object per line.
+> `root`, `index` and `mime_types` open a file
 > descriptor at start-up and are therefore **not** re-applied on `SIGHUP`;
 > everything else in the table reloads live.
 
@@ -1203,7 +1201,7 @@ The order of processing a request target into a file:
 - `If-None-Match` uses *weak comparison* as specified by RFC 9110 and supports `*` as well as a list of ETags.
 - `If-Modified-Since` only recognizes the IMF-fixdate format.
 - A **single range** is supported in three forms: `bytes=0-499`, `bytes=500-`, and `bytes=-500` (suffix). The result is `206` with `Content-Range: bytes start-end/size`.
-- **Multi-range** (`bytes=0-10,20-30`) is **deliberately not served**: the server chooses to ignore the Range and send a full `200`, closing the overlapping-range attack gap.
+- **Multi-range** (`bytes=0-10,20-30`) is **deliberately not served, permanently**: the server ignores the Range and sends a full `200`, closing the overlapping-range attack gap. This is a deviation from RFC 9110 that a client may notice, it is frozen as such in v1.0, and it will not change without a major version. (The RFC allows a server to ignore `Range`; it does not require honouring it.)
 - A range beyond the file size produces `416`. An invalid Range syntax is ignored.
 - `If-Range` only evaluates strong validators; when it does not match, the server sends a full `200`.
 
@@ -2598,7 +2596,7 @@ It depends on RAM (kernel memory per socket dominates), the file descriptor limi
 A single acceptor becomes a contention point and needs a way to hand connections to workers (a locked queue or a pipe). With `SO_REUSEPORT`, the kernel distributes the connections, so the hot path is lock-free. The trade-off is that distribution is not always even (see [Limitations and Trade-offs](#limitations-and-trade-offs)).
 
 **Which is faster, level-triggered or edge-triggered?**
-It depends on the workload. Edge-triggered can reduce the number of wakeups but is more complicated and easier to get wrong. Dantrix chooses level-triggered as the default and will measure the difference in v0.7 before drawing conclusions.
+It depends on the workload. Edge-triggered can reduce the number of wakeups but is more complicated and easier to get wrong. Dantrix chooses level-triggered: it is the only mode implemented, and there is no switch to select the other one.
 
 **Can it be used as a library or a reverse proxy?**
 That is the direction of development: the event loop and parser are designed modularly, and extracting `libdantrix` is on the post-1.0 idea list.

@@ -12,6 +12,56 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [1.0.0] - 2026-10-17
+
+The surface freeze. The maintainer chose v1.0 on 2026-10-17, and the three
+blockers recorded in `docs/v1.0-readiness.md` were resolved in this release
+rather than left open. From here, the 49 configuration keys, 46 CLI flags, the
+HTTP behaviour, the status JSON and the access-log formats are a promise: a
+breaking change to any of them needs a major version.
+
+### Changed (breaking, and the last release where that is free)
+
+- **`edge_triggered` was removed.** It had been accepted since v0.6, warned
+  about at start-up, and never implemented: the server only ever ran
+  level-triggered. A switch that appears to configure something and does not is
+  a trap, which is the same defect class as `add_header` before v0.8.10.
+  Setting the key is now an unknown-key error (exit code 2, verified), it no
+  longer appears in `--print-config` or the README table, and the key count is
+  49. ADR 0002 records the resolution: one mode, implemented, no dead switch.
+- Multi-range requests are now documented as a **permanent** deviation: the
+  server ignores `Range: bytes=0-10,20-30` and answers a full `200`. RFC 9110
+  permits ignoring `Range`; the README now says the behaviour will not change
+  without a major version, so a client author can rely on it.
+
+### Added
+
+- **`log_format = json` is implemented.** It used to be documented and rejected
+  with exit code 2. The access log now emits one JSON object per line with the
+  field names `ts`, `peer`, `method`, `target`, `protocol`, `status`, `bytes`,
+  `referer` and `user_agent`. The JSON escaper writes `\"`, `\\`, `\b`, `\f`,
+  `\n`, `\r`, `\t` and `\u00XX`; the common format's `\xHH` escape is not valid
+  JSON and would make a pipeline reject the line. Verified by parsing every
+  emitted line with `json.loads`, including a target containing a quote and a
+  backslash and a `User-Agent` containing a quote.
+
+### Fixed
+
+- The JSON branch in `dx_log_access` first appended the whole common-format line
+  and then the JSON object, so every `json` line carried both. Found by running
+  the format instead of reading it; the branch now returns before the
+  common/combined fields are appended, and the test parses the lines.
+
+### Added (tests)
+
+- `tests/config_test.py` (40 checks, was 38): the removed `edge_triggered` key
+  must be rejected with exit code 2 and named in the message; `log_format = json`
+  must be accepted; every emitted JSON line must parse; the object must have
+  exactly the documented field names; a quoted/backslash target must survive
+  intact; a 404 must be recorded. The JSON checks were proven able to fail by
+  reinstating the old `\xHH` escaper, which produced
+  `Invalid \escape` from the JSON parser.
+
 ## [0.8.21] - 2026-10-17
 
 One commit after v0.8.20: the comment added to the stage-2 example did not

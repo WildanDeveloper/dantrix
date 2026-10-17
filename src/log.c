@@ -185,6 +185,90 @@ static void append_raw(char *out, size_t cap, size_t *pos, const char *s)
     }
 }
 
+/*
+ * Append a JSON string value (without the surrounding quotes) at *pos.
+ *
+ * The access-log escaper writes \xHH for control bytes, which is not valid
+ * JSON: a log parser reading a json-format line would reject it. JSON needs
+ * \" \\ \b \f \n \r \t and \u00XX for the remaining control characters, and a
+ * UTF-8 byte sequence passes through unchanged (JSON strings are Unicode, and
+ * a well-formed UTF-8 stream is valid inside them). Bytes >= 0x80 are copied
+ * as-is for that reason; the peer cannot inject a raw control byte because
+ * every byte below 0x20 is escaped.
+ */
+static void append_json_string(char *out, size_t cap, size_t *pos, const char *s, size_t len)
+{
+    static const char hex[] = "0123456789abcdef";
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+
+        if (c == '"' || c == '\\') {
+            if (*pos + 2u >= cap) {
+                return;
+            }
+            out[(*pos)++] = '\\';
+            out[(*pos)++] = (char)c;
+        } else if (c == '\b' || c == '\f' || c == '\n' || c == '\r' || c == '\t') {
+            const char esc = c == '\b'   ? 'b'
+                             : c == '\f' ? 'f'
+                             : c == '\n' ? 'n'
+                             : c == '\r' ? 'r'
+                                         : 't';
+
+            if (*pos + 2u >= cap) {
+                return;
+            }
+            out[(*pos)++] = '\\';
+            out[(*pos)++] = esc;
+        } else if (c < 0x20u) {
+            if (*pos + 6u >= cap) {
+                return;
+            }
+            out[(*pos)++] = '\\';
+            out[(*pos)++] = 'u';
+            out[(*pos)++] = '0';
+            out[(*pos)++] = '0';
+            out[(*pos)++] = hex[(c >> 4) & 0xfu];
+            out[(*pos)++] = hex[c & 0xfu];
+        } else {
+            if (*pos + 1u >= cap) {
+                return;
+            }
+            out[(*pos)++] = (char)c;
+        }
+    }
+}
+
+/* Append `"key":"value"` with the value JSON-escaped. */
+static void append_json_field(char *out, size_t cap, size_t *pos, const char *key,
+                              const char *value, size_t len, bool *first)
+{
+    if (!*first) {
+        append_raw(out, cap, pos, ",");
+    }
+    *first = false;
+    append_raw(out, cap, pos, "\"");
+    append_raw(out, cap, pos, key);
+    append_raw(out, cap, pos, "\":\"");
+    append_json_string(out, cap, pos, value, len);
+    append_raw(out, cap, pos, "\"");
+}
+
+/* Append `"key":<number>`; the caller formats the number. */
+static void append_json_number(char *out, size_t cap, size_t *pos, const char *key,
+                               const char *number, bool *first)
+{
+    if (!*first) {
+        append_raw(out, cap, pos, ",");
+    }
+    *first = false;
+    append_raw(out, cap, pos, "\"");
+    append_raw(out, cap, pos, key);
+    append_raw(out, cap, pos, "\":");
+    append_raw(out, cap, pos, number);
+}
+
 void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const char *method,
                    size_t method_len, const char *target, size_t target_len, const char *protocol,
                    int status, size_t body_bytes, const char *referer, const char *user_agent)
@@ -220,6 +304,59 @@ void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const c
         const char *str_ = (s);                                                                    \
         append_escaped(line, sizeof(line), &pos, str_, strlen(str_));                              \
     } while (0)
+
+    if (fmt == DX_LOG_FMT_JSON) {
+        /*
+         * One JSON object per line, and nothing else on the line: this branch
+         * must run before the common/combined fields are appended, or every
+         * line would carry both. The field names are a promise (a parser keys
+         * off them): ts, peer, method, target, protocol, status, bytes,
+         * referer, user_agent.
+         */
+        bool first = true;
+        char num[32];
+        int n;
+
+        append_raw(line, sizeof(line), &pos, "{");
+        append_json_field(line, sizeof(line), &pos, "ts", stamp[0] != '\0' ? stamp : "-",
+                          strlen(stamp[0] != '\0' ? stamp : "-"), &first);
+        append_json_field(line, sizeof(line), &pos, "peer", peer != NULL ? peer : "-",
+                          strlen(peer != NULL ? peer : "-"), &first);
+        append_json_field(line, sizeof(line), &pos, "method",
+                          method != NULL && method_len > 0 ? method : "-",
+                          method != NULL && method_len > 0 ? method_len : 1u, &first);
+        append_json_field(line, sizeof(line), &pos, "target",
+                          target != NULL && target_len > 0 ? target : "-",
+                          target != NULL && target_len > 0 ? target_len : 1u, &first);
+        append_json_field(line, sizeof(line), &pos, "protocol",
+                          protocol != NULL ? protocol : "HTTP/1.1",
+                          strlen(protocol != NULL ? protocol : "HTTP/1.1"), &first);
+        n = snprintf(num, sizeof(num), "%d", status);
+        if (n > 0) {
+            append_json_number(line, sizeof(line), &pos, "status", num, &first);
+        }
+        n = snprintf(num, sizeof(num), "%zu", body_bytes);
+        if (n > 0) {
+            append_json_number(line, sizeof(line), &pos, "bytes", num, &first);
+        }
+        append_json_field(line, sizeof(line), &pos, "referer",
+                          referer != NULL && referer[0] != '\0' ? referer : "-",
+                          strlen(referer != NULL && referer[0] != '\0' ? referer : "-"), &first);
+        append_json_field(line, sizeof(line), &pos, "user_agent",
+                          user_agent != NULL && user_agent[0] != '\0' ? user_agent : "-",
+                          strlen(user_agent != NULL && user_agent[0] != '\0' ? user_agent : "-"),
+                          &first);
+        append_raw(line, sizeof(line), &pos, "}");
+
+        if (pos + 2u < sizeof(line)) {
+            line[pos++] = '\n';
+            line[pos] = '\0';
+            (void)fwrite(line, 1, pos, log->out);
+            (void)fflush(log->out);
+        }
+        log_unlock(log);
+        return;
+    }
 
     ACC_APPEND(peer != NULL ? peer : "-");
     append_raw(line, sizeof(line), &pos, " - - [");

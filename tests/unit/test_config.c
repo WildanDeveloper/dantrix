@@ -44,7 +44,6 @@ static void test_defaults(void)
     CHECK(s.reuseport);
     CHECK_EQ((int)s.max_connections, 16384);
     CHECK(!s.cpu_affinity);
-    CHECK(!s.edge_triggered);
     CHECK_EQ((long long)s.header_timeout_ms, 10000);
     CHECK_EQ((long long)s.max_body_size, 1024 * 1024);
     CHECK(strcmp(s.bind, "0.0.0.0") == 0);

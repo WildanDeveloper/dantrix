@@ -7,17 +7,18 @@ Every test suite before this one started a server and made requests. None of the
 ever read a configuration file. That blind spot is why two stale claims survived
 several releases in the documentation: the README said `add_header` was "still
 announced as not implemented" when it had been working since v0.8.10, and the
-start-up warning for `edge_triggered` promised a v0.7 implementation nine
-releases after v0.7 shipped. Nothing tested the surface, so nothing contradicted
+start-up warning for `edge_triggered` promised an implementation in a release
+that had already shipped. Nothing tested the surface, so nothing contradicted
 the prose.
 
 This test reads the surface as an operator would: it writes configuration files,
 starts the binary, and checks what the process does. The rules it enforces are:
 
   1. A key that is documented as accepted must not be rejected.
-  2. A key that is accepted but has no effect must say so on stderr.
-  3. A key whose only documented value cannot be used must be rejected loudly
-     rather than silently downgraded (that is the `log_format = json` case).
+  2. A key that was removed must be rejected loudly, not silently ignored
+     (`edge_triggered`, deleted before the v1.0 freeze).
+  3. A documented value must work (that is the `log_format = json` case, which
+     used to be documented and rejected).
   4. A rejected configuration must exit with the documented code (2) and must
      not leave a log file or a pid file behind.
   5. A file the README embeds (the example configuration and every file in
@@ -177,24 +178,24 @@ def main():
     check("add_header is accepted and the server starts", rc == 0 or rc is None,
           f"exit {rc}, stderr: {err.strip()[:200]}")
 
-    # --- 2. A no-op key must announce itself --------------------------------
+    # --- 2. A key that was removed must be rejected, not ignored -----------
+    # `edge_triggered` was accepted for nine releases, warned about, and never
+    # implemented. Before the v1.0 freeze it was deleted: a switch that does
+    # nothing is a trap. The removal is only real if setting it fails loudly.
     rc, err, _out, d = run_config("edge_triggered = true\n")
     shutil.rmtree(d, ignore_errors=True)
-    check("edge_triggered is accepted", rc == 0 or rc is None, f"exit {rc}")
-    check("edge_triggered warns that it has no effect",
-          "edge_triggered" in err and ("no effect" in err or "not implemented" in err),
+    check("the removed edge_triggered key is rejected", rc == 2, f"exit {rc}")
+    check("the rejection names the key", "edge_triggered" in err,
           f"stderr: {err.strip()[:200]}")
-    check("the warning names no future release",
-          not re.search(r"planned for v[0-9]", err),
-          "a promise with a version in it goes stale; the message must not carry one")
 
-    # --- 3. A value that cannot be used is rejected, not downgraded ---------
+    # --- 3. A documented value must work, not be rejected ------------------
+    # `log_format = json` used to be documented and rejected with exit 2. It is
+    # implemented now, so the test asserts both that it is accepted and that the
+    # line it writes is valid JSON with the documented field names.
     rc, err, _out, d = run_config("log_format = json\n")
     shutil.rmtree(d, ignore_errors=True)
-    check("log_format = json is rejected with exit code 2", rc == 2, f"exit {rc}")
-    check("the rejection names the key and the value",
-          "log_format" in err or "log format" in err,
-          f"stderr: {err.strip()[:200]}")
+    check("log_format = json is accepted", rc == 0 or rc is None,
+          f"exit {rc}, stderr: {err.strip()[:200]}")
 
     rc, _err, _out, d = run_config("log_format = combined\n")
     shutil.rmtree(d, ignore_errors=True)
@@ -401,7 +402,7 @@ def main():
     # it from. Its header claims it differs from the compiled defaults in
     # exactly three places, so the differences are computed from --print-config
     # rather than trusted -- the header had already gone stale once, pointing at
-    # a v0.7 implementation of edge_triggered that never happened.
+    # a release that shipped without the feature it named.
     ex = subprocess.run([BIN, "--test-config", "-c", "conf/dantrix.conf"],
                         capture_output=True, timeout=15, cwd=REPO)
     check("the shipped example config validates from the repository root",
@@ -522,6 +523,75 @@ def main():
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.communicate()
+        shutil.rmtree(d, ignore_errors=True)
+
+    # --- 7. The JSON access log is valid JSON with the documented fields ----
+    # Accepting `log_format = json` is not enough: the point of the format is
+    # that a log pipeline can parse it. Every line must be a JSON object, and
+    # the field names are part of the frozen surface, so they are checked by
+    # name. The target deliberately contains a quote and a backslash, which are
+    # legal request-target bytes here and would break a naive escaper.
+    import json as _json
+
+    d = tempfile.mkdtemp(prefix="dantrix-jsonlog-")
+    proc = None
+    try:
+        docroot = os.path.join(d, "root")
+        os.makedirs(docroot, exist_ok=True)
+        with open(os.path.join(docroot, "a.txt"), "w", encoding="ascii") as f:
+            f.write("hi\n")
+        port = PORT_BASE + 2
+        access = os.path.join(d, "access.log")
+        conf = os.path.join(d, "dantrix.conf")
+        with open(conf, "w", encoding="ascii") as f:
+            f.write(f"bind = 127.0.0.1\nport = {port}\nroot = {docroot}\n"
+                    f"access_log = {access}\nlog_format = json\n")
+        proc = subprocess.Popen([BIN, "-c", conf], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, cwd=REPO)
+        for path in ('/a.txt', '/a"b\\c.txt', '/missing'):
+            for _ in range(60):
+                try:
+                    s = socket.create_connection(("127.0.0.1", port), timeout=1)
+                except OSError:
+                    time.sleep(0.1)
+                    continue
+                s.sendall(f"GET {path} HTTP/1.1\r\nHost: cfg\r\n"
+                          "Connection: close\r\n\r\n".encode())
+                while s.recv(65536):
+                    pass
+                s.close()
+                break
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+        proc = None
+        lines = [ln for ln in open(access, encoding="utf-8").read().splitlines() if ln]
+        parsed, broken = [], []
+        for ln in lines:
+            try:
+                parsed.append(_json.loads(ln))
+            except ValueError as e:
+                broken.append(f"{e}: {ln[:80]}")
+        check("every JSON access-log line parses", bool(lines) and not broken,
+              f"{len(broken)} invalid: {broken[:2]}")
+        want = {"ts", "peer", "method", "target", "protocol", "status", "bytes",
+                "referer", "user_agent"}
+        got = set(parsed[0]) if parsed else set()
+        check("the JSON log has exactly the documented field names", got == want,
+              f"missing: {sorted(want - got)}, unexpected: {sorted(got - want)}")
+        check("the JSON log records the quoted/backslash target intact",
+              any(o.get("target") == '/a"b\\c.txt' for o in parsed),
+              f"targets: {[o.get('target') for o in parsed]}")
+        check("the JSON log records the 404", any(o.get("status") == 404 for o in parsed),
+              f"statuses: {[o.get('status') for o in parsed]}")
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.communicate()
         shutil.rmtree(d, ignore_errors=True)
 
     print(f"config test: {'FAILED' if failures else 'PASSED'} ({checks} checks)")
