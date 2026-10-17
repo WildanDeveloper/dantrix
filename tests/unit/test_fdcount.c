@@ -122,10 +122,68 @@ static void test_json_shape(void)
     CHECK_EQ(dx_fdcount_json(NULL, sizeof(buf)), 0u);
 }
 
+/*
+ * Every close() of a tracked descriptor must be counted exactly once.
+ *
+ * v1.0.0 called dx_fdcount_closed(DX_FD_WAKEUP) twice for a single close() in
+ * four places (three error paths and the shutdown path), so the accounting said
+ * one fewer descriptor was open than really was. The existing regression test
+ * compares actual minus believed while the server runs, which cannot see a
+ * miscount that happens on the way out. This test states the invariant at the
+ * level where it is decided: N opens and N closes of the same kind leave the
+ * per-kind count where it started, and one close must undo exactly one open.
+ */
+static void test_balanced_close(void)
+{
+    uint64_t before[DX_FD_KINDS];
+    uint64_t after[DX_FD_KINDS];
+    uint64_t open_before;
+    uint64_t total_before;
+
+    dx_test_begin("fdcount/one_close_undoes_one_open");
+
+    total_before = dx_fdcount_total();
+    dx_fdcount_by_kind(before);
+    open_before = before[DX_FD_WAKEUP];
+
+    /* One open, one close: the kind's count returns to where it was. */
+    dx_fdcount_opened(DX_FD_WAKEUP);
+    dx_fdcount_by_kind(after);
+    CHECK_EQ(after[DX_FD_WAKEUP], open_before + 1u);
+    dx_fdcount_closed(DX_FD_WAKEUP);
+    dx_fdcount_by_kind(after);
+    CHECK_EQ(after[DX_FD_WAKEUP], open_before);
+
+    /*
+     * The defect this test exists for: a second close for the same fd drives
+     * the kind's count below its baseline. The total clamps at zero rather than
+     * underflowing, so the per-kind value is the only place the mistake shows --
+     * which is exactly why it went unnoticed.
+     */
+    dx_fdcount_opened(DX_FD_WAKEUP);
+    dx_fdcount_closed(DX_FD_WAKEUP);
+    dx_fdcount_closed(DX_FD_WAKEUP);
+    dx_fdcount_by_kind(after);
+    CHECK_EQ(after[DX_FD_WAKEUP], open_before);
+    CHECK_EQ(dx_fdcount_total(), total_before);
+
+    /* And the balance holds for a batch, as the shutdown path does it. */
+    for (int i = 0; i < 8; i++) {
+        dx_fdcount_opened(DX_FD_WAKEUP);
+    }
+    for (int i = 0; i < 8; i++) {
+        dx_fdcount_closed(DX_FD_WAKEUP);
+    }
+    dx_fdcount_by_kind(after);
+    CHECK_EQ(after[DX_FD_WAKEUP], open_before);
+    CHECK_EQ(dx_fdcount_total(), total_before);
+}
+
 int main(void)
 {
     test_kind_names();
     test_open_close_delta();
+    test_balanced_close();
     test_by_kind();
     test_actual_counts_real_fds();
     test_json_shape();

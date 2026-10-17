@@ -239,7 +239,6 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
                      cfg->port, dx_strerror(errno));
         (void)close(sig_fd);
         dx_fdcount_closed(DX_FD_WAKEUP);
-        dx_fdcount_closed(DX_FD_WAKEUP);
         return -1;
     }
     warn_refused_tuning(&logs->log, &refused);
@@ -288,7 +287,6 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
         dx_worker_destroy(&worker);
         (void)close(sig_fd);
         dx_fdcount_closed(DX_FD_WAKEUP);
-        dx_fdcount_closed(DX_FD_WAKEUP);
         pthread_mutex_destroy(&reload.mu);
         return -1;
     }
@@ -313,7 +311,6 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
 
     dx_worker_destroy(&worker);
     (void)close(sig_fd);
-    dx_fdcount_closed(DX_FD_WAKEUP);
     dx_fdcount_closed(DX_FD_WAKEUP);
     pthread_mutex_destroy(&reload.mu);
     return rc;
@@ -718,7 +715,6 @@ out:
     }
     if (sig_fd >= 0) {
         (void)close(sig_fd);
-        dx_fdcount_closed(DX_FD_WAKEUP);
         dx_fdcount_closed(DX_FD_WAKEUP);
     }
     pthread_mutex_destroy(&reload.mu);

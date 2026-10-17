@@ -12,6 +12,31 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [1.0.1] - 2026-10-17
+
+Documentation only: the README now agrees with the release it describes.
+
+### Fixed
+
+- v1.0.0 shipped with the README telling two opposite stories. The status table
+  said "Current release v1.0.0 (frozen)" while the roadmap said "Configuration
+  keys and HTTP behavior frozen ... **Not ready yet**" and marked the stable
+  release as still planned. The freeze box is closed now and states what is
+  frozen (49 configuration keys, 46 CLI flags, the HTTP behaviour, the status
+  JSON field names, and the `common`/`combined`/`json` access-log formats).
+- The badge and three prose blocks still described the project as pre-alpha.
+  A frozen 1.0 API is not pre-alpha, but it is also not audited, and those are
+  different claims: the badge now says "stable API, not audited", the banner and
+  the FAQ answer say the same thing, and the deployment warning says "no
+  independent security audit" instead of "still pre-alpha".
+
+### Added
+
+- `tests/config_test.py` (42 checks, was 40): at a 1.x version, no document may
+  describe the freeze as pending, and every box in the roadmap's v1.0
+  definition-of-done must be closed. Both checks were proven able to fail by
+  re-opening the freeze box and by restoring the "Not ready yet" sentence.
+
 ## [1.0.0] - 2026-10-17
 
 The surface freeze. The maintainer chose v1.0 on 2026-10-17, and the three
