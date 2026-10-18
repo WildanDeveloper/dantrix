@@ -56,9 +56,9 @@ void dx_fdcount_by_kind(uint64_t *out);
 
 /*
  * What the kernel reports in /proc/self/fd, or (uint64_t)-1 when /proc is not
- * mounted. Note that /proc/self/fd includes the descriptor used to enumerate
- * the directory, so the value is one higher than the truth on Linux; callers
- * compare deltas, so the constant offset does not matter.
+ * mounted. The descriptor used to enumerate the directory is subtracted, so
+ * the value is the real count and can be compared directly with
+ * dx_fdcount_total() (the status endpoint does exactly that).
  */
 uint64_t dx_fdcount_actual(void);
 

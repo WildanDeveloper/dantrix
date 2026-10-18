@@ -64,6 +64,7 @@ int dx_worker_init(dx_worker_t *w, const dx_worker_opts_t *opts)
     w->reload_ctx = opts->reload_ctx;
     w->status = opts->status;
     w->status_path = opts->status_path;
+    w->tcp_nodelay = opts->tcp_nodelay;
     w->start_ms = (opts->start_ms != 0) ? opts->start_ms : (uint64_t)dx_now_ms();
     w->total_workers = (opts->total_workers != 0) ? opts->total_workers : 1u;
     dx_timer_node_reset(&w->accept_timer);
@@ -353,8 +354,15 @@ static int conn_open(dx_worker_t *w, int fd, const struct sockaddr_storage *peer
      * updates can skip the epoll_ctl when the mask does not change. */
     conn->interest = (uint32_t)(EPOLLIN | EPOLLRDHUP);
 
-    /* TCP_NODELAY only changes latency; a failure must not drop the client. */
-    (void)dx_set_tcp_nodelay(fd);
+    /*
+     * TCP_NODELAY only changes latency; a failure must not drop the client.
+     * The setting was parsed, validated and printed but never applied: the call
+     * below was unconditional, so `tcp_nodelay = false` silently kept Nagle
+     * disabled. It now honours the key.
+     */
+    if (w->tcp_nodelay) {
+        (void)dx_set_tcp_nodelay(fd);
+    }
     w->accepted_total++;
     dx_status_conn_accepted(w->status);
     return 0;
@@ -585,13 +593,14 @@ static void accept_loop(dx_worker_t *w)
             }
             if (conn_open(w, fd, &peer, counted ? ipkey : NULL, counted ? ipkey_len : 0u) != 0) {
                 /*
-                 * conn_open consumed the descriptor on every failure path, so
-                 * there is nothing left to close here. Release the reservation
-                 * it never took over.
+                 * conn_open consumed the descriptor on every failure path and
+                 * released everything it had taken: once the reservation is
+                 * stored on the slot, dx_pool_release() -> dx_conn_reset()
+                 * releases the per-IP count too. Releasing it again here (as an
+                 * earlier version did) decremented a *different* live
+                 * connection's count, so one client could exceed
+                 * max_conns_per_ip by provoking this failure repeatedly.
                  */
-                if (counted) {
-                    dx_connlimit_release(w->climit, ipkey, ipkey_len);
-                }
                 w->rejected_total++;
                 dx_status_conn_rejected(w->status);
             }

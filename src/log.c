@@ -221,7 +221,21 @@ static void append_json_string(char *out, size_t cap, size_t *pos, const char *s
             }
             out[(*pos)++] = '\\';
             out[(*pos)++] = esc;
-        } else if (c < 0x20u) {
+        } else if (c < 0x20u || c >= 0x80u) {
+            /*
+             * Every byte outside printable ASCII is escaped as \u00XX.
+             *
+             * Control bytes need it for JSON itself. Bytes >= 0x80 need it
+             * because the client chooses them and they are not guaranteed to
+             * be well-formed UTF-8: a request target of "/a\x80\xff" produced a
+             * log line that json.loads() rejected with UnicodeDecodeError, so
+             * every strict consumer (jq, Filebeat, Loki) would drop it.
+             * Escaping as \u00XX maps the byte to the same code point, which
+             * keeps the value recoverable and the line valid JSON regardless of
+             * the input. (A UTF-8 aware escaper could keep non-ASCII text
+             * readable, but it would have to validate multi-byte sequences and
+             * substitute U+FFFD; this is simpler and never wrong.)
+             */
             if (*pos + 6u >= cap) {
                 return;
             }
@@ -277,6 +291,8 @@ void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const c
     struct tm tm_buf;
     char stamp[64];
     char line[2048];
+    /* Capacity for the record body: two bytes are reserved for "\n\0". */
+#define ACC_CAP (sizeof(line) - 2u)
     size_t pos = 0;
 
     if (log == NULL) {
@@ -302,7 +318,7 @@ void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const c
 #define ACC_APPEND(s)                                                                              \
     do {                                                                                           \
         const char *str_ = (s);                                                                    \
-        append_escaped(line, sizeof(line), &pos, str_, strlen(str_));                              \
+        append_escaped(line, ACC_CAP, &pos, str_, strlen(str_));                                   \
     } while (0)
 
     if (fmt == DX_LOG_FMT_JSON) {
@@ -317,36 +333,35 @@ void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const c
         char num[32];
         int n;
 
-        append_raw(line, sizeof(line), &pos, "{");
-        append_json_field(line, sizeof(line), &pos, "ts", stamp[0] != '\0' ? stamp : "-",
+        append_raw(line, ACC_CAP, &pos, "{");
+        append_json_field(line, ACC_CAP, &pos, "ts", stamp[0] != '\0' ? stamp : "-",
                           strlen(stamp[0] != '\0' ? stamp : "-"), &first);
-        append_json_field(line, sizeof(line), &pos, "peer", peer != NULL ? peer : "-",
+        append_json_field(line, ACC_CAP, &pos, "peer", peer != NULL ? peer : "-",
                           strlen(peer != NULL ? peer : "-"), &first);
-        append_json_field(line, sizeof(line), &pos, "method",
+        append_json_field(line, ACC_CAP, &pos, "method",
                           method != NULL && method_len > 0 ? method : "-",
                           method != NULL && method_len > 0 ? method_len : 1u, &first);
-        append_json_field(line, sizeof(line), &pos, "target",
+        append_json_field(line, ACC_CAP, &pos, "target",
                           target != NULL && target_len > 0 ? target : "-",
                           target != NULL && target_len > 0 ? target_len : 1u, &first);
-        append_json_field(line, sizeof(line), &pos, "protocol",
-                          protocol != NULL ? protocol : "HTTP/1.1",
+        append_json_field(line, ACC_CAP, &pos, "protocol", protocol != NULL ? protocol : "HTTP/1.1",
                           strlen(protocol != NULL ? protocol : "HTTP/1.1"), &first);
         n = snprintf(num, sizeof(num), "%d", status);
         if (n > 0) {
-            append_json_number(line, sizeof(line), &pos, "status", num, &first);
+            append_json_number(line, ACC_CAP, &pos, "status", num, &first);
         }
         n = snprintf(num, sizeof(num), "%zu", body_bytes);
         if (n > 0) {
-            append_json_number(line, sizeof(line), &pos, "bytes", num, &first);
+            append_json_number(line, ACC_CAP, &pos, "bytes", num, &first);
         }
-        append_json_field(line, sizeof(line), &pos, "referer",
+        append_json_field(line, ACC_CAP, &pos, "referer",
                           referer != NULL && referer[0] != '\0' ? referer : "-",
                           strlen(referer != NULL && referer[0] != '\0' ? referer : "-"), &first);
-        append_json_field(line, sizeof(line), &pos, "user_agent",
+        append_json_field(line, ACC_CAP, &pos, "user_agent",
                           user_agent != NULL && user_agent[0] != '\0' ? user_agent : "-",
                           strlen(user_agent != NULL && user_agent[0] != '\0' ? user_agent : "-"),
                           &first);
-        append_raw(line, sizeof(line), &pos, "}");
+        append_raw(line, ACC_CAP, &pos, "}");
 
         if (pos + 2u < sizeof(line)) {
             line[pos++] = '\n';
@@ -359,23 +374,23 @@ void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const c
     }
 
     ACC_APPEND(peer != NULL ? peer : "-");
-    append_raw(line, sizeof(line), &pos, " - - [");
+    append_raw(line, ACC_CAP, &pos, " - - [");
     ACC_APPEND(stamp[0] != '\0' ? stamp : "-");
-    append_raw(line, sizeof(line), &pos, "] \"");
+    append_raw(line, ACC_CAP, &pos, "] \"");
     if (method != NULL && method_len > 0) {
-        append_escaped(line, sizeof(line), &pos, method, method_len);
+        append_escaped(line, ACC_CAP, &pos, method, method_len);
     } else {
-        append_escaped(line, sizeof(line), &pos, "-", 1u);
+        append_escaped(line, ACC_CAP, &pos, "-", 1u);
     }
-    append_raw(line, sizeof(line), &pos, " ");
+    append_raw(line, ACC_CAP, &pos, " ");
     if (target != NULL && target_len > 0) {
-        append_escaped(line, sizeof(line), &pos, target, target_len);
+        append_escaped(line, ACC_CAP, &pos, target, target_len);
     } else {
-        append_escaped(line, sizeof(line), &pos, "-", 1u);
+        append_escaped(line, ACC_CAP, &pos, "-", 1u);
     }
-    append_raw(line, sizeof(line), &pos, " ");
+    append_raw(line, ACC_CAP, &pos, " ");
     ACC_APPEND(protocol != NULL ? protocol : "HTTP/1.1");
-    append_raw(line, sizeof(line), &pos, "\" ");
+    append_raw(line, ACC_CAP, &pos, "\" ");
 
     /* Status and body bytes: numbers, appended without stdio. */
     {
@@ -383,25 +398,34 @@ void dx_log_access(dx_log_t *log, dx_log_format_t fmt, const char *peer, const c
         int n = snprintf(num, sizeof(num), "%d %zu", status, body_bytes);
 
         if (n > 0) {
-            append_raw(line, sizeof(line), &pos, num);
+            append_raw(line, ACC_CAP, &pos, num);
         }
     }
 
     if (fmt == DX_LOG_FMT_COMBINED) {
-        append_raw(line, sizeof(line), &pos, " \"");
+        append_raw(line, ACC_CAP, &pos, " \"");
         ACC_APPEND(referer != NULL && referer[0] != '\0' ? referer : "-");
-        append_raw(line, sizeof(line), &pos, "\" \"");
+        append_raw(line, ACC_CAP, &pos, "\" \"");
         ACC_APPEND(user_agent != NULL && user_agent[0] != '\0' ? user_agent : "-");
-        append_raw(line, sizeof(line), &pos, "\"");
+        append_raw(line, ACC_CAP, &pos, "\"");
     }
 
-    if (pos + 2u < sizeof(line)) {
-        line[pos++] = '\n';
-        line[pos] = '\0';
-        /* The mutex is already held (taken at the top of the function). */
-        (void)fwrite(line, 1, pos, log->out);
-        (void)fflush(log->out);
-        log_unlock(log);
-    }
+    /*
+     * The mutex is held from the top of this function. Every path out of it
+     * must release it: an early return that forgot to was a remote denial of
+     * service (one request with a long escaped target wedged the worker in
+     * futex_wait forever, and with the shared logger every worker followed).
+     *
+     * The line is also never dropped. ACC_CAP reserves the last two bytes for
+     * "\n\0", so every append above was bounded and no partial \xHH escape can
+     * exist at pos; a client cannot suppress its own audit record by making it
+     * long, and a truncated record still ends with a newline.
+     */
+    line[pos++] = '\n';
+    line[pos] = '\0';
+    (void)fwrite(line, 1, pos, log->out);
+    (void)fflush(log->out);
+    log_unlock(log);
 #undef ACC_APPEND
+#undef ACC_CAP
 }

@@ -200,6 +200,41 @@ static void warn_refused_tuning(dx_log_t *log, const dx_sockopts_t *refused)
 /* Single-worker path: the main thread runs the event loop              */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Install the seccomp sandbox. Called from each server path after the listener
+ * exists, after privileges have been dropped and before any worker thread is
+ * created: everything the filter allows has already happened, and every thread
+ * created from here inherits it.
+ *
+ * It must run *after* the privilege drop, not before: setgroups/setgid/setuid
+ * are deliberately absent from the allow list (the sandbox exists so the
+ * process cannot regain privileges), so installing the filter first made the
+ * drop itself die with SIGSYS -- verified: "root --user nobody --seccomp on"
+ * logged "seccomp filter active" and was then killed by a bad system call.
+ *
+ * A kernel that cannot install the filter is a warning, not a failure: the
+ * server is still able to serve without the extra guarantee.
+ */
+static void install_sandbox(const dx_server_config_t *cfg, dx_logs_t *logs)
+{
+    if (!cfg->seccomp) {
+        return;
+    }
+    if (dx_seccomp_apply() != 0) {
+        dx_log_write(&logs->log, DX_LOG_WARN,
+                     "seccomp filter not installed (%s); continuing without the sandbox",
+                     dx_strerror(errno));
+    } else {
+        size_t n = 0;
+
+        (void)dx_seccomp_allowlist(&n);
+        dx_log_write(&logs->log, DX_LOG_INFO,
+                     "seccomp filter active: %zu syscalls allowed, everything else kills the "
+                     "process",
+                     n);
+    }
+}
+
 static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int ready_fd,
                              dx_status_t *status, uint64_t start_ms, dx_connlimit_t *climit)
 {
@@ -243,6 +278,22 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
     }
     warn_refused_tuning(&logs->log, &refused);
 
+    /*
+     * Privileges are dropped here, after bind() and before the first accept:
+     * the listener is already open, so a port below 1024 works, and no request
+     * is ever served as root. Dropping earlier (as v1.0.2 did) made
+     * "--user nobody --port 80" fail with EACCES, contradicting the documented
+     * "drop after bind".
+     */
+    if (dx_drop_privileges(cfg->user, cfg->group, &logs->log) != 0) {
+        (void)close(listen_fd);
+        (void)close(sig_fd);
+        dx_fdcount_closed(DX_FD_WAKEUP);
+        return -1;
+    }
+
+    install_sandbox(cfg, logs);
+
     memset(&reload, 0, sizeof(reload));
     pthread_mutex_init(&reload.mu, NULL);
     reload.static_opts = cfg->static_opts;
@@ -268,6 +319,7 @@ static int server_run_single(const dx_server_config_t *cfg, dx_logs_t *logs, int
     opts.fcache_valid_ms = cfg->fcache_valid_ms;
     opts.climit = climit;
     opts.max_conns_per_ip = (cfg->max_conns_per_ip > 0) ? (unsigned)cfg->max_conns_per_ip : 0u;
+    opts.tcp_nodelay = cfg->tcp_nodelay;
     opts.mime = cfg->mime;
     opts.static_opts = &cfg->static_opts;
     opts.life = &cfg->life;
@@ -525,6 +577,12 @@ static int server_run_multi(const dx_server_config_t *cfg, dx_logs_t *logs, int 
         goto out;
     }
 
+    /* Same rule as the single-worker path: after bind(), before any accept. */
+    if (dx_drop_privileges(cfg->user, cfg->group, &logs->log) != 0) {
+        goto out;
+    }
+    install_sandbox(cfg, logs);
+
     reload.static_opts = cfg->static_opts;
     reload.life = cfg->life;
     reload.limits = cfg->limits;
@@ -555,6 +613,7 @@ static int server_run_multi(const dx_server_config_t *cfg, dx_logs_t *logs, int 
         ctxs[i].opts.climit = climit;
         ctxs[i].opts.max_conns_per_ip =
             (cfg->max_conns_per_ip > 0) ? (unsigned)cfg->max_conns_per_ip : 0u;
+        ctxs[i].opts.tcp_nodelay = cfg->tcp_nodelay;
         ctxs[i].opts.mime = cfg->mime;
         ctxs[i].opts.static_opts = &cfg->static_opts;
         ctxs[i].opts.life = &cfg->life;
@@ -817,45 +876,6 @@ int dx_server_run(const dx_server_config_t *cfg)
             return -1;
         }
         wrote_pid = true;
-    }
-
-    /*
-     * Drop privileges before the first request is served. The document root
-     * and the log files were opened by the (possibly privileged) parent, and
-     * bind() happens inside the worker setup: dropping here means a port below
-     * 1024 still binds, and every request afterwards runs unprivileged.
-     */
-    if (dx_drop_privileges(cfg->user, cfg->group, &logs.log) != 0) {
-        if (wrote_pid) {
-            dx_pid_file_remove(cfg->pid_file);
-        }
-        logs_close(&logs);
-        dx_daemon_fail(ready_fd);
-        dx_connlimit_destroy(climit);
-        return -1;
-    }
-
-    /*
-     * The sandbox goes on last, after the listener exists, the log files are
-     * open and privileges have been dropped: everything the filter allows has
-     * already happened, and every thread created from here inherits it. A
-     * kernel that cannot install it is a warning, not a failure -- the server
-     * is still able to serve without the extra guarantee.
-     */
-    if (cfg->seccomp) {
-        if (dx_seccomp_apply() != 0) {
-            dx_log_write(&logs.log, DX_LOG_WARN,
-                         "seccomp filter not installed (%s); continuing without the sandbox",
-                         dx_strerror(errno));
-        } else {
-            size_t n = 0;
-
-            (void)dx_seccomp_allowlist(&n);
-            dx_log_write(&logs.log, DX_LOG_INFO,
-                         "seccomp filter active: %zu syscalls allowed, everything else kills the "
-                         "process",
-                         n);
-        }
     }
 
     if (cfg->workers > 1) {

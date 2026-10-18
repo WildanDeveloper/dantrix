@@ -21,6 +21,7 @@ typedef struct {
     size_t max_conns;           /* hard connection cap (per worker) */
     int workers;                /* 1 = main-thread loop; >1 = worker threads */
     bool reuseport;             /* one SO_REUSEPORT listener per worker */
+    bool tcp_nodelay;           /* false = leave Nagle enabled */
     bool cpu_affinity;          /* pin worker i to CPU i */
     dx_sockopts_t sockopts;     /* listener tuning; zeroed = kernel defaults */
     dx_http_limits_t limits;    /* HTTP request line / header limits */

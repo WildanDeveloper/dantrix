@@ -847,12 +847,21 @@ int main(int argc, char **argv)
                         "max_connections is %zu; lowering max_connections to %zu\n",
                         soft, hard, want, lowered);
                 set.max_connections = lowered;
+                /*
+                 * cfg.max_conns was copied above, before the limit was known:
+                 * without this assignment the warning above reports a limit the
+                 * server does not use, and the pool is still created with the
+                 * too-large value (verified against v1.0.2: "lowering to 48"
+                 * followed by "max 1000 connections").
+                 */
+                cfg.max_conns = lowered;
             }
         }
     }
 
     cfg.workers = workers;
     cfg.reuseport = set.reuseport;
+    cfg.tcp_nodelay = set.tcp_nodelay;
     cfg.cpu_affinity = set.cpu_affinity;
     /*
      * Listener tuning. These were accepted by the configuration before but

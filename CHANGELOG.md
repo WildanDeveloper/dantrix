@@ -12,6 +12,145 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [1.0.3] - 2026-10-18
+
+Large-scale audit of every source file (23 C files, ~19k lines) by four
+independent reviewers, followed by verification of every finding against the
+binary. Ten defects were confirmed and fixed; two were found by the audit to be
+non-defects and are recorded as such.
+
+### Fixed (critical)
+
+- **A long access-log line permanently deadlocked the worker.** `dx_log_access()`
+  took the logger mutex and released it only inside the `if (line fits)` branch,
+  so a request whose escaped target/referer/user-agent exceeded the 2048-byte
+  buffer returned holding the mutex. Every later write from that worker -- and
+  from every other worker, since the access logger is shared -- blocked in
+  `futex_wait` forever. Reproduced against v1.0.2: request three timed out and
+  `/proc/<pid>/wchan` was `futex_wait_queue` with an empty log. The line is now
+  always terminated and written (truncated at the field level), and every exit
+  path unlocks.
+- **A request pipelined behind a parked response was answered with a 408.**
+  When a large response parked on `EAGAIN`, `conn_after_response()` restored the
+  pipelined bytes and returned, expecting "the caller's loop" to parse them; the
+  EPOLLOUT path has no such loop, so the request waited for the keep-alive timer
+  and got a fabricated `408 Request Timeout`. Reproduced: 4 MB body plus a
+  second request behind it. `dx_conn_on_writable()` now calls `conn_process()`
+  when bytes are pending.
+
+### Fixed (high)
+
+- **`send_timeout` was a wall-clock budget, not a progress gap.** The timer was
+  armed once and never refreshed on write progress, so a healthy but slow client
+  was cut off mid-body. Reproduced: a client reading 64 KiB every 50 ms lost a
+  4 MB download at 1.8 MB with a "send timeout" against a 2 s setting. The timer
+  is now refreshed on every write event; the same client completes.
+- **The per-IP limit was released twice** when `epoll_ctl(ADD)` failed: the
+  reservation is stored on the slot, `dx_pool_release()` releases it, and
+  `accept_loop()` released it again -- decrementing another live connection's
+  count. One client could exceed `max_conns_per_ip` by provoking the failure.
+- **`cache_control` was not counted against the response headroom**, so a
+  configuration that passed `--test-config` made every file response a 500 (and
+  301/416 closed with no response at all). The headroom was also measured wrong
+  (512 bytes against a real worst case above 700). It is now 1024 and
+  `cache_control` is counted; verified 200/206/301/304/404/416 all work with a
+  full header set.
+- **Privileges were dropped before `bind()`**, so `--user nobody` with a port
+  below 1024 failed with `EACCES`, contradicting the documented "drop after
+  bind". The drop now happens after the listener exists in both the single- and
+  multi-worker paths; verified binding port 81 as `nobody` and serving 200.
+- **`mremap` was missing from the seccomp allow list.** `realloc()` uses it above
+  glibc's mmap threshold, and the server reallocs its pool free lists at runtime,
+  so a busy server was killed by SIGSYS. Reproduced with 17,000 pooled buffers
+  (exit 159); the same harness survives with `mremap` allowed.
+- **`cfg.max_conns` was copied before the RLIMIT tuning lowered it**, so the
+  warning said "lowering to 48" while the server still ran with 1000. The tuned
+  value is now used; the log agrees with the warning.
+
+### Fixed (medium)
+
+- **`dx_status_json()` wrote one byte past the caller's buffer** at exact-fit
+  capacity (ASan: heap-buffer-overflow). The guard now reserves the four
+  characters plus the NUL.
+- **The JSON access log was invalid JSON for non-UTF-8 bytes.** Bytes >= 0x80
+  were copied verbatim; a target of `/a\x80\xff` made `json.loads()` raise
+  `UnicodeDecodeError`. Every byte outside printable ASCII is now `\u00XX`, so
+  the line is valid JSON for any input.
+- **`tcp_nodelay` was parsed, validated, printed and never applied** -- the call
+  was unconditional. It is now honoured; measured p90 latency 2.275 ms with
+  Nagle enabled versus 0.330 ms with it disabled.
+- **CRLF injection through `cache_control` and `default_type`.** Both are
+  interpolated into response headers and neither was checked; a CRLF in either
+  split the header block (verified). Both are now rejected at validation, and
+  `add_header` names are validated as RFC 9110 tokens (control bytes and
+  separators were previously accepted).
+- **The per-IP table never evicted**, so after `connlimit_slots` distinct
+  addresses had ever connected the limit silently failed open forever. Slots
+  with a zero count are now recycled; verified with a two-slot table.
+- **Directory listings larger than 32 KiB became `403 Forbidden`** because
+  `dx_fs_list()` returned 0, which the caller reads as "forbidden". Verified
+  with 400 entries. The page is now truncated with a notice and served as 200.
+- **`fds_actual` was always one too high** (the `/proc/self/fd` enumeration
+  descriptor was counted), producing a permanent false positive next to
+  `fds_believed`. The offset is subtracted.
+
+### Added (tests)
+
+- `tests/regression_test.py`: the access-log overflow must answer every request,
+  write every record and never end inside an escape; a request pipelined behind
+  a parked response must produce two 200s and no 408. Both were proven able to
+  fail by reinstating the original defects. The descriptor-exhaustion test was
+  rewritten because it had been relying on the `max_conns` bug: it now fills the
+  open-file cache first so the kernel limit, not the pool, is what runs out. The
+  status-counter test polls instead of reading once, because the counters are
+  updated after the response leaves the socket (a race that failed about one run
+  in ten under ASan).
+
+### Verified, not defects
+
+- The ASan + seccomp shutdown hang is LeakSanitizer, not the server (with
+  `detect_leaks=0` the same binary exits in 200 ms; the release build exits in
+  200 ms with the filter armed).
+- `dx_fdcount_total()`'s per-kind clamp is intentional; it hides an unpaired
+  close in one kind rather than reporting a huge number, and the actual-vs-
+  believed comparison is what catches the mistake.
+
+## [1.0.2] - 2026-10-17
+
+Large-scale audit of `src/` (23 C files, ~19k lines). One real defect found and
+fixed; the rest of the pass is recorded in the entries below.
+
+### Fixed
+
+- **Descriptor accounting counted one close twice.** Four places called
+  `dx_fdcount_closed(DX_FD_WAKEUP)` twice for a single `close()`: the listen
+  failure path, the worker-init failure path, the single-worker shutdown path
+  and the multi-worker shutdown path. The server therefore believed one fewer
+  descriptor was open than really was -- the direction that hides a leak. The
+  existing regression test compares actual minus believed *while the server
+  runs*, and every one of these paths runs on the way out; the mistake only
+  shows in the per-kind count, because `dx_fdcount_total()` clamps at zero
+  rather than underflowing.
+
+### Added
+
+- `tests/unit/test_fdcount.c`: `test_balanced_close()` states the invariant
+  where it is decided -- one close undoes exactly one open, a second close must
+  not move the per-kind count below its baseline, and eight opens followed by
+  eight closes return to the baseline (34 checks, was 29). Proven able to fail:
+  making `dx_fdcount_closed()` count twice breaks it and the pre-existing
+  `open_close_delta` check.
+
+### Verified, not defects
+
+- The ASan + seccomp shutdown hang is LeakSanitizer, not the server. With
+  `detect_leaks=0` the same sanitized binary exits in 200 ms; the release build
+  exits in 200 ms with the filter armed; `tests/seccomp_test.py` already sets
+  that option for sanitizer builds and documents why. Recorded because it looks
+  like a hang in the server and is not one.
+- `make asan` builds `build/asan/dantrix`; CI builds `build/dantrix-asan` with
+  `-O1`. The audit used both.
+
 ## [1.0.1] - 2026-10-17
 
 Documentation only: the README now agrees with the release it describes.

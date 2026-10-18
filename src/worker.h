@@ -72,6 +72,7 @@ typedef struct dx_worker {
     dx_fcache_t *fcache;                    /* open-file cache; NULL = disabled */
     dx_connlimit_t *climit;                 /* shared per-IP limit; NULL = off */
     unsigned max_conns_per_ip;              /* 0 = unlimited */
+    bool tcp_nodelay;                       /* false = leave Nagle enabled */
     dx_log_t *log;                          /* borrowed error logger */
     dx_log_t *access_log;                   /* borrowed access logger; NULL = off */
     dx_log_format_t log_format;             /* common or combined */
@@ -157,6 +158,7 @@ typedef struct {
     uint64_t fcache_valid_ms;
     dx_connlimit_t *climit;    /* borrowed shared table; NULL = off */
     unsigned max_conns_per_ip; /* 0 = unlimited */
+    bool tcp_nodelay;          /* false = leave Nagle enabled */
     const dx_static_opts_t *static_opts;
     const dx_lifecycle_opts_t *life;
     dx_worker_reload_t *reload;

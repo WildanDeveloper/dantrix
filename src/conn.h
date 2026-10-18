@@ -40,11 +40,30 @@ struct dx_worker; /* defined in worker.h */
  * Bytes reserved in the staging buffer for the parts of a response that are not
  * the configured add_header entries: the status line, the fixed headers
  * (Server, Date, Content-Type, ETag, Last-Modified, Cache-Control, nosniff) and
- * the per-response ones (Location, Content-Range, Allow). Measured at 271 bytes
- * for a full response; 512 leaves room for the longest status line and the
- * largest per-response header, and is what the add_header validation subtracts.
+ * the per-response ones (Location, Content-Range, Allow, Accept-Ranges).
+ *
+ * The old value was 512, measured from a typical response. That was wrong for
+ * the largest legal ones: cache_control alone can be 255 bytes, Content-Type up
+ * to 159, and a 206 adds Content-Range and Accept-Ranges. A configuration the
+ * validator accepted (six add_header entries of 253 bytes plus a 255-byte
+ * cache_control) therefore made response_assemble() overflow, and every file
+ * response became a 500 while 301/416 closed with no response at all --
+ * verified against v1.0.2. The budget is now the sum of the real worst cases:
+ *
+ *   status line            34   (longest reason phrase)
+ *   Server + Date          80
+ *   Content-Type          170
+ *   ETag + Last-Modified   80
+ *   Cache-Control         272
+ *   Content-Range + Accept-Ranges  70
+ *   Location (redirect)   300
+ *   nosniff + Connection   60
+ *   slack                 130
+ *
+ * and the add_header total is validated against what is left, with
+ * cache_control counted as well.
  */
-#define DX_RESPONSE_HEADROOM 512u
+#define DX_RESPONSE_HEADROOM 1024u
 
 /*
  * What the access logger needs about the request that was served. Strings are

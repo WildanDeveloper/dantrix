@@ -270,21 +270,58 @@ def test_descriptor_exhaustion_backs_off():
     """BUG-14: on EMFILE the worker used to nanosleep(100ms) inside the event
     loop, stalling every other connection. It now parks the listener on the
     timer wheel; the process must stay alive and serve again once descriptors
-    free up."""
+    free up.
+
+    v1.0.3 note: this test used to rely on a bug. It passed `--max-conns 512`
+    under a 64-descriptor limit, and the automatic fd-limit tuning printed
+    "lowering max_connections to 48" but left the runtime value at 512, so the
+    server really did run out of descriptors. With that fixed the pool stops at
+    48 and accept4 never fails, so the log line this test looks for cannot
+    appear. To keep testing the EMFILE path, the pool is now disabled as a
+    limit (max-conns high, no lowering) and the descriptors are consumed by
+    connections the server must hold: the EMFILE case is then produced by the
+    kernel limit itself, which is what BUG-14 was about.
+    """
     port = PORT + 4
+    # The automatic tuning sizes the pool from RLIMIT_NOFILE, so simply raising
+    # --max-conns can never produce EMFILE: the pool would stop first and log
+    # "limit reached" instead. To exercise the kernel limit, descriptors are
+    # consumed *outside* the pool first: the open-file cache pins one fd per
+    # distinct file served, and only then are connections opened. That is the
+    # real-world shape of the bug (a busy server with files cached runs out of
+    # descriptors while the pool still has slots).
     soft, hard = 64, 64
+
     def preexec():
         import resource
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
     proc = subprocess.Popen(
-        [BIN, "-b", "127.0.0.1", "-p", str(port), "--root", ROOT, "--max-conns", "512"],
+        [
+            BIN, "-b", "127.0.0.1", "-p", str(port), "--root", ROOT,
+            "--max-conns", "1000",
+            "-o", "open_file_cache=200", "-o", "open_file_cache_valid=60s",
+        ],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=preexec)
     socks = []
     try:
         if not wait_ready(proc, port):
             check("descriptor exhaustion: server started", False)
             return
+        # Fill the open-file cache first: each distinct file pins one descriptor
+        # outside the connection pool, so the kernel limit is reached while the
+        # pool still has slots. Without this the pool stops first and accept4()
+        # never fails.
+        for i in range(60):
+            name = os.path.join(ROOT, f"fd{i}.txt")
+            with open(name, "w", encoding="ascii") as fh:
+                fh.write("x")
+        for i in range(60):
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as fs:
+                fs.sendall(f"GET /fd{i}.txt HTTP/1.1\r\nHost: x\r\n"
+                           "Connection: close\r\n\r\n".encode())
+                while fs.recv(65536):
+                    pass
         for _ in range(80):  # more than the limit: the accept queue backs up
             try:
                 socks.append(socket.create_connection(("127.0.0.1", port), timeout=2))
@@ -477,15 +514,25 @@ def test_status_endpoint():
                 s.sendall(f"GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
                           .encode())
                 s.recv(65536)
-        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
-            s.sendall(b"GET /__status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-            data = b""
-            while True:
-                chunk = s.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-        body = data.split(b"\r\n\r\n", 1)[1]
+        # The counters are updated on the "response finished" edge, which is
+        # after the bytes leave the socket: a client can read the status before
+        # the server has finished bookkeeping for its own last request. Poll for
+        # the expected totals instead of reading once -- with a sanitizer build
+        # the window is wide enough to fail roughly one run in ten (observed).
+        body = b""
+        for _ in range(50):
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                s.sendall(b"GET /__status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                data = b""
+                while True:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+            body = data.split(b"\r\n\r\n", 1)[1]
+            if b'"requests_total": 3' in body or b'"requests_total":3' in body:
+                break
+            time.sleep(0.02)
         check("status: endpoint answers 200", data.split(b" ")[1] == b"200", data[:20])
         check("status: body is JSON with requests_total", b'"requests_total"' in body)
         check("status: counters counted the requests", b'"2xx": 2' in body, body[:200])
@@ -1208,6 +1255,217 @@ def test_v080_per_ip_limit():
             proc.kill()
 
 
+def test_v102_pid_file_symlink():
+    """v1.0.2: a pid file path that is a symlink must be refused.
+
+    The pid file is a predictable path in a directory the service user can
+    usually write (/run). Before this fix, `open(O_CREAT|O_TRUNC)` followed the
+    link: a pre-planted symlink to a file the service could write made the
+    server truncate that file and write its PID into it. Verified by hand
+    against the old binary (the victim file came back holding the PID), and the
+    same scenario is asserted here so it cannot come back.
+
+    The other half matters just as much: a *stale regular* pid file is the
+    normal case after a crash, and it must still work -- the fix removes it
+    with unlink() (which never follows a symlink) instead of refusing to start.
+    """
+    print("regression: v1.0.2 pid file symlink refusal")
+    d = tempfile.mkdtemp(prefix="dantrix-pid-")
+    proc = None
+    try:
+        docroot = os.path.join(d, "root")
+        os.makedirs(docroot, exist_ok=True)
+        with open(os.path.join(docroot, "i.html"), "w", encoding="ascii") as f:
+            f.write("hi\n")
+        victim = os.path.join(d, "victim.txt")
+        with open(victim, "w", encoding="ascii") as f:
+            f.write("IMPORTANT DATA\n")
+        pidfile = os.path.join(d, "dantrix.pid")
+        os.symlink(victim, pidfile)
+        conf = os.path.join(d, "c.conf")
+        port = PORT + 60
+        with open(conf, "w", encoding="ascii") as f:
+            f.write(f"bind = 127.0.0.1\nport = {port}\nroot = {docroot}\nworkers = 1\n"
+                    f"access_log = off\nerror_log = {d}/e.log\npid_file = {pidfile}\n")
+
+        # 1. The symlink must be refused, and the target must be untouched.
+        #    The old code did not refuse it: it started the server with the
+        #    symlink followed, so the "refused" case must also cope with a
+        #    process that stays up (otherwise the failure shows up as a timeout
+        #    instead of as the two checks it is).
+        proc = subprocess.Popen([BIN, "-c", conf], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        try:
+            rc = proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            rc = None  # still running: the symlink was accepted
+        if rc is None:
+            proc.kill()
+            proc.wait()
+        check("pid file: a symlink at the pid path is refused", rc is not None and rc != 0,
+              "the server kept running with a symlink at the pid path")
+        proc = None
+        content = open(victim, encoding="ascii").read()
+        check("pid file: the symlink target is not overwritten",
+              content == "IMPORTANT DATA\n", f"victim now: {content[:40]!r}")
+
+        # 2. A stale regular pid file must still work (the crash-recovery case).
+        os.unlink(pidfile)
+        with open(pidfile, "w", encoding="ascii") as f:
+            f.write("999999\n")
+        proc = subprocess.Popen([BIN, "-c", conf], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        if not wait_ready(proc, port):
+            check("pid file: server starts over a stale pid file", False)
+            return
+        check("pid file: server starts over a stale pid file", True)
+        with open(pidfile, encoding="ascii") as f:
+            written = f.read().strip()
+        check("pid file: the stale PID is replaced by the live one",
+              written == str(proc.pid), f"file has {written}, server is {proc.pid}")
+        # 3. And it is removed on shutdown.
+        proc.terminate()
+        proc.wait(timeout=10)
+        check("pid file: removed on shutdown", not os.path.exists(pidfile))
+        proc = None
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+
+def test_v103_access_log_overflow_deadlock():
+    """v1.0.3: a long escaped access-log line must not wedge the worker.
+
+    dx_log_access() took the logger mutex and released it only inside the
+    `if (line fits)` branch. A request whose escaped target + referer +
+    user-agent exceeded the 2048-byte line buffer therefore returned with the
+    mutex held, and every later log write -- including the shared logger used by
+    every worker -- blocked forever in futex_wait. Verified against v1.0.2: the
+    third such request timed out and /proc/<pid>/wchan was futex_wait_queue.
+    """
+    print("regression: v1.0.3 access-log overflow deadlock")
+    d = tempfile.mkdtemp(prefix="dantrix-logovf-")
+    proc = None
+    try:
+        docroot = os.path.join(d, "root")
+        os.makedirs(docroot, exist_ok=True)
+        with open(os.path.join(docroot, "i.html"), "w", encoding="ascii") as f:
+            f.write("hi\n")
+        port = PORT + 70
+        access = os.path.join(d, "access.log")
+        conf = os.path.join(d, "c.conf")
+        with open(conf, "w", encoding="ascii") as f:
+            f.write(f"bind = 127.0.0.1\nport = {port}\nroot = {docroot}\nworkers = 1\n"
+                    f"access_log = {access}\nlog_format = combined\n"
+                    f"error_log = {d}/e.log\n")
+        proc = subprocess.Popen([BIN, "-c", conf], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        if not wait_ready(proc, port):
+            check("access log overflow: server started", False)
+            return
+        # 255 high-bit bytes in the target expand to 1020 characters, and the
+        # same in the two headers: comfortably past the 2048-byte line buffer.
+        path = b"/" + b"\x80" * 255
+        ok = 0
+        for _ in range(4):
+            s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            s.sendall(b"GET " + path + b" HTTP/1.1\r\nHost: x\r\n"
+                      b"User-Agent: " + b"\x81" * 127 + b"\r\n"
+                      b"Referer: " + b"\x82" * 127 + b"\r\n"
+                      b"Connection: close\r\n\r\n")
+            s.settimeout(5)
+            try:
+                if b"HTTP/1.1" in s.recv(65536):
+                    ok += 1
+            except socket.timeout:
+                pass
+            s.close()
+        check("access log overflow: every request is answered", ok == 4,
+              f"{ok}/4 answered (a wedge looks like 2/4)")
+        # The line must still be written: dropping it would let a client
+        # suppress its own audit record by making it long.
+        # split("\n"), not splitlines(): the escaped payload contains byte
+        # sequences (\x0b, \x0c, ...) that Python treats as line boundaries in
+        # splitlines(), which made a complete record look like a dropped one.
+        lines = [ln for ln in open(access, encoding="utf-8", errors="replace").read().split("\n")
+                 if ln]
+        check("access log overflow: no record is dropped", len(lines) == 4,
+              f"{len(lines)} lines for 4 requests")
+        # And no line may end inside a \xHH escape.
+        bad = [ln for ln in lines if ln.endswith("\\x") or
+               (len(ln) >= 2 and ln[-2] == "\\" and ln[-1] == "x")]
+        check("access log overflow: no line ends in a partial escape", not bad,
+              f"{bad[:1]}")
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_v103_pipelined_request_after_parked_response():
+    """v1.0.3: a request pipelined behind a parked response is answered, not 408.
+
+    When a large response parks on EAGAIN, conn_after_response() restores the
+    pipelined bytes and returns, expecting "the caller's loop" to parse them.
+    On the EPOLLOUT path there is no such loop, so the request sat until the
+    keep-alive timer fired and was answered with a fabricated 408. Verified
+    against v1.0.2: a 4 MB body with a second request behind it produced
+    "HTTP/1.1 408 Request Timeout".
+    """
+    print("regression: v1.0.3 pipelined request after a parked response")
+    d = tempfile.mkdtemp(prefix="dantrix-pipe-")
+    proc = None
+    try:
+        docroot = os.path.join(d, "root")
+        os.makedirs(docroot, exist_ok=True)
+        with open(os.path.join(docroot, "med.bin"), "wb") as f:
+            f.write(os.urandom(4 * 1024 * 1024))
+        with open(os.path.join(docroot, "small.txt"), "w", encoding="ascii") as f:
+            f.write("small\n")
+        port = PORT + 71
+        proc = subprocess.Popen(
+            [BIN, "-b", "127.0.0.1", "-p", str(port), "-r", docroot, "-w", "1",
+             "--access-log", "off", "--error-log", os.path.join(d, "e.log"),
+             "--send-timeout", "2s"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not wait_ready(proc, port):
+            check("pipelined after park: server started", False)
+            return
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+        s.connect(("127.0.0.1", port))
+        s.sendall(b"GET /med.bin HTTP/1.1\r\nHost: x\r\n\r\n"
+                  b"GET /small.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        time.sleep(0.6)  # let the server fill the socket and park on EAGAIN
+        data = b""
+        s.settimeout(20)
+        try:
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        except socket.timeout:
+            pass
+        s.close()
+        check("pipelined after park: both responses are 200",
+              data.count(b"HTTP/1.1 200") == 2, f"{data.count(b'HTTP/1.1 200')} 200s")
+        check("pipelined after park: no fabricated 408", b"408" not in data.split(b"\r\n")[0])
+        check("pipelined after park: the second body arrived", b"small\n" in data)
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     if not os.path.exists(BIN):
         print(f"  [FAIL] binary {BIN} not found - build it first "
@@ -1243,6 +1501,9 @@ def main():
     test_v080_fd_invariant()
     print("regression: v0.8.0 per-IP connection limit")
     test_v080_per_ip_limit()
+    test_v102_pid_file_symlink()
+    test_v103_access_log_overflow_deadlock()
+    test_v103_pipelined_request_after_parked_response()
 
     print()
     if failures:

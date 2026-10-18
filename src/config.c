@@ -221,11 +221,20 @@ bool dx_header_value_valid(const char *value)
             return false;
         }
     }
-    /* The name is a token: no spaces or tabs before the colon. */
+    /*
+     * The name must be a token (RFC 9110 §5.6.2): ALPHA / DIGIT / "!#$%&'*+-.^_`|~".
+     * Rejecting only SP and HTAB (as v1.0.2 did) let control bytes and
+     * separators through -- `add_header=X\x01Y: v` was emitted verbatim, which
+     * no client can parse and which smuggles a control byte into the header
+     * block.
+     */
     for (const char *p = value; p < colon; p++) {
         unsigned char c = (unsigned char)*p;
 
-        if (c == ' ' || c == '\t') {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' ||
+              c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' ||
+              c == '~')) {
             return false;
         }
     }
@@ -661,6 +670,25 @@ int dx_config_validate(const dx_settings_t *s, FILE *msg)
         return -1;
     }
     /*
+     * Two more values are interpolated straight into response headers:
+     * cache_control ("Cache-Control: %s") and default_type ("Content-Type:
+     * %s"). add_header is checked for CR/LF, but these were not, so a value
+     * containing CRLF split the header block -- verified against v1.0.2:
+     * -o cache_control=$'max-age=60\r\nX-Injected: yes' emitted the injected
+     * header, and a CRLF in default_type injected a body prefix. A config file
+     * (or a wrapper script's -o) is not always as trusted as the code assumed,
+     * and the cost of refusing is zero: neither value may legally contain CR,
+     * LF or NUL.
+     */
+    if (strpbrk(s->cache_control, "\r\n") != NULL) {
+        fprintf(msg, "dantrix: cache_control must not contain CR or LF\n");
+        return -1;
+    }
+    if (strpbrk(s->default_type, "\r\n") != NULL) {
+        fprintf(msg, "dantrix: default_type must not contain CR or LF\n");
+        return -1;
+    }
+    /*
      * The configured extra headers are written into the same staging buffer as
      * the rest of the response, so their total size is a hard limit, not a
      * preference: a configuration whose headers cannot fit makes every response
@@ -674,6 +702,15 @@ int dx_config_validate(const dx_settings_t *s, FILE *msg)
 
         for (size_t i = 0; i < s->add_header_count; i++) {
             total += strlen(s->add_header[i]) + 2u; /* + CRLF */
+        }
+        /*
+         * cache_control is emitted into the same staging buffer as the
+         * add_header entries but was not counted here, which is how a
+         * configuration passed --test-config and then 500'd every request. It
+         * is a DX_CFG_STR_MAX (256-byte) value, so its real cost is counted.
+         */
+        if (s->cache_control[0] != '\0') {
+            total += strlen(s->cache_control) + sizeof("Cache-Control: \r\n") - 1u;
         }
         /*
          * Two groups of names are handled differently, because the right answer

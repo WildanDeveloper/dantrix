@@ -72,7 +72,14 @@ uint64_t dx_fdcount_actual(void)
         }
     }
     (void)closedir(d);
-    return n;
+    /*
+     * The directory descriptor used to enumerate /proc/self/fd is itself
+     * listed, so the raw count is always one higher than the truth. The status
+     * endpoint publishes this next to "fds_believed" as a comparable value, so
+     * the offset is a permanent false positive in the one diagnostic this
+     * module exists to provide. Subtract it.
+     */
+    return (n > 0u) ? n - 1u : 0u;
 }
 
 size_t dx_fdcount_json(char *out, size_t cap)

@@ -65,6 +65,15 @@ static const int k_allow[] = {
     DX_SYSCALL(munmap),
     DX_SYSCALL(mprotect),
     DX_SYSCALL(madvise),
+    /*
+     * mremap: glibc's realloc() uses it when a block is above the mmap
+     * threshold. The server reallocs at runtime (the buffer-pool and connection
+     * free lists grow with load), so without it a busy server is killed by
+     * SIGSYS. Reproduced: 17,000 pooled buffers -- below the documented
+     * max_connections ceiling of 1,000,000 -- realloc the free list past the
+     * threshold and the process dies with SIGSYS (exit 159).
+     */
+    DX_SYSCALL(mremap),
     DX_SYSCALL(brk),
     DX_SYSCALL(rt_sigaction),
     DX_SYSCALL(rt_sigprocmask),
@@ -157,6 +166,7 @@ static const char *const k_names[] = {
     "munmap",
     "mprotect",
     "madvise",
+    "mremap",
     "brk",
     "rt_sigaction",
     "rt_sigprocmask",

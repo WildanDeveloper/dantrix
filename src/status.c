@@ -146,8 +146,11 @@ size_t dx_status_json(const dx_status_t *st, char *out, size_t cap, const char *
             return 0;
         }
         used += wrote;
-        /* Close the descriptors object, then the document. */
-        if (used + 3u >= cap) {
+        /* Close the descriptors object, then the document. Four characters plus
+         * the terminating NUL need five bytes: the old guard reserved three and
+         * wrote out[cap] when the caller sized the buffer exactly (reproduced
+         * under ASan as a one-byte heap overflow). */
+        if (used + 5u > cap) {
             return 0;
         }
         out[used++] = '}';

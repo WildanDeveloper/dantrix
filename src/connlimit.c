@@ -143,6 +143,30 @@ static bool slot_matches(const dx_cl_slot_t *s, const void *addr, size_t addr_le
     return s->key_len == (uint8_t)addr_len && memcmp(s->key, addr, addr_len) == 0;
 }
 
+/*
+ * Return a slot with a zero count back to the free pool.
+ *
+ * Without this the table only ever filled: dx_connlimit_release() decremented
+ * the counter but left the entry published, so after connlimit_slots distinct
+ * addresses had ever connected, find_slot(create=true) returned NULL for every
+ * new address and dx_connlimit_acquire() took its "fail open" branch -- the
+ * per-IP limit silently stopped working for the rest of the process lifetime,
+ * with no log line. A slot is only reclaimed when its count is zero, so a live
+ * connection's entry can never be stolen.
+ */
+static void evict_if_idle(dx_cl_slot_t *s)
+{
+    uint32_t expected = 2u;
+
+    if (atomic_load_explicit(&s->count, memory_order_relaxed) != 0u) {
+        return;
+    }
+    /* 2 -> 0: the slot becomes claimable again. claim_slot() re-checks the CAS,
+     * so a racing claimer either wins this transition or claims after it. */
+    (void)atomic_compare_exchange_strong_explicit(&s->state, &expected, 0u, memory_order_release,
+                                                  memory_order_relaxed);
+}
+
 static dx_cl_slot_t *find_slot(dx_connlimit_t *cl, const void *addr, size_t addr_len,
                                bool create_slot)
 {
@@ -156,18 +180,27 @@ static dx_cl_slot_t *find_slot(dx_connlimit_t *cl, const void *addr, size_t addr
         if (slot_matches(s, addr, addr_len)) {
             return s;
         }
-        if (create_slot && atomic_load_explicit(&s->state, memory_order_relaxed) == 0u) {
-            dx_cl_slot_t *claimed = claim_slot(s, addr, addr_len);
+        if (create_slot) {
+            uint32_t st = atomic_load_explicit(&s->state, memory_order_relaxed);
 
-            if (claimed != NULL) {
-                return claimed;
+            /* Recycle a published entry whose connections have all closed. */
+            if (st == 2u) {
+                evict_if_idle(s);
+                st = atomic_load_explicit(&s->state, memory_order_relaxed);
             }
-            /*
-             * Lost the race: the winner may have claimed it for this very key,
-             * so re-check before moving on to the next shard.
-             */
-            if (slot_matches(s, addr, addr_len)) {
-                return s;
+            if (st == 0u) {
+                dx_cl_slot_t *claimed = claim_slot(s, addr, addr_len);
+
+                if (claimed != NULL) {
+                    return claimed;
+                }
+                /*
+                 * Lost the race: the winner may have claimed it for this very
+                 * key, so re-check before moving on to the next shard.
+                 */
+                if (slot_matches(s, addr, addr_len)) {
+                    return s;
+                }
             }
         }
     }

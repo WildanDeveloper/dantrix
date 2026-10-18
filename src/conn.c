@@ -899,6 +899,8 @@ void dx_conn_release_headers(dx_conn_t *conn, dx_bufpool_t *pool)
     dx_http_parser_init_ex(&conn->parser, NULL, NULL, 0u);
 }
 
+static int conn_process(struct dx_worker *w, dx_conn_t *conn);
+
 int dx_conn_on_writable(struct dx_worker *w, dx_conn_t *conn)
 {
     if (conn == NULL || conn->state == DX_CONN_FREE || conn->state == DX_CONN_CLOSING) {
@@ -914,7 +916,34 @@ int dx_conn_on_writable(struct dx_worker *w, dx_conn_t *conn)
     if (conn->mem_body_off < conn->mem_body_len && conn_flush_mem_body(w, conn) != 0) {
         return -1;
     }
-    return conn_after_response(w, conn);
+    if (conn_after_response(w, conn) != 0) {
+        return -1;
+    }
+    /*
+     * The send timeout is a gap between write progress, not a wall-clock budget
+     * for the whole response (README: "reset every time there is progress in
+     * writing"). The timer is armed once when the response starts, so without
+     * this call a healthy but slow client -- one that never stalls for longer
+     * than the timeout but needs longer than it in total -- was cut off
+     * mid-body. Reproduced before this call existed: a client reading 64 KiB
+     * every 50 ms from a 4 MB file lost the connection at 1.8 MB with a
+     * "send timeout" after 33 s against a 2 s setting.
+     */
+    if (conn->state == DX_CONN_WRITING) {
+        dx_conn_arm_timer(w, conn);
+    }
+    /*
+     * A pipelined request restored by conn_after_response() has to be parsed
+     * here: on the EPOLLOUT path there is no caller loop to do it, so leaving
+     * it buffered means it waits for the keep-alive timer and is answered with
+     * a fabricated 408. Reproduced before this call existed: a 4 MB response
+     * with a second request pipelined behind it (the response parked on EAGAIN)
+     * produced "HTTP/1.1 408 Request Timeout" for the second request.
+     */
+    if (conn->state == DX_CONN_READING && dx_conn_has_pending(conn)) {
+        return conn_process(w, conn);
+    }
+    return 0;
 }
 
 /* Bounded copy for access-log fields; always NUL terminates. */
@@ -1578,8 +1607,6 @@ static int conn_restore_pipelined(struct dx_worker *w, dx_conn_t *conn)
     conn->hold_len = 0;
     return 0;
 }
-
-static int conn_process(struct dx_worker *w, dx_conn_t *conn);
 
 /*
  * Called when the last byte of a response is on the wire. Closes the

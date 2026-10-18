@@ -561,6 +561,8 @@ size_t dx_fs_list(dx_fs_t *fs, const char *rel_path, char *out, size_t cap)
         o = (size_t)n;
     }
 
+    bool truncated = false;
+
     for (size_t i = 0; i < count && o > 0; i++) {
         /* Worst case: every byte expands to six characters (&quot;). */
         char esc[NAME_MAX * 6u + 1u];
@@ -582,9 +584,17 @@ size_t dx_fs_list(dx_fs_t *fs, const char *rel_path, char *out, size_t cap)
         n = snprintf(out + o, cap - o, "<li><a href=\"%s%s\">%s%s</a></li>\n", url,
                      is_dir ? "/" : "", esc, is_dir ? "/" : "");
         if (n < 0 || (size_t)n >= cap - o) {
+            /*
+             * The page is full. Stop here and say so instead of returning 0:
+             * the caller maps 0 to 403 Forbidden, so before this a directory
+             * with enough entries became permanently un-listable (verified:
+             * 400 entries of ~60 characters -> 403). A truncated but honest
+             * page is better than a status code that says "forbidden" about a
+             * directory the server is configured to list.
+             */
             free(names[i]);
             names[i] = NULL;
-            o = 0;
+            truncated = true;
             break;
         }
         o += (size_t)n;
@@ -599,9 +609,29 @@ size_t dx_fs_list(dx_fs_t *fs, const char *rel_path, char *out, size_t cap)
     if (o == 0) {
         return 0;
     }
+    if (truncated) {
+        int t =
+            snprintf(out + o, cap - o,
+                     "<li><em>(listing truncated at %u KiB; use a smaller directory)</em></li>\n",
+                     (unsigned)(cap / 1024u));
+        if (t > 0 && (size_t)t < cap - o) {
+            o += (size_t)t;
+        }
+    }
     n = snprintf(out + o, cap - o, "</ul><hr><address>Dantrix</address></body></html>\n");
     if (n < 0 || (size_t)n >= cap - o) {
-        return 0;
+        /*
+         * Not even the footer fits. Close the document with the bytes that are
+         * left rather than returning 0 (which the caller reads as "forbidden").
+         */
+        static const char close_doc[] = "</ul></body></html>\n";
+        size_t room = cap - o;
+
+        if (room > sizeof(close_doc) - 1u) {
+            memcpy(out + o, close_doc, sizeof(close_doc) - 1u);
+            o += sizeof(close_doc) - 1u;
+        }
+        return o;
     }
     return o + (size_t)n;
 }

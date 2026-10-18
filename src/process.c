@@ -15,14 +15,45 @@
 int dx_pid_file_write(const char *path)
 {
     char buf[32];
+    struct stat st;
     int fd;
     int len;
 
     if (path == NULL || path[0] == '\0') {
         return 0;
     }
-    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    /*
+     * O_NOFOLLOW: a pid file is a predictable path in a directory the service
+     * user can usually write (/run), so a pre-planted symlink would otherwise
+     * make the server truncate and overwrite whatever it points at -- verified
+     * before this flag existed: a symlink to /tmp/victim.txt left the victim
+     * holding the server's PID.
+     *
+     * A stale pid file is the normal reason the path already exists, so it is
+     * removed first -- but only when it is a regular file that is not a
+     * symlink. Removing the path with unlink() is safe: unlink never follows a
+     * symlink, so the worst case is that the link itself disappears.
+     */
+    if (lstat(path, &st) == 0) {
+        if (!S_ISREG(st.st_mode)) {
+            errno = (S_ISLNK(st.st_mode) ? ELOOP : EINVAL);
+            return -1;
+        }
+        if (unlink(path) != 0 && errno != ENOENT) {
+            return -1;
+        }
+    }
+    fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
     if (fd < 0) {
+        return -1;
+    }
+    /* Belt and braces: O_NOFOLLOW already refuses a symlink at open time. */
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        int saved = errno;
+
+        (void)close(fd);
+        (void)unlink(path);
+        errno = saved != 0 ? saved : EINVAL;
         return -1;
     }
     len = snprintf(buf, sizeof(buf), "%ld\n", (long)getpid());
@@ -30,6 +61,7 @@ int dx_pid_file_write(const char *path)
         int saved = errno;
 
         (void)close(fd);
+        (void)unlink(path);
         errno = saved;
         return -1;
     }
