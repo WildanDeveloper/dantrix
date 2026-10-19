@@ -191,7 +191,7 @@ static int fs_open_beneath(dx_fs_t *fs, const char *rel_path, struct stat *st)
              * Reject the dot segments here; the caller's normalisation is not
              * this function's guarantee.
              */
-            if (seg_len == 0u || strcmp(segment, ".") == 0 || strcmp(segment, "..") == 0) {
+            if (strcmp(segment, ".") == 0 || strcmp(segment, "..") == 0) {
                 (void)close(dir_fd);
                 errno = EXDEV;
                 return -1;

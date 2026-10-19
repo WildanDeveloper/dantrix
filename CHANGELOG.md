@@ -12,6 +12,24 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [1.0.5] - 2026-10-19
+
+One line, one gate.
+
+### Fixed
+
+- `src/file.c`: the `openat2` fallback's segment guard tested `seg_len == 0`
+  again, after the empty-segment case had already been handled above. cppcheck
+  (run by CI's lint job) reported it as `knownConditionTrueFalse` and the job
+  failed. The redundant test is removed; behaviour is unchanged.
+
+### Note
+
+v1.0.4's tag points at the commit whose lint job failed. v1.0.5 is the same
+change plus this fix. The local gate list ran `cppcheck` by hand but the version
+here was 2.13 (Ubuntu) while CI installs the same package -- the check itself
+was available and would have caught it; it simply was not part of `make test`.
+
 ## [1.0.4] - 2026-10-19
 
 The remaining high-severity findings from the v1.0.3 audit, plus the reload
