@@ -12,6 +12,25 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [1.0.6] - 2026-10-19
+
+The connlimit eviction added in v1.0.3 broke a different invariant; CI's clang
+job caught it.
+
+### Fixed
+
+- `src/connlimit.c`: the eviction added in v1.0.3 ran inside the single slot
+  search loop, so a slot belonging to another address could be recycled *before*
+  a genuinely free slot in a later shard had been tried. Two addresses could
+  then share one counter. `tests/unit/test_connlimit.c`'s
+  `concurrent_slot_claim` caught it (a key was granted 201 times and the counter
+  read 200), and only the clang release job failed, which is why v1.0.5's tag
+  points at a commit whose CI was red. The search is now two passes: the first
+  only considers free slots, the second may recycle an entry whose count has
+  dropped to zero. The table still reclaims after a burst of distinct addresses
+  (verified with a four-slot table: a new address is tracked and its limit is
+  enforced), and the 157-check connlimit unit test passes.
+
 ## [1.0.5] - 2026-10-19
 
 One line, one gate.

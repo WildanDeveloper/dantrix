@@ -173,18 +173,33 @@ static dx_cl_slot_t *find_slot(dx_connlimit_t *cl, const void *addr, size_t addr
     if (addr_len == 0u || addr_len > DX_CL_KEY_MAX) {
         return NULL;
     }
-    for (uint32_t shard = 0; shard < DX_CL_SHARDS; shard++) {
-        uint32_t h = key_hash(addr, addr_len, shard);
-        dx_cl_slot_t *s = &cl->slots[(size_t)shard * cl->per_shard + (h % cl->per_shard)];
+    /*
+     * Two passes. The first only looks at genuinely free slots; the second may
+     * recycle a published entry whose count has dropped to zero.
+     *
+     * Doing both in one pass broke a different invariant: a slot belonging to
+     * another address was recycled before a free slot in a later shard had been
+     * tried, so two addresses could end up sharing one counter. The
+     * concurrent_slot_claim unit test caught it (200 grants counted for a key
+     * that had been given 201). Reclaiming only when no free slot exists keeps
+     * the table usable after a burst of distinct addresses without ever
+     * disturbing an address that is merely idle at this instant.
+     */
+    for (int pass = 0; pass < 2; pass++) {
+        for (uint32_t shard = 0; shard < DX_CL_SHARDS; shard++) {
+            uint32_t h = key_hash(addr, addr_len, shard);
+            dx_cl_slot_t *s = &cl->slots[(size_t)shard * cl->per_shard + (h % cl->per_shard)];
 
-        if (slot_matches(s, addr, addr_len)) {
-            return s;
-        }
-        if (create_slot) {
+            if (slot_matches(s, addr, addr_len)) {
+                return s;
+            }
+            if (!create_slot) {
+                continue;
+            }
             uint32_t st = atomic_load_explicit(&s->state, memory_order_relaxed);
 
-            /* Recycle a published entry whose connections have all closed. */
-            if (st == 2u) {
+            if (st == 2u && pass == 1) {
+                /* Second pass: recycle an entry whose connections all closed. */
                 evict_if_idle(s);
                 st = atomic_load_explicit(&s->state, memory_order_relaxed);
             }
@@ -196,7 +211,7 @@ static dx_cl_slot_t *find_slot(dx_connlimit_t *cl, const void *addr, size_t addr
                 }
                 /*
                  * Lost the race: the winner may have claimed it for this very
-                 * key, so re-check before moving on to the next shard.
+                 * key, so re-check before moving on.
                  */
                 if (slot_matches(s, addr, addr_len)) {
                     return s;
