@@ -1111,7 +1111,7 @@ static int conn_finish_error(struct dx_worker *w, dx_conn_t *conn, int status,
      * they are not merged here: doing both emitted every configured header twice
      * on error responses. */
     size_t len = dx_http_response_error_ex(tmp, sizeof(tmp), status, extra_headers, "close",
-                                           w->static_opts.server_tokens);
+                                           w->static_opts.server_tokens, conn->head_request);
 
     conn->close_conn = true;
     /* The connection ends here, so the buffered request bytes are dropped
@@ -1650,6 +1650,7 @@ static int conn_after_response(struct dx_worker *w, dx_conn_t *conn)
     dx_http_parser_init_ex(&conn->parser, &w->limits, conn->hdr_table,
                            (conn->hdr_table != NULL) ? DX_MAX_HEADERS_LIMIT : 0u);
     conn->close_conn = false;
+    conn->head_request = false;
     conn->body_left = 0;
     conn->state = DX_CONN_READING;
 
@@ -1779,6 +1780,15 @@ static int conn_dispatch(struct dx_worker *w, dx_conn_t *conn)
     /* Decide what to answer. */
     {
         bool head = method_is(req, base, "HEAD");
+
+        /*
+         * Remember it on the connection: every error path goes through
+         * conn_finish_error(), which builds its own response and had no way to
+         * know the method. RFC 9110 9.3.2: a HEAD response must not carry
+         * content, and v1.0.3 sent the full 119-byte error page after a
+         * Content-Length header (verified live).
+         */
+        conn->head_request = head;
         bool is_options = method_is(req, base, "OPTIONS");
         bool keep_alive;
         const char *connection;
@@ -1800,7 +1810,7 @@ static int conn_dispatch(struct dx_worker *w, dx_conn_t *conn)
                 access_fill(conn, req, base, 404, 0);
                 conn->close_conn = true;
                 len = dx_http_response_error_ex(tmp, sizeof(tmp), 404, NULL, "close",
-                                                w->static_opts.server_tokens);
+                                                w->static_opts.server_tokens, head);
                 if (len == 0) {
                     dx_log_write(dx_worker_log(w), DX_LOG_ERROR,
                                  "conn %llu: response did not fit the staging buffer",
@@ -1818,7 +1828,7 @@ static int conn_dispatch(struct dx_worker *w, dx_conn_t *conn)
             access_fill(conn, req, base, 405, 0);
             conn->close_conn = true;
             len = dx_http_response_error_ex(tmp, sizeof(tmp), 405, extra, "close",
-                                            w->static_opts.server_tokens);
+                                            w->static_opts.server_tokens, head);
             if (len == 0) {
                 dx_log_write(dx_worker_log(w), DX_LOG_ERROR,
                              "conn %llu: response did not fit the staging buffer",
@@ -1856,7 +1866,7 @@ static int conn_dispatch(struct dx_worker *w, dx_conn_t *conn)
             }
         } else {
             len = dx_http_response_error_ex(tmp, sizeof(tmp), status, extra, connection,
-                                            w->static_opts.server_tokens);
+                                            w->static_opts.server_tokens, head);
         }
     }
 

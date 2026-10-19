@@ -454,17 +454,30 @@ def test_signals_reload_reopen_stats():
         check("signals: 64 byte request line limit enforced (414)",
               data.split(b" ")[1] == b"414", data[:20])
 
-        # Rewrite the configuration and reload.
+        # Rewrite the configuration and reload. add_header and log_format are
+        # included because the README marks them reloadable and they used to be
+        # ignored silently: the callback logged "reloadable settings applied"
+        # while still serving the old header.
         with open(cfg.name, "w") as f:
-            f.write(f"root = {ROOT}\nmax_request_line = 8k\nmax_header_size = 16k\n")
+            f.write(f"root = {ROOT}\nmax_request_line = 8k\nmax_header_size = 16k\n"
+                    "add_header = X-Reloaded: yes\nlog_format = json\n")
         proc.send_signal(signal.SIGHUP)
-        time.sleep(0.6)
+        time.sleep(0.8)
         with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
             s.sendall(f"GET {long_path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
                       .encode())
             data = s.recv(65536)
         check("signals: SIGHUP raised the request line limit (404 now)",
               data.split(b" ")[1] == b"404", data[:20])
+        check("signals: SIGHUP applied add_header", b"X-Reloaded: yes" in data,
+              data[:200])
+        # log_format = json took effect: the next access line is a JSON object.
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(b"GET /f HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            s.recv(65536)
+        time.sleep(0.4)
+        acc_text = open(acc.name, encoding="utf-8", errors="replace").read()
+        check("signals: SIGHUP applied log_format", '"ts"' in acc_text, acc_text[-120:])
 
         # Rotate the logs and reopen them.
         os.rename(log.name, log.name + ".1")
@@ -1466,6 +1479,171 @@ def test_v103_pipelined_request_after_parked_response():
         shutil.rmtree(d, ignore_errors=True)
 
 
+
+def test_v104_fifo_does_not_wedge_worker():
+    """v1.0.4: a FIFO in the document root must not freeze the event loop.
+
+    open() on a FIFO with O_RDONLY and no O_NONBLOCK waits for a writer, and the
+    S_ISREG check runs only after open() returns -- so one request for a FIFO
+    wedged the whole worker forever. A FIFO is trivial to place in an upload
+    directory or to hard-link into the tree (RESOLVE_BENEATH cannot stop a hard
+    link). Verified against v1.0.3: the request timed out and the server then
+    stopped answering anything.
+    """
+    print("regression: v1.0.4 FIFO does not wedge the worker")
+    d = tempfile.mkdtemp(prefix="dantrix-fifo-")
+    proc = None
+    try:
+        docroot = os.path.join(d, "root")
+        os.makedirs(docroot, exist_ok=True)
+        with open(os.path.join(docroot, "i.html"), "w", encoding="ascii") as f:
+            f.write("hi\n")
+        os.mkfifo(os.path.join(docroot, "pipe"))
+        port = PORT + 72
+        proc = subprocess.Popen(
+            [BIN, "-b", "127.0.0.1", "-p", str(port), "-r", docroot, "-w", "1",
+             "--access-log", "off", "--error-log", os.path.join(d, "e.log")],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not wait_ready(proc, port):
+            check("fifo: server started", False)
+            return
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        s.sendall(b"GET /pipe HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        s.settimeout(5)
+        try:
+            data = s.recv(65536)
+        except socket.timeout:
+            data = b""
+        s.close()
+        check("fifo: answered instead of blocking", data.startswith(b"HTTP/1.1"),
+              "no response: the worker is blocked")
+        # And the worker is still alive for the next client.
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        s.sendall(b"GET /i.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        s.settimeout(5)
+        try:
+            ok = b"200" in s.recv(65536)
+        except socket.timeout:
+            ok = False
+        s.close()
+        check("fifo: the worker still serves afterwards", ok)
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_v104_cached_stat_is_revalidated():
+    """v1.0.4: a cached descriptor must report the file's current size.
+
+    The open-file cache stored struct stat at insert time and never re-checked
+    it, so a file truncated in place kept advertising the old Content-Length.
+    The body ends early and the keep-alive stream is left short -- the next
+    response lands inside the previous body (a framing primitive). Verified
+    against v1.0.3: Content-Length 1000 with 10 bytes sent, then a timeout.
+    """
+    print("regression: v1.0.4 cached stat is revalidated")
+    d = tempfile.mkdtemp(prefix="dantrix-stale-")
+    proc = None
+    try:
+        docroot = os.path.join(d, "root")
+        os.makedirs(docroot, exist_ok=True)
+        path = os.path.join(docroot, "f.txt")
+        with open(path, "wb") as f:
+            f.write(b"A" * 1000)
+        port = PORT + 73
+        proc = subprocess.Popen(
+            [BIN, "-b", "127.0.0.1", "-p", str(port), "-r", docroot, "-w", "1",
+             "--access-log", "off", "--error-log", os.path.join(d, "e.log"),
+             "-o", "open_file_cache=8", "-o", "open_file_cache_valid=60s"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not wait_ready(proc, port):
+            check("stale cache: server started", False)
+            return
+
+        def fetch(sock):
+            sock.sendall(b"GET /f.txt HTTP/1.1\r\nHost: x\r\n\r\n")
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    return None, 0
+                data += chunk
+            head, body = data.split(b"\r\n\r\n", 1)
+            cl = [ln for ln in head.split(b"\r\n") if ln.lower().startswith(b"content-length")]
+            want = int(cl[0].split(b":")[1]) if cl else 0
+            while len(body) < want:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                body += chunk
+            return want, len(body)
+
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        sock.settimeout(5)
+        first = fetch(sock)
+        check("stale cache: the first response is complete", first == (1000, 1000), str(first))
+        with open(path, "wb") as f:
+            f.write(b"B" * 10)  # truncate in place: same inode, new size
+        try:
+            second = fetch(sock)
+        except socket.timeout:
+            # The buggy server advertises the old length and never finishes the
+            # body, so the read blocks. That is the failure, reported as one.
+            second = None
+        sock.close()
+        check("stale cache: the size is re-read after truncation",
+              second == (10, 10), f"Content-Length/body = {second} (None = hung)")
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_v104_head_error_has_no_body():
+    """v1.0.4: a HEAD response must not carry content (RFC 9110 9.3.2).
+
+    Every error path goes through conn_finish_error(), which built its own
+    response and had no way to know the method, so HEAD /nope sent a 119-byte
+    body after Content-Length: 119 -- verified against v1.0.3.
+    """
+    print("regression: v1.0.4 HEAD error responses carry no body")
+    port = PORT + 74
+    proc = subprocess.Popen(
+        [BIN, "-b", "127.0.0.1", "-p", str(port), "-r", ROOT, "-w", "1",
+         "--access-log", "off", "--error-log", "/dev/null"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_ready(proc, port):
+            check("head error: server started", False)
+            return
+        results = {}
+        for method in (b"HEAD", b"GET"):
+            s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            s.sendall(method + b" /nope HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            data = b""
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            s.close()
+            head, _, body = data.partition(b"\r\n\r\n")
+            results[method] = (head, body)
+        check("head error: HEAD sends no body", len(results[b"HEAD"][1]) == 0,
+              f"{len(results[b'HEAD'][1])} body bytes")
+        check("head error: HEAD still reports the length",
+              b"Content-Length: 119" in results[b"HEAD"][0])
+        check("head error: GET still sends the body", len(results[b"GET"][1]) == 119,
+              f"{len(results[b'GET'][1])} body bytes")
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 def main():
     if not os.path.exists(BIN):
         print(f"  [FAIL] binary {BIN} not found - build it first "
@@ -1504,6 +1682,9 @@ def main():
     test_v102_pid_file_symlink()
     test_v103_access_log_overflow_deadlock()
     test_v103_pipelined_request_after_parked_response()
+    test_v104_fifo_does_not_wedge_worker()
+    test_v104_cached_stat_is_revalidated()
+    test_v104_head_error_has_no_body()
 
     print()
     if failures:

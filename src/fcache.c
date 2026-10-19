@@ -115,7 +115,21 @@ dx_fcache_entry_t *dx_fcache_get(dx_fcache_t *c, const char *path, uint64_t now_
         }
         return NULL;
     }
-    *st = e->st;
+    /*
+     * Re-stat instead of trusting the size captured when the entry was
+     * inserted. A file truncated in place keeps the same inode, so the cached
+     * st_size stops matching the bytes the descriptor will return: the server
+     * then advertises Content-Length: 1000 and sends 10, leaving the keep-alive
+     * stream 990 bytes short -- the next response is written into the middle of
+     * this body (a framing primitive a proxy can be tricked by). Reproduced
+     * against v1.0.3: second request on the same connection timed out after a
+     * truncated body. fstat() is cheap; the cache exists to skip openat2(), not
+     * to skip a stat.
+     */
+    if (fstat(e->fd, st) != 0) {
+        return NULL;
+    }
+    e->st = *st;
     e->refs++;
     return e;
 }

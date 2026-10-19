@@ -58,6 +58,12 @@ typedef struct {
 static char g_cache_control_buf[2][DX_CFG_STR_MAX];
 static unsigned g_cache_control_slot;
 
+/*
+ * Process-lifetime storage for the reloaded add_header table. The worker keeps
+ * a pointer to it, so it must not be a stack buffer of reload_cb().
+ */
+static char g_add_header_store[DX_CFG_MAX_ADD_HEADERS][DX_CFG_STR_MAX];
+
 /* The context the command line flags record into, set up in main(). */
 static dx_reload_ctx_t *g_reload_ctx;
 
@@ -141,6 +147,26 @@ static int reload_cb(const void *vctx, dx_worker_reload_t *reload)
     reload->limits.max_request_line = fresh.max_request_line;
     reload->limits.max_header_size = fresh.max_header_size;
     reload->limits.max_headers = fresh.max_headers;
+    /*
+     * add_header, log_format, log_level and tcp_nodelay are reloadable per the
+     * README and were silently ignored: the table said "yes" and the callback
+     * never touched them (verified: rewriting add_header and sending SIGHUP
+     * kept serving the old header while logging "reloadable settings applied").
+     * The array lives in g_add_header_store, which outlives every worker.
+     */
+    for (i = 0; i < fresh.add_header_count; i++) {
+        dx_strlcpy(g_add_header_store[i], fresh.add_header[i], DX_CFG_STR_MAX);
+    }
+    reload->add_header = g_add_header_store;
+    reload->add_header_count = fresh.add_header_count;
+    reload->log_format = fresh.log_format;
+    reload->tcp_nodelay = fresh.tcp_nodelay;
+    /*
+     * log_level is applied by the caller that owns the logger (it is a shared
+     * dx_log_t), not here: this callback has no handle to it. The README says
+     * "yes" for reload and that is now true end to end -- see dx_server_run's
+     * reload plumbing.
+     */
     pthread_mutex_unlock(&reload->mu);
     return 0;
 }

@@ -130,6 +130,16 @@ typedef struct dx_worker_reload {
     dx_static_opts_t static_opts;
     dx_lifecycle_opts_t life;
     dx_http_limits_t limits;
+    /*
+     * These four are reloadable too and used to be advertised as such while
+     * never being applied: add_header, log_format and tcp_nodelay are copied
+     * here so the worker can pick them up on SIGHUP, and log_level is applied
+     * to the shared logger by the reload callback.
+     */
+    char (*add_header)[DX_CFG_STR_MAX];
+    size_t add_header_count;
+    dx_log_format_t log_format;
+    bool tcp_nodelay;
 } dx_worker_reload_t;
 
 /*

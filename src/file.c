@@ -60,8 +60,16 @@ bool dx_fs_openat2_blocked(void)
     memset(&how, 0, sizeof(how));
     how.flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
     how.resolve = RESOLVE_BENEATH;
-    if (sys_openat2(AT_FDCWD, ".", &how, sizeof(how)) >= 0) {
-        return false; /* it actually works */
+    {
+        int fd = sys_openat2(AT_FDCWD, ".", &how, sizeof(how));
+
+        if (fd >= 0) {
+            /* The probe's own descriptor must be closed: it was leaked once per
+             * call (measured: 4 -> 9 after five calls), and it made the
+             * descriptor accounting drift by one for the process lifetime. */
+            (void)close(fd);
+            return false; /* it actually works */
+        }
     }
     return errno == EPERM;
 }
@@ -110,7 +118,17 @@ static int fs_open_beneath(dx_fs_t *fs, const char *rel_path, struct stat *st)
     int fd;
 
     memset(&how, 0, sizeof(how));
-    how.flags = O_RDONLY | O_CLOEXEC;
+    /*
+     * O_NONBLOCK is not about regular files (it is a no-op for them): it stops
+     * open() from blocking forever on a FIFO in the document root. A worker is
+     * a single-threaded event loop, so one blocking open() freezes every
+     * connection it owns -- and a FIFO is trivial to place in an upload
+     * directory, or to hard-link into the tree (RESOLVE_BENEATH cannot stop a
+     * hard link). Reproduced against v1.0.3: GET /pipe wedged the worker and
+     * the server stopped answering. The S_ISREG check happens after the open,
+     * so it could never run.
+     */
+    how.flags = O_RDONLY | O_CLOEXEC | O_NONBLOCK;
     how.resolve = RESOLVE_BENEATH;
     if (!fs->follow_symlinks) {
         how.resolve |= RESOLVE_NO_SYMLINKS;
@@ -163,8 +181,26 @@ static int fs_open_beneath(dx_fs_t *fs, const char *rel_path, struct stat *st)
             memcpy(segment, p, seg_len);
             segment[seg_len] = '\0';
 
-            /* O_NOFOLLOW in the fallback, always: see the comment above. */
-            next = openat(dir_fd, segment, O_RDONLY | O_CLOEXEC | (unsigned)O_NOFOLLOW);
+            /*
+             * The fallback must be as strict as RESOLVE_BENEATH, and it was
+             * not: ".." was passed straight to openat() and walked out of the
+             * root, and intermediate components were opened without
+             * O_DIRECTORY/O_NOFOLLOW, so a symlinked directory was followed.
+             * Reproduced on a build whose openat2() was forced to fail:
+             * dx_fs_open(fs, "../outside.txt") returned the outside file.
+             * Reject the dot segments here; the caller's normalisation is not
+             * this function's guarantee.
+             */
+            if (seg_len == 0u || strcmp(segment, ".") == 0 || strcmp(segment, "..") == 0) {
+                (void)close(dir_fd);
+                errno = EXDEV;
+                return -1;
+            }
+            /* O_NONBLOCK for the same FIFO reason as the primary path;
+             * O_DIRECTORY unless this is the final component. */
+            next = openat(dir_fd, segment,
+                          O_RDONLY | O_CLOEXEC | O_NONBLOCK | (unsigned)O_NOFOLLOW |
+                              ((*p == '\0' || slash == NULL) ? 0u : (unsigned)O_DIRECTORY));
             if (next < 0) {
                 int saved = errno;
 

@@ -238,11 +238,11 @@ size_t dx_http_response_headers(char *out, size_t cap, int status, const char *e
 
 size_t dx_http_response_error(char *out, size_t cap, int status, const char *extra_headers)
 {
-    return dx_http_response_error_ex(out, cap, status, extra_headers, "close", true);
+    return dx_http_response_error_ex(out, cap, status, extra_headers, "close", true, false);
 }
 
 size_t dx_http_response_error_ex(char *out, size_t cap, int status, const char *extra_headers,
-                                 const char *connection, bool server_tokens)
+                                 const char *connection, bool server_tokens, bool omit_body)
 {
     /*
      * Fixed body: the status and reason are server controlled, so no client
@@ -267,7 +267,7 @@ size_t dx_http_response_error_ex(char *out, size_t cap, int status, const char *
     }
 
     return response_assemble(out, cap, status, extra_headers, "text/html; charset=utf-8", body,
-                             b.len, false, true, connection, server_tokens);
+                             b.len, omit_body, true, connection, server_tokens);
 }
 
 dx_dispatch_t dx_http_dispatch_method(const dx_http_request_t *req, const unsigned char *base,

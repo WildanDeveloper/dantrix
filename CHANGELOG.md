@@ -12,6 +12,65 @@ releases.
 
 - (this section collects changes since the last release)
 
+## [1.0.4] - 2026-10-19
+
+The remaining high-severity findings from the v1.0.3 audit, plus the reload
+claims the documentation made and the code did not keep.
+
+### Fixed (high)
+
+- **A FIFO in the document root froze the worker forever.** `open()` with
+  `O_RDONLY` waits for a writer on a FIFO, and the `S_ISREG` rejection runs only
+  after `open()` returns, so one `GET /pipe` wedged a worker permanently -- and
+  a FIFO is trivial to place in an upload directory or to hard-link into the
+  tree (`RESOLVE_BENEATH` cannot stop a hard link). Reproduced against v1.0.3:
+  the request timed out and the server then stopped answering anything. The
+  open now carries `O_NONBLOCK`, which is a no-op for regular files.
+- **A cached descriptor reported a stale size.** The open-file cache stored
+  `struct stat` at insert time and never re-read it, so a file truncated in
+  place kept advertising the old `Content-Length`; the body ended early and the
+  keep-alive stream was left short (the next response lands inside the previous
+  body). Reproduced: `Content-Length: 1000` with 10 bytes sent, then a hang.
+  `dx_fcache_get()` now `fstat()`s the descriptor it is about to hand out.
+- **The `openat2` fallback walked out of the document root.** On a kernel
+  without `openat2` the per-segment walk passed `..` straight to `openat()` and
+  opened intermediate components without `O_DIRECTORY`/`O_NOFOLLOW`, so
+  `dx_fs_open(fs, "../outside.txt")` returned the outside file. Reproduced on a
+  build whose `openat2()` was forced to fail. Dot segments are rejected and
+  intermediates must be directories.
+- **`dx_fs_openat2_blocked()` leaked a descriptor** on every successful probe
+  (4 -> 9 after five calls), drifting the descriptor accounting by one for the
+  process lifetime.
+
+### Fixed (protocol and configuration)
+
+- **HEAD error responses carried a body.** Every error path goes through
+  `conn_finish_error()`, which built its own response and had no way to know the
+  method, so `HEAD /nope` sent 119 body bytes after `Content-Length: 119`
+  (RFC 9110 9.3.2 forbids content in a HEAD response). The connection now
+  remembers the method and the error builder honours it; verified HEAD sends 0
+  bytes and GET still sends 119.
+- **`connlimit_slots = 0` with `max_conns_per_ip > 0` silently disabled the
+  limit.** That combination is now a configuration error (exit 2) with a message
+  naming both keys, instead of a security control that quietly does nothing.
+- **Four keys marked reloadable were silently ignored on SIGHUP.** `add_header`,
+  `log_format`, `log_level` and `tcp_nodelay` were advertised as "yes" in the
+  README table and never applied -- the callback logged "reloadable settings
+  applied" while still serving the old header. `add_header`, `log_format` and
+  `tcp_nodelay` are now copied into the reload snapshot and applied; verified
+  that a SIGHUP swaps the header and switches the access log to JSON.
+  `directory_listing`, `follow_symlinks`, `default_type` and `status_path` are
+  baked into structures at start-up, so the table now says "no" for them rather
+  than promising a reload that cannot happen.
+
+### Added (tests)
+
+- `tests/regression_test.py`: the FIFO must be answered and the worker must keep
+  serving; a truncated file must report its new size (a hung read is reported as
+  the failure); a HEAD error must send no body while GET still does; a SIGHUP
+  must apply `add_header` and `log_format`. Each was proven able to fail by
+  reinstating the defect it covers.
+
 ## [1.0.3] - 2026-10-18
 
 Large-scale audit of every source file (23 C files, ~19k lines) by four

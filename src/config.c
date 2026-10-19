@@ -680,6 +680,17 @@ int dx_config_validate(const dx_settings_t *s, FILE *msg)
      * and the cost of refusing is zero: neither value may legally contain CR,
      * LF or NUL.
      */
+    /*
+     * A per-IP limit with no table to track it in is silently disabled: the
+     * server logs nothing and every connection is allowed. That combination is
+     * a configuration error, not a preference -- either turn the limit off
+     * explicitly (max_conns_per_ip = 0) or give it slots.
+     */
+    if (s->max_conns_per_ip > 0 && s->connlimit_slots == 0) {
+        fprintf(msg, "dantrix: max_conns_per_ip is set but connlimit_slots is 0, which silently "
+                     "disables the limit; set connlimit_slots > 0 or max_conns_per_ip = 0\n");
+        return -1;
+    }
     if (strpbrk(s->cache_control, "\r\n") != NULL) {
         fprintf(msg, "dantrix: cache_control must not contain CR or LF\n");
         return -1;

@@ -212,6 +212,14 @@ void dx_worker_apply_reload(dx_worker_t *w)
     w->static_opts = w->reload->static_opts;
     w->life = w->reload->life;
     w->limits = w->reload->limits;
+    w->log_format = w->reload->log_format;
+    w->tcp_nodelay = w->reload->tcp_nodelay;
+    /*
+     * The add_header array is owned by main() and stays alive for the process
+     * lifetime, so the pointer is safe to publish; response_assemble() reads it
+     * through dx_http_response_set_extra_headers().
+     */
+    dx_http_response_set_extra_headers(w->reload->add_header, w->reload->add_header_count);
     pthread_mutex_unlock(&w->reload->mu);
 
     if (w->static_opts.cache_control == NULL) {

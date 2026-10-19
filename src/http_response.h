@@ -72,7 +72,7 @@ size_t dx_http_response_headers(char *out, size_t cap, int status, const char *e
  * Connection value. Returns the number of bytes written, or 0 on overflow.
  */
 size_t dx_http_response_error_ex(char *out, size_t cap, int status, const char *extra_headers,
-                                 const char *connection, bool server_tokens);
+                                 const char *connection, bool server_tokens, bool omit_body);
 
 /*
  * Build the fixed minimal error page for status. The body never reflects any

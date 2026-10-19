@@ -119,7 +119,7 @@ The short version, so nothing has to be inferred from the tables below:
 
 | | |
 |---|---|
-| Current release | v1.0.3 (frozen; CI green on GCC and Clang with ASan/UBSan/TSan) |
+| Current release | v1.0.4 (frozen; CI green on GCC and Clang with ASan/UBSan/TSan) |
 | Milestones complete | **v0.1 through v0.8, all of them.** Both long runs (the 24-hour fuzz campaign and the 1-hour soak) are done, and the C10K criterion is met |
 | ✅ Just finished | **The 24-hour fuzz campaign**: 2,174,927,120 executions across three targets, zero crashes, zero artifacts. Both runs ended on their own timer. The campaign saturated early, so the number means "no random input breaks it", not "2 billion distinct scenarios" |
 | ✅ Just finished | **The 1-hour soak**: 3,601 s, 700,671 requests, RSS 2.4 -> 8.2 MiB once and then flat (fitted slope +1.64 MiB/h against a 4.00 budget), descriptors 217 -> 217 with zero growth, and the accounting gap constant. Verdict: no leak |
@@ -897,8 +897,8 @@ daemonize = false                # keep false under systemd and Docker: they nee
 |---|---|---|---|---|
 | `root` | path | `./public` | no | Document root. Must exist and be readable at start |
 | `index` | string | `index.html` | no | Name of the file served for directory requests |
-| `directory_listing` | bool | `false` | yes | Show the directory listing when there is no index (file names are HTML-escaped) |
-| `follow_symlinks` | bool | `false` | yes | `false`: symlinks are rejected. `true`: followed, but they must not escape from `root` |
+| `directory_listing` | bool | `false` | no | Show the directory listing when there is no index (file names are HTML-escaped) |
+| `follow_symlinks` | bool | `false` | no | `false`: symlinks are rejected. `true`: followed, but they must not escape from `root` |
 | `hidden_files` | bool | `false` | yes | `false`: paths with segments starting with a dot are answered with `404`, **except** `/.well-known/` |
 | `sendfile` | bool | `true` | yes | Use `sendfile()`; `false` uses `pread()` + `send()` |
 | `sendfile_chunk` | size | `1m` | yes | Max bytes per `sendfile()` call (maintains fairness between connections) |
@@ -909,7 +909,7 @@ daemonize = false                # keep false under systemd and Docker: they nee
 | `connlimit_slots` | size | `8192` | no | Size of the per-IP tracking table (shared by every worker). Raise it if you expect many distinct client addresses at once |
 | `seccomp` | bool | `false` | no | Install the seccomp-bpf allow list after start-up. See [Sandbox](#sandbox-seccomp-bpf) |
 | `mime_types` | path | empty | no | Additional file mapping extensions to MIME types (`mime.types` format) |
-| `default_type` | string | `application/octet-stream` | yes | MIME type for unknown extensions |
+| `default_type` | string | `application/octet-stream` | no | MIME type for unknown extensions |
 | `cache_control` | string | empty | yes | `Cache-Control` header value (not sent if empty) |
 | `server_tokens` | bool | `true` | yes | `true`: `Server: Dantrix/x.y.z`. `false`: `Server: Dantrix` |
 | `add_header` | string | empty | yes | Additional response header `Name: value`. May be repeated (up to 16). Rejected: a name the server already owns, and any CR or LF |
@@ -1008,7 +1008,7 @@ as a warning and the server continues without the sandbox.
 | `pid_file` | path | empty | no | Write the PID to this file |
 | `user` | string | empty | no | Drop to this user after `bind` (only if started as root) |
 | `group` | string | empty | no | Drop to this group after `bind` |
-| `status_path` | string | empty | yes | Path of the JSON status endpoint. Empty = disabled |
+| `status_path` | string | empty | no | Path of the JSON status endpoint. Empty = disabled |
 
 **Validation rules**
 

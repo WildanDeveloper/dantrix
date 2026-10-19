@@ -86,6 +86,7 @@ typedef struct {
     uint64_t id;         /* stable ordinal for logging, never reused */
     dx_conn_state_t state;
     bool eof;               /* peer sent FIN: finish the reply, then close */
+    bool head_request;      /* current request is HEAD: send headers only */
     bool close_conn;        /* close once the current response has been fully sent */
     bool response_pending;  /* response bytes sit in buf and are not all sent */
     dx_buffer_t buf;        /* request bytes, then the response headers */
